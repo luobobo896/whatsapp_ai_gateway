@@ -23,7 +23,9 @@ DEFAULTS = {
     "network_cidr": "10.168.0.0/16",
     "gateway_ipv4": "10.168.1.2",
     "mtu": 1380,
-    "tun": False,  # True 需要 root（创建 TUN 绑定虚 IP）；False 无 TUN 纯转发，普通用户可运行
+    # 节点必须有虚 IP（ipv4 非空）才能像 wa-ios-node 一样在 peer 列表完整显示；
+    # macOS 上 ipv4 非空即创建 TUN，需 root 运行（sudo 免密由 scripts/setup-easytier-sudo.sh 配置一次）。
+    "sudo": True,
 }
 
 
@@ -54,7 +56,8 @@ class EasyTierManager:
         os.chmod(CONFIG_PATH, 0o600)
 
     def configured(self) -> bool:
-        return bool(self.config.get("network_secret")) and bool(self.config.get("relay_host"))
+        return bool(self.config.get("network_secret")) and bool(self.config.get("relay_host")) \
+            and bool(self.config.get("gateway_ipv4"))
 
     def public_config(self) -> dict:
         """脱敏配置（secret 只暴露是否已设置），供页面展示/编辑。"""
@@ -75,59 +78,93 @@ class EasyTierManager:
         return self.start()
 
     # ---------- 生成配置 / 启停 ----------
+    def _proxy_networks(self) -> list[str]:
+        """导出手机局域网网段（proxy_network）：让 mesh 内其他节点可经网关访问手机 WDA。"""
+        out = []
+        for d in _config.config.devices:
+            ip = d.get("ip") or ""
+            if ip and "." in ip:
+                cidr = ".".join(ip.split(".")[:3]) + ".0/24"
+                if cidr not in out:
+                    out.append(cidr)
+        return out
+
     def write_toml(self) -> None:
         c = self.config
         instance = _config.config.cloud.get("gateway_name") or socket.gethostname()
-        use_tun = bool(c.get("tun")) and bool(c.get("gateway_ipv4"))
-        if use_tun:
-            ipv4 = c["gateway_ipv4"]
+        ipv4 = c.get("gateway_ipv4", "")
+        if "/" not in ipv4:
             prefix = str(c.get("network_cidr", "10.168.0.0/16")).split("/")[-1]
-            ipv4_line = f'ipv4 = "{ipv4}/{prefix}"'
-            bind_device = "true"
-        else:
-            ipv4_line = 'ipv4 = ""'  # 空 ipv4：不创建 TUN，普通用户可运行（纯转发节点）
-            bind_device = "false"
-        toml = f'''instance_name = "{instance}"
-hostname = "{instance}"
-{ipv4_line}
-dhcp = false
-rpc_portal = "{RPC_PORTAL}"
-
-[network_identity]
-network_name = "{c.get('network_name', 'wa-ios')}"
-network_secret = "{c.get('network_secret', '')}"
-
-[flags]
-enable_ipv6 = false
-use_smoltcp = true
-bind_device = {bind_device}
-mtu = {int(c.get('mtu', 1380))}
-
-[[peer]]
-uri = "tcp://{c.get('relay_host', '')}:{int(c.get('relay_port', 11010))}"
-'''
+            ipv4 = f"{ipv4}/{prefix}" if ipv4 else ""
+        relay_port = int(c.get("relay_port", 11010))
+        lines = [
+            "# EasyTier 节点配置（平台 easytier:config 动态下发）",
+            f'hostname = "{instance}"',
+            f'instance_name = "{instance}"',
+            f'ipv4 = "{ipv4}"',
+            "dhcp = false",
+            "",
+            f'listeners = ["udp://0.0.0.0:{relay_port}", "tcp://0.0.0.0:{relay_port}", "wg://0.0.0.0:{relay_port + 1}"]',
+            'rpc_portal = "127.0.0.1:15888"',
+            "",
+            "[network_identity]",
+            f'network_name = "{c.get("network_name", "wa-ios")}"',
+            f'network_secret = "{c.get("network_secret", "")}"',
+            "",
+            "[[peer]]",
+            f'uri = "udp://{c.get("relay_host", "")}:{relay_port}"',
+        ]
+        for cidr in self._proxy_networks():
+            lines += ["", "[[proxy_network]]", f'cidr = "{cidr}"']
+        lines += [
+            "",
+            "[flags]",
+            "relay_all_peer_rpc = true",
+            "latency_first = true",
+            'default_protocol = "udp"',
+            "enable_kcp_proxy = true",
+            "enable_quic_proxy = true",
+            'compression = "zstd"',
+            f'mtu = {int(c.get("mtu", 1380))}',
+            "multi_thread = true",
+            "bind_device = true",
+        ]
         TOML_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOML_PATH.write_text(toml)
+        TOML_PATH.write_text("\n".join(lines) + "\n")
         os.chmod(TOML_PATH, 0o600)
 
     def running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def _cmd(self) -> list[str]:
+        """构建启动命令：ipv4 非空需 root 建 TUN；当前非 root 时经 sudo -n 提升（一次性授权见 setup 脚本）。"""
+        base = [str(CORE_BIN), "--config-file", str(TOML_PATH), "--disable-env-parsing"]
+        if os.geteuid() == 0:
+            return base
+        return ["sudo", "-n"] + base
+
+    def _sudo_ok(self) -> bool:
+        # sudoers 只放行 easytier-core 单命令，验证该命令本身（sudo -n true 会被要求密码）
+        try:
+            return subprocess.run(["sudo", "-n", str(CORE_BIN), "--version"],
+                                  capture_output=True, timeout=8).returncode == 0
+        except Exception:
+            return False
+
     def start(self) -> bool:
         if self.running():
             return True
         if not self.configured():
-            raise RuntimeError("easytier 配置未就绪（缺 network_secret 或 relay_host）")
+            raise RuntimeError("easytier 配置未就绪（缺 network_secret 或 gateway_ipv4）")
         if not CORE_BIN.exists():
             raise RuntimeError(f"easytier-core 不存在：{CORE_BIN}")
+        if os.geteuid() != 0 and not self._sudo_ok():
+            raise RuntimeError("网关节点需要有虚 IP（TUN 需 root）；请先运行一次：sudo sh scripts/setup-easytier-sudo.sh")
         self.write_toml()
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         logf = open(LOG_PATH, "ab")
-        self.process = subprocess.Popen(
-            [str(CORE_BIN), "--config-file", str(TOML_PATH), "--disable-env-parsing"],
-            stdout=logf, stderr=subprocess.STDOUT,
-        )
-        for _ in range(20):
+        self.process = subprocess.Popen(self._cmd(), stdout=logf, stderr=subprocess.STDOUT)
+        for _ in range(25):
             if self.process.poll() is not None:
                 raise RuntimeError("easytier-core 进程退出（见 /tmp/easytier-gateway.log）")
             if self._cli_ok():
@@ -137,14 +174,23 @@ uri = "tcp://{c.get('relay_host', '')}:{int(c.get('relay_port', 11010))}"
 
     def stop(self) -> bool:
         p, self.process = self.process, None
-        if p is None:
-            return False
+        stopped = False
+        if p is not None:
+            try:
+                p.send_signal(signal.SIGINT)
+                p.wait(timeout=8)
+                stopped = True
+            except subprocess.TimeoutExpired:
+                p.kill()
+                stopped = True
+        # 网关重启后遗留的 root 进程（process=None 但 easytier-core 在跑）
         try:
-            p.send_signal(signal.SIGINT)
-            p.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            p.kill()
-        return True
+            subprocess.run(["sudo", "-n", "pkill", "-f", f"easytier-core --config-file {TOML_PATH}"],
+                           capture_output=True, timeout=8)
+            stopped = True
+        except Exception:
+            pass
+        return stopped
 
     def restart(self) -> bool:
         self.stop()
@@ -156,7 +202,7 @@ uri = "tcp://{c.get('relay_host', '')}:{int(c.get('relay_port', 11010))}"
         if self.configured():
             try:
                 subprocess.run(
-                    ["pkill", "-f", f"easytier-core --config-file {TOML_PATH}"],
+                    ["sudo", "-n", "pkill", "-f", f"easytier-core --config-file {TOML_PATH}"],
                     capture_output=True, text=True, timeout=5,
                 )
             except Exception:
@@ -193,16 +239,14 @@ uri = "tcp://{c.get('relay_host', '')}:{int(c.get('relay_port', 11010))}"
             return None
 
     def peers(self) -> list[dict]:
-        """远端 peer 列表（过滤本机行 cost=Local——本机无虚 IP/延迟，展示只会是残缺行）。
-        只保留远端节点，保证每行 hostname/ipv4/cost/lat/nat/version 数据完整。"""
+        """peer 列表（含本机 cost=Local 行——本机有虚 IP 后该行数据完整）。
+        修复：节点以 root 运行（ipv4 非空建 TUN），本机行 ipv4/nat/version 完整，不再隐藏。"""
         try:
             r = self._cli(["-o", "json", "peer", "list"])
             if r.returncode != 0:
                 return []
             data = json.loads(r.stdout)
-            if not isinstance(data, list):
-                return []
-            return [p for p in data if p.get("cost") != "Local"]
+            return data if isinstance(data, list) else []
         except Exception:
             return []
 

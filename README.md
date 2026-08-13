@@ -106,6 +106,12 @@ cd gateway
   install -m 0700 /tmp/et/easytier-macos-aarch64/easytier-cli tools/easytier/easytier-cli
   ```
 - 查询复用 easytier RPC 门户（`easytier-cli -p 127.0.0.1:15888`），与平台 `internal/easytierrpc` 同源语义。
+- **虚 IP 由平台动态下发**：平台「组网」页下发 easytier:config 时为网关自动分配虚 IP（10.168.1.0/24，
+  固定复用），网关据此以 root 运行 easytier-core（bind_device=true 建 TUN），节点在 mesh 内
+  拥有完整虚 IP，peer 列表本机行完整显示（hostname/ipv4/cost/lat/nat/version）。
+- **root 一次性授权**：macOS 上 ipv4 非空即创建 TUN，需要 root；执行一次
+  `sudo sh scripts/setup-easytier-sudo.sh`（首次输密码），为当前用户放行免密运行 easytier-core
+  与 `pkill -f easytier-core*`（最小权限，仅这两个命令）。
 - 本地 REST：`GET /api/easytier/status`（运行/节点/peers）、`GET /api/easytier/config`（脱敏）、
   `PUT /api/easytier/config`（编辑）、`POST /api/easytier/action {start|stop|restart}`。
 - Web 页底部「组网（easytier 后备通道）」区块可查看配置/状态/peer 并启停。
