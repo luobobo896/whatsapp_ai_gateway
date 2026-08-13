@@ -17,6 +17,7 @@ class WDAManager:
 
     def __init__(self):
         self.processes: dict[str, subprocess.Popen] = {}   # udid -> xcodebuild 进程
+        self.started_at: dict[str, float] = {}             # udid -> 进程启动时间（区分「启动中」与「异常」）
         self._xctestrun: str | None = None
 
     # ---------- 构建一次，产物复用 ----------
@@ -65,10 +66,12 @@ class WDAManager:
         log = pathlib.Path("/tmp") / f"wda-{udid[:8]}.log"
         p = subprocess.Popen(cmd, env=env, stdout=log.open("ab"), stderr=subprocess.STDOUT)
         self.processes[udid] = p
+        self.started_at[udid] = time.time()
         return True
 
     def stop(self, udid: str) -> bool:
         p = self.processes.pop(udid, None)
+        self.started_at.pop(udid, None)
         if p is None:
             return False
         p.send_signal(signal.SIGINT)
@@ -98,6 +101,13 @@ class WDAManager:
     def running(self, udid: str) -> bool:
         p = self.processes.get(udid)
         return p is not None and p.poll() is None
+
+    def started_seconds_ago(self, udid: str) -> float | None:
+        """进程已启动秒数（无进程返回 None），用于区分「启动中」与「异常」。"""
+        t = self.started_at.get(udid)
+        if t is None or not self.running(udid):
+            return None
+        return time.time() - t
 
 
 # ---------- WhatsApp 发送（移植自平台 internal/wda/whatsapp.go）----------

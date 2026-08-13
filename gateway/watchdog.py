@@ -5,6 +5,9 @@ from .wda import manager as wda
 
 log = logging.getLogger("watchdog")
 
+# WDA 启动宽限期：进程启动后这段时间内健康未就绪视为「启动中」，超过才判定「异常」。
+WDA_START_GRACE = 90  # 秒
+
 
 async def loop(stop: asyncio.Event):
     """后台循环：逐台健康检查，不通且未在激活则自动重新激活；健康状态变化通过 device:status 上报平台。"""
@@ -21,6 +24,12 @@ async def loop(stop: asyncio.Event):
             except Exception:
                 h = {"ok": False}
             prev_ok = (dev.get("last_health") or {}).get("ok")
+            # 启动宽限期：WDA 进程刚启动、健康还没就绪时标 starting（页面显示「启动中」而非「异常」）
+            h["starting"] = False
+            if not h.get("ok") and wda.running(udid):
+                secs = wda.started_seconds_ago(udid)
+                if secs is not None and secs < WDA_START_GRACE:
+                    h["starting"] = True
             dev["last_health"] = h
             if h.get("ios_version"):
                 dev["ios_version"] = h["ios_version"]
