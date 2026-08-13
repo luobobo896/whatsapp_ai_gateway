@@ -259,6 +259,8 @@
       <div class="stat"><span class="k">设备在线</span><span class="v"><span class="dot" id="stOnlineDot"></span><span id="stOnline">0</span></span></div>
       <div class="stat"><span class="k">正在执行</span><span class="v"><span class="dot" id="stBusyDot"></span><span id="stBusy">0</span></span></div>
       <div class="stat"><span class="k">待处理任务</span><span class="v"><span id="stPending">0</span></span></div>
+      <div class="stat"><span class="k">今日发送成功</span><span class="v"><span id="stSentOk" style="color:var(--green)">0</span></span></div>
+      <div class="stat"><span class="k">今日发送失败</span><span class="v"><span id="stSentFail" style="color:var(--red)">0</span></span></div>
     </div>
     <div class="section-head">
       <h3>设备</h3>
@@ -496,7 +498,17 @@ async function refreshDevices(){
   catch(e){ toast('设备列表读取失败'); return; }
   renderDevices(devicesCache);
 }
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt()]); }
+/* ---------- 统计聚合（落盘 metrics） ---------- */
+async function loadMetrics(){
+  try{
+    const r = await fetch('/api/metrics');
+    const m = await r.json();
+    $('stSentOk').textContent = m.today?.sent_ok ?? 0;
+    $('stSentFail').textContent = m.today?.sent_fail ?? 0;
+  }catch(e){ /* 统计读取失败不打断其他刷新 */ }
+}
+
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics()]); }
 async function act(udid){
   // 乐观更新：点击立即显示「启动中」，不显示成功；后端等 WDA 真正就绪后才返回 activated
   optimisticAct[udid] = Date.now();

@@ -80,6 +80,10 @@ type Executor struct {
 
 	metricsMu sync.Mutex
 	metrics   map[string]Metrics
+	// 落盘聚合（重启不丢统计，跨天自动归档到 history）：
+	metricsDay     string
+	metricsHistory map[string]Metrics
+	now            func() time.Time // 测试可注入
 }
 
 // Metrics 网关本地发送统计。
@@ -91,18 +95,137 @@ type Metrics struct {
 	LastTime float64 `json:"last_time"`
 }
 
-// NewExecutor 构造执行器。
+// metricsFileState 是 metrics.json 的落盘结构：当天分设备计数 + 历史按天聚合。
+type metricsFileState struct {
+	Day     string             `json:"day"`
+	Devices map[string]Metrics `json:"devices"`
+	History map[string]Metrics `json:"history"`
+}
+
+// MetricsSummary 是 /api/metrics 的聚合视图（网关级：今日汇总 + 分设备 + 历史按天）。
+type MetricsSummary struct {
+	Day     string             `json:"day"`
+	Today   Metrics            `json:"today"`
+	Devices map[string]Metrics `json:"devices"`
+	History []MetricsHistory   `json:"history"`
+}
+
+// MetricsHistory 历史某天的聚合发送统计。
+type MetricsHistory struct {
+	Day      string `json:"day"`
+	SentOK   int    `json:"sent_ok"`
+	SentFail int    `json:"sent_fail"`
+	Total    int    `json:"total"`
+}
+
+// NewExecutor 构造执行器并加载历史统计（metrics.json，重启不丢）。
 func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir string) *Executor {
-	return &Executor{
+	e := &Executor{
 		cfg: cfg, wda: wdaMgr, llm: llm, resultsDir: resultsDir,
-		queues:  map[string]chan TaskDispatch{},
-		workers: map[string]bool{},
-		cancel:  map[string]chan struct{}{},
-		busy:    map[string]bool{},
-		ReportQ: make(chan ItemResult, 256),
-		StatusQ: make(chan DeviceStatus, 256),
-		metrics: map[string]Metrics{},
+		queues:         map[string]chan TaskDispatch{},
+		workers:        map[string]bool{},
+		cancel:         map[string]chan struct{}{},
+		busy:           map[string]bool{},
+		ReportQ:        make(chan ItemResult, 256),
+		StatusQ:        make(chan DeviceStatus, 256),
+		metrics:        map[string]Metrics{},
+		metricsHistory: map[string]Metrics{},
+		now:            time.Now,
 	}
+	e.loadMetrics()
+	return e
+}
+
+// ---- 统计落盘聚合 ----
+
+func (e *Executor) metricsFilePath() string {
+	return filepath.Join(e.resultsDir, "metrics.json")
+}
+
+// loadMetrics 读入历史统计。落盘数据标注的日期保持原样（跨天归档由下次
+// recordMetric 惰性完成），避免启动时刻与数据日期不一致时误归档。
+func (e *Executor) loadMetrics() {
+	b, err := os.ReadFile(e.metricsFilePath())
+	if err != nil {
+		return
+	}
+	var f metricsFileState
+	if json.Unmarshal(b, &f) != nil {
+		slog.Warn("metrics file corrupted, ignoring", "path", e.metricsFilePath())
+		return
+	}
+	if f.History != nil {
+		e.metricsHistory = f.History
+	}
+	if f.Devices != nil {
+		e.metrics = f.Devices
+	}
+	if f.Day == "" {
+		f.Day = e.today() // 旧格式/首写：当前数据视为今天
+	}
+	e.metricsDay = f.Day
+}
+
+func (e *Executor) today() string {
+	return e.now().Format("2006-01-02")
+}
+
+// foldDayLocked 把当天分设备计数折入 history（需已持有 metricsMu）。
+func (e *Executor) foldDayLocked(day string) {
+	if day == "" {
+		return
+	}
+	agg := e.metricsHistory[day]
+	for _, m := range e.metrics {
+		agg.SentOK += m.SentOK
+		agg.SentFail += m.SentFail
+		agg.Total += m.Total
+		if m.LastTime > agg.LastTime {
+			agg.LastTime = m.LastTime
+		}
+	}
+	e.metricsHistory[day] = agg
+	e.metrics = map[string]Metrics{}
+}
+
+// persistMetricsLocked 原子写盘（tmp+rename），失败仅告警不影响发送。
+func (e *Executor) persistMetricsLocked() {
+	if err := os.MkdirAll(e.resultsDir, 0o755); err != nil {
+		return
+	}
+	f := metricsFileState{Day: e.metricsDay, Devices: e.metrics, History: e.metricsHistory}
+	b, err := json.Marshal(f)
+	if err != nil {
+		return
+	}
+	p := e.metricsFilePath()
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) != nil || os.Rename(tmp, p) != nil {
+		slog.Warn("metrics persist failed", "path", p)
+	}
+}
+
+// MetricsSummary 返回网关级聚合视图：今日汇总 + 分设备 + 历史按天（倒序）。
+func (e *Executor) MetricsSummary() MetricsSummary {
+	e.metricsMu.Lock()
+	defer e.metricsMu.Unlock()
+	today := Metrics{}
+	devices := map[string]Metrics{}
+	for udid, m := range e.metrics {
+		today.SentOK += m.SentOK
+		today.SentFail += m.SentFail
+		today.Total += m.Total
+		if m.LastTime > today.LastTime {
+			today.LastTime = m.LastTime
+		}
+		devices[udid] = m
+	}
+	history := make([]MetricsHistory, 0, len(e.metricsHistory))
+	for day, m := range e.metricsHistory {
+		history = append(history, MetricsHistory{Day: day, SentOK: m.SentOK, SentFail: m.SentFail, Total: m.Total})
+	}
+	sort.Slice(history, func(i, j int) bool { return history[i].Day > history[j].Day })
+	return MetricsSummary{Day: e.metricsDay, Today: today, Devices: devices, History: history}
 }
 
 // Submit 收到 task:dispatch：入队（同一 task 重复下发幂等）。
@@ -173,6 +296,14 @@ func (e *Executor) Metrics(udid string) Metrics {
 func (e *Executor) recordMetric(udid, taskID, status string) {
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
+	// 跨天：先把昨天分设备计数折入 history，再重置当天计数。
+	today := e.today()
+	if e.metricsDay != "" && e.metricsDay != today {
+		e.foldDayLocked(e.metricsDay)
+	}
+	if e.metricsDay != today {
+		e.metricsDay = today
+	}
 	m := e.metrics[udid]
 	if status == "sent" {
 		m.SentOK++
@@ -183,8 +314,9 @@ func (e *Executor) recordMetric(udid, taskID, status string) {
 	if taskID != "" {
 		m.BatchID = taskID
 	}
-	m.LastTime = float64(time.Now().Unix())
+	m.LastTime = float64(e.now().Unix())
 	e.metrics[udid] = m
+	e.persistMetricsLocked()
 }
 
 func (e *Executor) runUDID(udid string) {

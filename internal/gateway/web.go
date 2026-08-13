@@ -41,6 +41,15 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		writeJSON(w, g.deviceList())
 	})
 
+	// /api/metrics 网关级发送统计聚合（今日汇总 + 分设备 + 历史按天，落盘持久化）。
+	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, g.Exec.MetricsSummary())
+	})
+
 	mux.HandleFunc("/api/easytier/status", func(w http.ResponseWriter, r *http.Request) {
 		if g.EasyTier == nil {
 			writeJSON(w, map[string]any{"running": false, "configured": false, "peers": []any{}, "error": "", "node": nil})
@@ -169,6 +178,8 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			writeJSON(w, g.Exec.Metrics(udid))
 		case "metrics":
 			writeJSON(w, g.Exec.Metrics(udid))
+		case "summary":
+			writeJSON(w, g.Exec.MetricsSummary())
 		default:
 			http.NotFound(w, r)
 		}
