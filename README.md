@@ -92,6 +92,24 @@ cd gateway
 - 激活用 `USE_PORT` 指定端口（默认 8100）；多台走各自 IP 时无需改端口。
 - easytier 为可选后备能力、默认关闭：仅当平台下发 `easytier:config`（v1 默认不启用）时按需集成。
 
+## 新 Mac 一键安装
+
+```bash
+sudo sh scripts/install.sh   # 安装 easytier 二进制 + 权限组授权（sudoers），首次执行输一次密码
+cd gateway && ./run.sh       # 启动网关（Web http://localhost:8300）
+```
+
+`scripts/install.sh` 幂等，做四件事：
+1. 安装 `tools/easytier/easytier-core|cli`（v2.6.4 macOS aarch64，缺省自动下载，记录 sha256）
+2. 创建权限组 `wda-gateway` 并把当前用户加入组
+3. 写 sudoers：`%wda-gateway` 组规则（长期管理）+ 当前用户规则（当前会话立即生效，
+   规避 macOS 组缓存需重登的问题）；新增网关用户只需
+   `sudo dscl . -append /Groups/wda-gateway GroupMembership <用户名>`
+4. 验证免密：`sudo -n easytier-core --version`
+
+授权（开启虚拟网卡 TUN 所需 root）仅在首次安装时配置一次，之后 Web 启动 / 平台下发
+easytier:config 触发的重启均 `sudo -n` 免密，不再弹窗。
+
 ## easytier 后备通道（可选，默认关闭）
 
 平台「组网」页可向在线网关下发 `easytier:config`（WSS 下行）；网关收到后保存配置并启动本机
