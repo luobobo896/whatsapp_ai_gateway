@@ -20,6 +20,8 @@ type TaskItem struct {
 	ItemID string `json:"item_id"`
 	Phone  string `json:"phone"`
 	Seq    int    `json:"seq"`
+	// Content 是该条的最终渲染内容（平台模板变量逐条渲染下发）；空则沿用任务级 Content。
+	Content string `json:"content,omitempty"`
 }
 
 // TaskDispatch 平台下发的 task:dispatch。
@@ -269,11 +271,16 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		if assist != nil && assist.Model == "" {
 			assist = nil
 		}
+		// 模板变量：明细有逐条渲染内容时优先使用（兼容旧平台任务）。
+		content := t.Content
+		if it.Content != "" {
+			content = it.Content
+		}
 		var serr error
 		if assist == nil {
-			serr = wda.SendMessageToPhone(context.Background(), client, it.Phone, t.Content)
+			serr = wda.SendMessageToPhone(context.Background(), client, it.Phone, content)
 		} else {
-			serr = wda.SendMessageWithAssist(context.Background(), client, it.Phone, t.Content, assist)
+			serr = wda.SendMessageWithAssist(context.Background(), client, it.Phone, content, assist)
 		}
 		if serr != nil {
 			status, errMsg = "failed", serr.Error()
