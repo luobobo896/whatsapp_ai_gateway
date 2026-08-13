@@ -376,23 +376,38 @@ function deviceState(d){
   return {cls:'off', txt:'离线'};
 }
 function deviceCard(d){
-  const st = deviceState(d);
   const h = d.last_health || {};
   const m = d.metrics || {};
   const running = !!d.wda_running;
-  const name = esc(d.name || '未命名设备');
+  const healthy = !!h.ok;
+  const name = esc(d.name || d.model || '未命名设备');
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
   const ip = esc(d.ip || '未设置 IP');
-  const healthCls = h.ok ? 'color:var(--green)' : (h.error ? 'color:var(--red)' : 'color:var(--text-2)');
-  const healthTxt = h.ok ? 'WDA 健康' : (h.error ? 'WDA 异常' : 'WDA 未探测');
-  // 激活后不再显示「激活」；只有未运行才显示「激活」，运行/忙碌才显示「停止」
+  // 统一状态：忙碌 > 未激活 > 在线 > 异常（进程在跑但健康检查失败/未就绪）
+  let st;
+  if (d.busy) st = { cls: 'busy', txt: '忙碌' };
+  else if (!running) st = { cls: 'off', txt: '未激活' };
+  else if (healthy) st = { cls: 'on', txt: '在线' };
+  else st = { cls: 'err', txt: '异常' };
+  // WDA 徽标（与状态一致，避免「已激活」+「异常」并存）
+  let wdaBadge;
+  if (!running) wdaBadge = '<span class="tag">WDA 未激活</span>';
+  else if (healthy) wdaBadge = '<span class="tag" style="color:var(--green)">WDA 运行中</span>';
+  else wdaBadge = '<span class="tag" style="color:var(--orange)">WDA 启动中/异常</span>';
+  // 健康文本（未激活优先，避免「未激活」与「异常」并存）
+  let healthCls, healthTxt;
+  if (!running) { healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活'; }
+  else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
+  else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
+  else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
+  // 按钮：未激活才显示「激活」；运行/忙碌显示「停止」
   let actions = '';
-  if(!running && !d.busy){
-    actions += `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
-  } else if(running || d.busy){
-    actions += `<button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>`;
+  if (!running && !d.busy) {
+    actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
+  } else if (running || d.busy) {
+    actions = `<button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>`;
   }
   return `
     <div class="device">
@@ -404,7 +419,7 @@ function deviceCard(d){
           <span class="name">${name}</span>
           <span class="tag">${model}</span>
           ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
-          ${running ? '<span class="tag" style="color:var(--green)">WDA 已激活</span>' : ''}
+          ${wdaBadge}
         </div>
         <div class="device-meta">
           <span>${udid}</span><span class="sep">·</span>
