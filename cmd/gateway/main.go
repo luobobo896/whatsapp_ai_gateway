@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"wda-farm-gateway/internal/gateway"
@@ -56,7 +58,9 @@ func main() {
 	et := gateway.NewEasyTierManager(filepath.Dir(cfgPath), cfg)
 	gw := gateway.New(cfg, wdaMgr, exec, llm, et)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// 优雅停机：收到信号后先取消上下文——云会话会正常发送关闭帧再退出，
+	// 平台侧立即释放会话，避免重启期间旧连接残留导致新连接被拒/告警。
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	// easytier 后备通道自愈：按最新配置恢复（若已配置）。
 	if et.Configured() {
@@ -66,9 +70,19 @@ func main() {
 	go gw.CloudLoop(ctx)
 
 	srv := &http.Server{Addr: *listen, Handler: gw.Handler(static), ReadHeaderTimeout: 10 * time.Second}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
 	slog.Info("gateway listening", "addr", *listen, "project", *projectRoot)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("serve", "error", err)
-		os.Exit(1)
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			slog.Error("serve", "error", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		slog.Info("shutdown signal received, closing cloud session and http server")
+		shCtx, shCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer shCancel()
+		_ = srv.Shutdown(shCtx)
 	}
 }

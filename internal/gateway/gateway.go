@@ -17,6 +17,7 @@ type Gateway struct {
 	connected   atomic.Bool
 	connectedAt atomic.Value // string
 	lastError   atomic.Value // string
+	errAction   atomic.Bool  // lastError 是否需要人工干预（凭证类）
 
 	identMu    sync.Mutex
 	tenantID   string
@@ -63,8 +64,12 @@ func (g *Gateway) Identity() (tenantID, tenantName, userEmail, userName string) 
 	return g.tenantID, g.tenantName, g.userEmail, g.userName
 }
 
-// SetLastError 记录最近一次云错误。
-func (g *Gateway) SetLastError(s string) { g.lastError.Store(s) }
+// SetLastError 记录最近一次云错误；actionable 表示需要人工干预（如凭证失效），
+// 瞬时错误（平台重启/网络抖动，网关会自动恢复）传 false。
+func (g *Gateway) SetLastError(s string, actionable bool) {
+	g.lastError.Store(s)
+	g.errAction.Store(actionable)
+}
 
 // LastError 最近一次云错误。
 func (g *Gateway) LastError() string {
@@ -73,3 +78,6 @@ func (g *Gateway) LastError() string {
 	}
 	return ""
 }
+
+// LastErrorActionable 最近一次云错误是否需要人工干预。
+func (g *Gateway) LastErrorActionable() bool { return g.errAction.Load() }

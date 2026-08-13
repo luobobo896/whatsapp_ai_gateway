@@ -111,7 +111,12 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 			text := describeCloudError(err)
 			slog.Warn("cloud session ended", "error", text,
 				"duration", time.Since(start).Round(time.Second).String())
-			g.SetLastError(text)
+			// 只有凭证类错误需要人工干预；瞬时错误（平台重启/网络抖动）网关会自动重试恢复。
+			actionable := websocket.CloseStatus(err) == 4005 || websocket.CloseStatus(err) == 4001
+			if code, ok := dialStatus(err); ok && (code == http.StatusUnauthorized || code == http.StatusForbidden) {
+				actionable = true
+			}
+			g.SetLastError(text, actionable)
 			if websocket.CloseStatus(err) == 4005 {
 				revoked = true
 			}
@@ -149,7 +154,7 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	g.SetConnected(true)
-	g.SetLastError("") // 连接成功即清掉上一次的旧错误，避免 UI 一直展示历史告警
+	g.SetLastError("", false) // 连接成功即清掉上一次的旧错误，避免 UI 一直展示历史告警
 	slog.Info("cloud connected", "url", url, "gateway", name)
 
 	// 会话级上下文：会话结束时取消，让写入泵及时退出，避免向已关闭连接写入。

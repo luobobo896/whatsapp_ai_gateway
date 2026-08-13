@@ -28,7 +28,8 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			"connected": g.Connected(), "connected_at": g.ConnectedAt(),
 			"ws_url": g.Cfg.Cloud.WSURL, "gateway_name": g.Cfg.Cloud.GatewayName,
 			"token_configured": g.Cfg.Cloud.Token != "", "last_error": g.LastError(),
-			"tenant_id": tid, "tenant_name": tname, "user_email": uemail, "user_name": uname,
+			"last_error_actionable": g.LastErrorActionable(),
+			"tenant_id":             tid, "tenant_name": tname, "user_email": uemail, "user_name": uname,
 			"executor": g.Exec.Status(),
 		})
 	})
