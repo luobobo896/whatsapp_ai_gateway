@@ -9,6 +9,27 @@ log = logging.getLogger("watchdog")
 WDA_START_GRACE = 90  # 秒
 
 
+async def _auto_assign_ip() -> None:
+    """对「已激活但未配置 IP」的设备自动探测局域网 WDA 并写入配置（无需手动设 IP）。
+    候选 = 扫描到的 WDA IP - 已配置设备的 IP；恰好一个时自动分配，多台时保持待设置。"""
+    from .devices import discover, scan_lan_wda
+    cfg = _config.config
+    configured = {d["udid"]: d for d in cfg.devices}
+    known_ips = {d.get("ip") for d in cfg.devices if d.get("ip")}
+    pending = [d for d in discover()
+               if d["udid"] not in configured and wda.running(d["udid"])]
+    if not pending:
+        return
+    found = scan_lan_wda()
+    candidates = [r for r in found if r["ip"] not in known_ips and r["ip"] != "127.0.0.1"]
+    if len(pending) == 1 and len(candidates) == 1:
+        udid = pending[0]["udid"]
+        ip = candidates[0]["ip"]
+        cfg.devices.append({"udid": udid, "ip": ip, "port": 8100, "auto_reactivate": True})
+        cfg.save()
+        log.info("auto-assigned WDA IP %s to device %s", ip, udid[:8])
+
+
 async def loop(stop: asyncio.Event):
     """后台循环：逐台健康检查，不通且未在激活则自动重新激活；健康状态变化通过 device:status 上报平台。"""
     while not stop.is_set():
@@ -47,6 +68,11 @@ async def loop(stop: asyncio.Event):
                     wda.activate(udid, port=port, reported_udid=udid)
                 except Exception as e:
                     log.error("reactivate %s failed: %s", udid[:8], e)
+        # 已激活但未配置 IP 的设备：自动探测局域网 IP（无需手动设 IP）
+        try:
+            await _auto_assign_ip()
+        except Exception as e:
+            log.warning("auto assign ip failed: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=cfg.health_interval)
         except asyncio.TimeoutError:
