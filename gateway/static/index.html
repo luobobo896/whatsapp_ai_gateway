@@ -325,6 +325,19 @@
   <span id="footerWs"></span>
 </footer>
 
+<!-- 设置设备 IP 弹窗 -->
+<div class="modal-mask" id="ipMask">
+  <div class="modal" style="width:min(420px, calc(100vw - 40px))">
+    <h4>设置设备 IP</h4>
+    <p id="ipUdidLabel"></p>
+    <input id="ipInput" type="text" placeholder="例如 192.168.20.33（手机 Wi-Fi IP，WDA 端口 8100）" autocomplete="off" spellcheck="false" style="width:100%;margin-top:14px;padding:11px 13px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13.5px;outline:none">
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeIp()">取消</button>
+      <button class="btn" onclick="saveIp()">保存</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -381,34 +394,41 @@ function deviceCard(d){
   const running = !!d.wda_running;
   const healthy = !!h.ok;
   const starting = !!h.starting; // 进程刚启动、健康未就绪（宽限期内）-> 启动中，不是异常
+  const unconfigured = !d.configured || !d.ip; // 发现但未配置 IP（待设置）
   const name = esc(d.name || d.model || '未命名设备');
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
   const ip = esc(d.ip || '未设置 IP');
-  // 统一状态：忙碌 > 未激活 > 在线 > 启动中(宽限期) > 异常(真正失败)
+  // 统一状态：未配置 > 忙碌 > 未激活 > 在线 > 启动中(宽限期) > 异常(真正失败)
   let st;
-  if (d.busy) st = { cls: 'busy', txt: '忙碌' };
+  if (unconfigured) st = { cls: 'off', txt: '待配置' };
+  else if (d.busy) st = { cls: 'busy', txt: '忙碌' };
   else if (!running) st = { cls: 'off', txt: '未激活' };
   else if (healthy) st = { cls: 'on', txt: '在线' };
   else if (starting) st = { cls: 'busy', txt: '启动中' };
   else st = { cls: 'err', txt: '异常' };
   // WDA 徽标（与状态一致；启动中只显示启动中，异常才是真的异常）
   let wdaBadge;
-  if (!running) wdaBadge = '<span class="tag">WDA 未激活</span>';
+  if (unconfigured) wdaBadge = '<span class="tag" style="color:var(--orange)">未配置 IP</span>';
+  else if (!running) wdaBadge = '<span class="tag">WDA 未激活</span>';
   else if (healthy) wdaBadge = '<span class="tag" style="color:var(--green)">WDA 运行中</span>';
   else if (starting) wdaBadge = '<span class="tag" style="color:var(--orange)">WDA 启动中</span>';
   else wdaBadge = '<span class="tag" style="color:var(--red)">WDA 异常</span>';
-  // 健康文本（未激活/启动中优先，避免与「异常」并存）
+  // 健康文本（未配置/未激活/启动中优先，避免与「异常」并存）
   let healthCls, healthTxt;
-  if (!running) { healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活'; }
+  if (unconfigured) { healthCls = 'color:var(--orange)'; healthTxt = '待设置 IP'; }
+  else if (!running) { healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活'; }
   else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
   else if (starting) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
-  // 按钮：未激活才显示「激活」；运行/忙碌显示「停止」
+  // 按钮：未配置 -> 激活(USB直连)+设IP；未激活 -> 激活；运行/忙碌 -> 停止
   let actions = '';
-  if (!running && !d.busy) {
+  if (unconfigured) {
+    actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>
+      <button class="btn ghost sm" onclick="openIp('${d.udid}','')">设 IP</button>`;
+  } else if (!running && !d.busy) {
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
   } else if (running || d.busy) {
     actions = `<button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>`;
@@ -466,6 +486,26 @@ async function stop(udid){
   try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'}); toast('已停止 WDA（不再自动拉起）'); refreshDevices(); }
   catch(e){ toast('停止失败'); }
 }
+function openIp(udid, current){
+  ipTarget = udid;
+  $('ipUdidLabel').textContent = udid;
+  $('ipInput').value = current && current !== '未设置 IP' ? current : '';
+  $('ipMask').classList.add('open');
+  setTimeout(() => $('ipInput').focus(), 60);
+}
+function closeIp(){ $('ipMask').classList.remove('open'); ipTarget = null; }
+async function saveIp(){
+  const ip = $('ipInput').value.trim();
+  if(!ip){ toast('请输入 IP'); return; }
+  try{
+    await fetch('/api/devices/' + encodeURIComponent(ipTarget) + '/set-ip?ip=' + encodeURIComponent(ip), {method:'POST'});
+    toast('IP 已保存');
+    closeIp();
+    refreshDevices();
+  }catch(e){ toast('保存失败'); }
+}
+$('ipMask').addEventListener('click', (e) => { if(e.target === $('ipMask')) closeIp(); });
+$('ipInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') saveIp(); if(e.key === 'Escape') closeIp(); });
 
 /* ---------- easytier ---------- */
 async function loadEt(){
