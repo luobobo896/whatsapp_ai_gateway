@@ -166,6 +166,41 @@ async def api_devices():
     return _device_list()
 
 
+def _wda_status_at(ip: str, port: int = 8100, timeout: float = 3) -> dict:
+    """探测某 IP:port 的 WDA /status，返回状态快照（ok/ready/ios_version/error）。"""
+    import httpx
+    try:
+        r = httpx.get(f"http://{ip}:{port}/status", timeout=timeout)
+        v = r.json().get("value", {})
+        return {"ok": bool(v.get("ready")), "ready": v.get("ready"), "ip": v.get("ios", {}).get("ip", ip),
+                "ios_version": (v.get("os") or {}).get("version", ""), "status_code": r.status_code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _wait_wda_ready(udid: str, port: int = 8100, timeout: float = 180):
+    """等待 WDA 真正就绪。返回：
+    "ready"=健康检查通过；"failed"=进程已退出(激活失败)；"starting"=超时仍在启动。
+    未配置 IP 的设备等待 watchdog 自动配 IP 后探活。
+    就绪时同步回写该设备 last_health，页面立即显示「在线」（不用等 watchdog 下一轮）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not wda.running(udid):
+            return "failed"
+        dev = next((d for d in _config.config.devices if d["udid"] == udid), None)
+        ip = (dev or {}).get("ip") or ""
+        if ip:
+            st = await asyncio.to_thread(_wda_status_at, ip, port)
+            if st.get("ok"):
+                if dev is not None:
+                    dev["last_health"] = {"ok": True, "ready": True, "ip": st.get("ip", ip),
+                                          "ios_version": st.get("ios_version", ""), "checked_at": time.time(),
+                                          "starting": False}
+                return "ready"
+        await asyncio.sleep(3)
+    return "starting"
+
+
 @app.post("/api/devices/{udid}/activate")
 async def api_activate(udid: str, port: int = 8100):
     # WDA 激活走 USB 直连（xcodebuild -destination id=udid），不依赖局域网 IP；
@@ -184,9 +219,14 @@ async def api_activate(udid: str, port: int = 8100):
         await asyncio.to_thread(wda.activate, udid, port, udid)
     except Exception as e:
         raise HTTPException(400, f"激活失败：{e}")
-    # 立即返回（不阻塞）：前端点击后立即乐观显示「启动中」；真实状态由 watchdog/刷新体现，
-    # 激活失败（xcodebuild 退出）时页面会由「启动中」转为「未激活」。
-    return {"udid": udid, "status": "activated", "auto_reactivate": True}
+    # 等待 WDA 真正就绪才返回成功：前端点击立即显示「启动中」，只有健康检查通过才算 activated
+    result = await _wait_wda_ready(udid, port)
+    if result == "failed":
+        raise HTTPException(400, "激活失败：WDA 进程已退出（请确认手机解锁并信任此电脑）")
+    if result == "starting":
+        return {"udid": udid, "status": "starting", "ready": False, "auto_reactivate": True,
+                "message": "WDA 仍在启动（尚未就绪）"}
+    return {"udid": udid, "status": "activated", "ready": True, "auto_reactivate": True}
 
 
 @app.post("/api/devices/{udid}/stop")

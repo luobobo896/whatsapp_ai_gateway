@@ -497,20 +497,33 @@ async function refreshDevices(){
 }
 async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt()]); }
 async function act(udid){
-  // 乐观更新：点击立即显示「启动中」，30s 保持期防止定时刷新闪回「未激活」
+  // 乐观更新：点击立即显示「启动中」，不显示成功；后端等 WDA 真正就绪后才返回 activated
   optimisticAct[udid] = Date.now();
   renderDevices(devicesCache);
-  let ok = false;
+  let settled = false;
   try{
     const r = await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'});
-    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('激活失败：' + (d.detail || d.error?.message || r.status)); }
-    else { ok = true; toast('已激活，WDA 启动中…'); }
+    let d = {};
+    try{ d = await r.json(); }catch(e){}
+    if (!r.ok){
+      settled = true;
+      toast('激活失败：' + (d.detail || d.error?.message || r.status));
+    } else if (d.status === 'activated' && d.ready){
+      settled = true;
+      toast('激活成功，WDA 已就绪');   // 只有 WDA 真正 ready 才提示成功
+    } else if (d.status === 'starting'){
+      toast('WDA 仍在启动（未就绪）…'); // 不报成功，保持「启动中」
+    } else {
+      settled = true;
+      toast('激活未完成：' + (d.message || r.status));
+    }
   }catch(e){ toast('激活失败'); }
-  if (!ok){
+  if (settled){
+    // 明确失败/成功：乐观保持结束，让真实状态接管
     delete optimisticAct[udid];
-    renderDevices(devicesCache);
+    setTimeout(() => { delete optimisticAct[udid]; refreshDevices(); }, settled ? 0 : 30000);
   } else {
-    // 真实起来后（wda_running=true）乐观自动失效；30s 兜底清理
+    // 仍在启动：保持乐观「启动中」，30s 兜底清理
     setTimeout(() => { delete optimisticAct[udid]; refreshDevices(); }, 30000);
   }
   refreshDevices();
