@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,12 +24,23 @@ type TaskItem struct {
 
 // TaskDispatch 平台下发的 task:dispatch。
 type TaskDispatch struct {
-	TaskID      string     `json:"task_id"`
-	DeviceID    string     `json:"device_id"`
-	UDID        string     `json:"udid"`
-	Content     string     `json:"content"`
-	IntervalSec int        `json:"interval_sec"`
-	Items       []TaskItem `json:"items"`
+	TaskID      string          `json:"task_id"`
+	DeviceID    string          `json:"device_id"`
+	UDID        string          `json:"udid"`
+	Content     string          `json:"content"`
+	IntervalSec int             `json:"interval_sec"`
+	Schedule    GatewaySchedule `json:"schedule,omitempty"`
+	Items       []TaskItem      `json:"items"`
+}
+
+// GatewaySchedule 群发智能节奏/熔断参数（与平台 BroadcastSchedule 对齐）。
+type GatewaySchedule struct {
+	IntervalJitterSec   int    `json:"intervalJitterSec"`
+	BurstCount          int    `json:"burstCount"`
+	BurstPauseSec       int    `json:"burstPauseSec"`
+	WindowStart         string `json:"windowStart"`
+	WindowEnd           string `json:"windowEnd"`
+	MaxConsecutiveFails int    `json:"maxConsecutiveFails"`
 }
 
 // ItemResult 单条发送结果（item:result 上行）。
@@ -226,17 +238,30 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online"}
 	}()
 
+	sched := t.Schedule
+	maxFails := sched.MaxConsecutiveFails
+	if maxFails <= 0 {
+		maxFails = 5
+	}
 	client := wda.NewClient(fmt.Sprintf("http://%s:%d", ip, port), 40*time.Second)
-	for _, it := range t.Items {
+	consecFails := 0
+
+	for idx, it := range t.Items {
 		select {
 		case <-cancelCh:
-			e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by platform", 0)
-			e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"}
+			e.markCancelled(t, it)
 			continue
 		default:
 		}
 		if e.persisted(t.TaskID, it.ItemID) {
-			continue // 本地已记账（重复下发/重连续发），跳过
+			continue
+		}
+		// 发送时间窗：窗口外等待到窗口开始（可被取消中断）。
+		if !withinWindow(sched.WindowStart, sched.WindowEnd) {
+			if waitUntilWindow(cancelCh, sched.WindowStart) {
+				e.markCancelled(t, it)
+				continue
+			}
 		}
 		t0 := time.Now()
 		status, errMsg := "sent", ""
@@ -258,18 +283,110 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur}
 		e.recordMetric(udid, t.TaskID, status)
 		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status, "duration_ms", dur)
-		if status == "failed" && (containsAny(errMsg, "not reachable", "connection", "timed out")) {
-			slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
-			return
+
+		if status == "failed" {
+			if containsAny(errMsg, "not reachable", "connection", "timed out") {
+				slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
+				return
+			}
+			consecFails++
+			if consecFails >= maxFails {
+				e.cancelRemaining(t, t.Items[idx+1:])
+				e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online", Error: fmt.Sprintf("熔断：连续失败 %d 条", consecFails)}
+				slog.Warn("circuit breaker triggered", "task", t.TaskID, "udid", udid, "consecutive_fails", consecFails)
+				return
+			}
+		} else {
+			consecFails = 0
 		}
-		if t.IntervalSec > 0 {
-			select {
-			case <-cancelCh:
+
+		// 拟人节奏：随机间隔 + 每 N 条长暂停。
+		if wait := nextInterval(sched, t.IntervalSec); wait > 0 {
+			if interrupted(cancelCh, wait) {
 				continue
-			case <-time.After(time.Duration(t.IntervalSec) * time.Second):
+			}
+		}
+		if sched.BurstCount > 0 && sched.BurstPauseSec > 0 && (idx+1)%sched.BurstCount == 0 && idx+1 < len(t.Items) {
+			if interrupted(cancelCh, time.Duration(sched.BurstPauseSec)*time.Second) {
+				continue
 			}
 		}
 	}
+}
+
+func (e *Executor) markCancelled(t TaskDispatch, it TaskItem) {
+	e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by platform", 0)
+	e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"}
+}
+
+func (e *Executor) cancelRemaining(t TaskDispatch, rest []TaskItem) {
+	for _, it := range rest {
+		e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by circuit breaker", 0)
+		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by circuit breaker"}
+	}
+}
+
+// interrupted 等待 d 时长，若期间被取消返回 true。
+func interrupted(cancelCh <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-cancelCh:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// nextInterval 根据节奏参数计算条间等待时长（随机抖动，下限 1s）。
+func nextInterval(s GatewaySchedule, base int) time.Duration {
+	if base <= 0 {
+		base = 1
+	}
+	if s.IntervalJitterSec > 0 {
+		base += rand.IntN(2*s.IntervalJitterSec+1) - s.IntervalJitterSec
+		if base < 1 {
+			base = 1
+		}
+	}
+	return time.Duration(base) * time.Second
+}
+
+// withinWindow 判断当前本地时间是否在发送窗口内（HH:MM；空=不限制）。
+func withinWindow(start, end string) bool {
+	if start == "" && end == "" {
+		return true
+	}
+	hm := time.Now().Hour()*60 + time.Now().Minute()
+	if start != "" && end != "" {
+		s, en := parseHM(start), parseHM(end)
+		if s < en {
+			return hm >= s && hm < en
+		}
+		return hm >= s || hm < en // 跨天窗口
+	}
+	if start != "" {
+		return hm >= parseHM(start)
+	}
+	return hm < parseHM(end)
+}
+
+// waitUntilWindow 等待到下一个窗口开始；期间被取消返回 true。
+func waitUntilWindow(cancelCh <-chan struct{}, start string) bool {
+	if start == "" {
+		return false
+	}
+	m := parseHM(start)
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), m/60, m%60, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.Add(24 * time.Hour)
+	}
+	return interrupted(cancelCh, time.Until(next))
+}
+
+func parseHM(s string) int {
+	var h, m int
+	fmt.Sscanf(s, "%d:%d", &h, &m)
+	return h*60 + m
 }
 
 // ---- 本地持久化（at-least-once）----
