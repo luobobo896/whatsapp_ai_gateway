@@ -1,4 +1,4 @@
-import asyncio, logging
+import asyncio, logging, time
 from . import config as _config
 from .executor import executor
 from .wda import manager as wda
@@ -45,6 +45,8 @@ async def loop(stop: asyncio.Event):
             except Exception:
                 h = {"ok": False}
             prev_ok = (dev.get("last_health") or {}).get("ok")
+            # 探活时间戳：页面据此判断健康数据是否新鲜（激活后 0~30s 内旧缓存不应显示「异常」）
+            h["checked_at"] = time.time()
             # 启动宽限期：WDA 进程刚启动、健康还没就绪时标 starting（页面显示「启动中」而非「异常」）
             h["starting"] = False
             if not h.get("ok") and wda.running(udid):

@@ -395,32 +395,34 @@ function deviceCard(d){
   const healthy = !!h.ok;
   const starting = !!h.starting; // 进程刚启动、健康未就绪（宽限期内）-> 启动中，不是异常
   const unconfigured = !d.configured || !d.ip; // 发现但未配置 IP（待设置）
+  // 健康数据新鲜度：watchdog 探活间隔 30s，超过 50s 未更新说明刚激活/进程刚起、还没轮到探活
+  const healthFresh = !!h.checked_at && (Date.now()/1000 - h.checked_at) < 50;
   const name = esc(d.name || d.model || '未命名设备');
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
   const ip = esc(d.ip || '未设置 IP');
-  // 统一状态：未配置 > 忙碌 > 未激活 > 在线 > 启动中(宽限期) > 异常(真正失败)
+  // 统一状态：未配置 > 忙碌 > 未激活 > 在线 > 启动中(宽限期或健康数据旧) > 异常(真正失败)
   let st;
   if (unconfigured) st = { cls: 'off', txt: '待配置' };
   else if (d.busy) st = { cls: 'busy', txt: '忙碌' };
   else if (!running) st = { cls: 'off', txt: '未激活' };
   else if (healthy) st = { cls: 'on', txt: '在线' };
-  else if (starting) st = { cls: 'busy', txt: '启动中' };
+  else if (starting || !healthFresh) st = { cls: 'busy', txt: '启动中' };
   else st = { cls: 'err', txt: '异常' };
   // WDA 徽标（与状态一致；启动中只显示启动中，异常才是真的异常）
   let wdaBadge;
   if (unconfigured) wdaBadge = '<span class="tag" style="color:var(--orange)">未配置 IP</span>';
   else if (!running) wdaBadge = '<span class="tag">WDA 未激活</span>';
   else if (healthy) wdaBadge = '<span class="tag" style="color:var(--green)">WDA 运行中</span>';
-  else if (starting) wdaBadge = '<span class="tag" style="color:var(--orange)">WDA 启动中</span>';
+  else if (starting || !healthFresh) wdaBadge = '<span class="tag" style="color:var(--orange)">WDA 启动中</span>';
   else wdaBadge = '<span class="tag" style="color:var(--red)">WDA 异常</span>';
   // 健康文本（未配置/未激活/启动中优先，避免与「异常」并存）
   let healthCls, healthTxt;
   if (unconfigured) { healthCls = 'color:var(--orange)'; healthTxt = '待设置 IP'; }
   else if (!running) { healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活'; }
   else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
-  else if (starting) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
+  else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
   // 按钮：未配置 -> 激活(USB直连)+设IP；未激活 -> 激活；运行/忙碌 -> 停止

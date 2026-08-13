@@ -45,6 +45,14 @@ def _device_list():
         entry["wda_running"] = wda.running(udid)
         entry["metrics"] = metrics.get(udid)
         entry["busy"] = executor.is_busy(udid)
+        # 实时修正启动态：进程在跑但健康失败，且进程启动 <90s（宽限期）-> starting
+        # （watchdog 探活时机可能错过刚启动的进程，避免页面把「启动中」误判为「异常」）
+        h = entry.get("last_health") or {}
+        if entry["wda_running"] and not h.get("ok"):
+            secs = wda.started_seconds_ago(udid)
+            if secs is not None and secs < 90:
+                h["starting"] = True
+                entry["last_health"] = h
         out.append(entry)
     for d in discover():
         udid = d["udid"]
@@ -162,13 +170,24 @@ async def api_devices():
 async def api_activate(udid: str, port: int = 8100):
     # WDA 激活走 USB 直连（xcodebuild -destination id=udid），不依赖局域网 IP；
     # 未配置设备允许激活，但不写入 devices.json（设 IP 时才会持久化）。
+    from .devices import discover
+    known = {d["udid"] for d in _config.config.devices} | {d["udid"] for d in discover()}
+    if udid not in known:
+        raise HTTPException(404, "设备未发现（请确认手机已 USB 连接并信任此电脑）")
     dev = next((d for d in _config.config.devices if d["udid"] == udid), None)
     if dev is None:
         dev = {"udid": udid, "ip": "", "port": port, "auto_reactivate": True}
     else:
         dev["auto_reactivate"] = True  # 激活 = 恢复看护（watchdog 自动重拉）
         _config.config.save()
-    await asyncio.to_thread(wda.activate, udid, port, udid)
+    try:
+        await asyncio.to_thread(wda.activate, udid, port, udid)
+    except Exception as e:
+        raise HTTPException(400, f"激活失败：{e}")
+    # 快速失败检测：xcodebuild 对不存在/未连接设备会立即退出，避免「假激活成功」
+    time.sleep(3)
+    if not wda.running(udid):
+        raise HTTPException(400, "激活失败：WDA 进程未能启动（请确认手机已 USB 连接并信任此电脑）")
     return {"udid": udid, "status": "activated", "auto_reactivate": True}
 
 
