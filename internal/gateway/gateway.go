@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -16,6 +17,12 @@ type Gateway struct {
 	connected   atomic.Bool
 	connectedAt atomic.Value // string
 	lastError   atomic.Value // string
+
+	identMu    sync.Mutex
+	tenantID   string
+	tenantName string
+	userEmail  string
+	userName   string
 }
 
 // New 构造网关。
@@ -40,6 +47,20 @@ func (g *Gateway) ConnectedAt() string {
 		return v.(string)
 	}
 	return ""
+}
+
+// SetIdentity 记录登录后平台回执的租户/用户身份。
+func (g *Gateway) SetIdentity(tenantID, tenantName, userEmail, userName string) {
+	g.identMu.Lock()
+	defer g.identMu.Unlock()
+	g.tenantID, g.tenantName, g.userEmail, g.userName = tenantID, tenantName, userEmail, userName
+}
+
+// Identity 返回登录后解析出的租户/用户身份。
+func (g *Gateway) Identity() (tenantID, tenantName, userEmail, userName string) {
+	g.identMu.Lock()
+	defer g.identMu.Unlock()
+	return g.tenantID, g.tenantName, g.userEmail, g.userName
 }
 
 // SetLastError 记录最近一次云错误。

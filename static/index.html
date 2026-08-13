@@ -374,7 +374,8 @@ async function loadCloud(){
     $('stCloudDot').className = 'dot ' + (on ? 'on' : 'off');
     $('stPending').textContent = (c.executor?.pending_tasks?.length ?? 0);
     $('footerWs').textContent = c.ws_url ? '云通道 ' + c.ws_url : '';
-    $('brandSub').textContent = c.gateway_name ? c.gateway_name + (c.connected_at ? ' · 连接于 ' + c.connected_at : '') : '本地网关控制台';
+    const who = c.tenant_name ? (c.tenant_name + (c.user_name ? ' / ' + c.user_name : '')) : '';
+    $('brandSub').textContent = (c.gateway_name ? c.gateway_name : '本地网关控制台') + (who ? ' · ' + who : '') + (c.connected_at ? ' · 连接于 ' + c.connected_at : '');
     if(c.last_error) toast('云通道错误：' + c.last_error);
   }catch(e){
     $('cloudText').textContent = '云状态读取失败';

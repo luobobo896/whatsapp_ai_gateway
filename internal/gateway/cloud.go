@@ -142,6 +142,16 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 			}
 			_ = json.Unmarshal(msg.Payload, &p)
 			g.Exec.Cancel(p.TaskID)
+		case "server:ack":
+			var ack struct {
+				TenantID   string `json:"tenantId"`
+				TenantName string `json:"tenantName"`
+				UserEmail  string `json:"userEmail"`
+				UserName   string `json:"userName"`
+			}
+			if json.Unmarshal(msg.Payload, &ack) == nil && ack.TenantID != "" {
+				g.SetIdentity(ack.TenantID, ack.TenantName, ack.UserEmail, ack.UserName)
+			}
 		case "server:disconnect":
 			slog.Warn("platform asked to disconnect")
 			return nil
