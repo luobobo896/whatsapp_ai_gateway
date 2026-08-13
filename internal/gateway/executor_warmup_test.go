@@ -66,3 +66,22 @@ func TestMetricsNewSessionCount(t *testing.T) {
 		t.Fatalf("persisted today new sessions = %d, want 1", got)
 	}
 }
+
+// TestReactivateDecision 看护重激活决策：仅健康失败+自动开关+未运行+USB 在线时重激活。
+func TestReactivateDecision(t *testing.T) {
+	if reactivateDecision(true, true, false, true) {
+		t.Fatal("healthy device must not reactivate")
+	}
+	if reactivateDecision(false, false, false, true) {
+		t.Fatal("auto_reactivate off must not reactivate")
+	}
+	if reactivateDecision(false, true, true, true) {
+		t.Fatal("running WDA must not reactivate")
+	}
+	if reactivateDecision(false, true, false, false) {
+		t.Fatal("not USB-attached must not reactivate (P2-10 防 thrash)")
+	}
+	if !reactivateDecision(false, true, false, true) {
+		t.Fatal("offline + auto + not running + USB attached should reactivate")
+	}
+}

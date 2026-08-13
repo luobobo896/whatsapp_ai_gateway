@@ -4,12 +4,30 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"wda-farm-gateway/internal/wda"
 )
 
 const wdaStartGrace = 90 * time.Second
+
+// usbConnected 判断设备当前是否 USB 直连（ioreg UsbAppleDeviceUDID）。
+// 网络不可达且未 USB 连接 = 设备物理离线（拔线/断电/Wi-Fi 断开），
+// 跳过 xcodebuild 重激活，避免看护循环对离线设备反复构建失败（P2-10 根因修复）。
+func usbConnected(udid string) bool {
+	for _, u := range USBUDIDs() {
+		if strings.EqualFold(u, udid) {
+			return true
+		}
+	}
+	return false
+}
+
+// reactivateDecision 是否应重激活：健康失败 + 允许自动重激活 + 未在运行 + USB 在线。
+func reactivateDecision(healthy, autoReactivate, running, usbAttached bool) bool {
+	return !healthy && autoReactivate && !running && usbAttached
+}
 
 // WatchdogLoop 逐台健康检查、自动重激活、网络跟随、自动配 IP。
 func (g *Gateway) WatchdogLoop(ctx context.Context) {
@@ -61,6 +79,17 @@ func (g *Gateway) watchOnce() {
 			g.Exec.StatusQ <- DeviceStatus{UDID: dev.UDID, WDAStatus: st, Error: errText(h.Error)}
 		}
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
+			if !usbConnected(dev.UDID) {
+				// 设备物理离线（无网络且未接 USB）：跳过重激活，避免 xcodebuild 反复失败。
+				if prevOK {
+					slog.Warn("device offline and not USB-attached, skip reactivation",
+						"udid", dev.UDID[:8], "ip", dev.IP)
+				}
+				if h.Error == "" || !strings.Contains(h.Error, "USB") {
+					dev.LastHealth["error"] = "device offline: network unreachable and not USB-attached; skipped reactivation (reconnect USB/Wi-Fi)"
+				}
+				continue
+			}
 			slog.Info("WDA down, reactivating", "udid", dev.UDID[:8], "ip", dev.IP)
 			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID); err != nil {
 				slog.Error("reactivate failed", "udid", dev.UDID[:8], "error", err)
