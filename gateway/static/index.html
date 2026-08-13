@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WDA Farm Gateway</title>
+<style>
+  body{font-family:system-ui;margin:2rem;background:#f5f6f8;color:#222}
+  table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+  th,td{border-bottom:1px solid #eee;padding:.6rem .8rem;text-align:left;font-size:14px}
+  th{background:#fafbfc}
+  .ok{color:#1a7f37}.down{color:#cf222e}.busy{color:#9a6700}
+  button{padding:.3rem .7rem;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}
+  button:hover{background:#f0f0f0}
+  #cloud{margin-bottom:16px;padding:12px 16px;background:#fff;border:1px solid #eee;border-radius:8px;font-size:14px}
+</style>
+</head>
+<body>
+<h1>WDA Farm Gateway</h1>
+<div id="cloud"><span id="cloudState">加载中…</span></div>
+<p><button onclick="refresh()">刷新</button> <span id="ts"></span></p>
+<table id="devices">
+  <thead><tr><th>UDID</th><th>名称</th><th>型号</th><th>IP</th><th>端口</th><th>WDA 进程</th><th>健康</th><th>状态</th><th>发送结果</th><th>操作</th></tr></thead>
+  <tbody></tbody>
+</table>
+<script>
+async function loadCloud(){
+  try {
+    const r = await fetch('/api/cloud'); const c = await r.json();
+    const state = c.connected ? '<span class="ok">● 已连接平台</span>' : '<span class="down">● 未连接</span>';
+    const ex = c.executor || {};
+    document.getElementById('cloudState').innerHTML =
+      `云通道：${state}｜网关名：${c.gateway_name||'-'}｜地址：${c.ws_url||'-'}｜凭证已配置：${c.token_configured?'是':'否'}` +
+      (c.connected_at ? `｜连接时间：${c.connected_at}` : '') +
+      (c.last_error ? `｜<span class="down">${c.last_error}</span>` : '') +
+      `｜执行中 UDID：${(ex.busy_udids||[]).join(',')||'无'}｜待处理任务：${(ex.pending_tasks||[]).join(',')||'无'}`;
+  } catch(e){ document.getElementById('cloudState').textContent = '云状态读取失败: '+e; }
+}
+async function refresh(){
+  const r = await fetch('/api/devices'); const list = await r.json();
+  const tb = document.querySelector('#devices tbody'); tb.innerHTML='';
+  for (const d of list){
+    const h = d.last_health || {};
+    const m = d.metrics || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${d.udid}</td><td>${d.name||'-'}</td><td>${d.model||'-'}</td>
+      <td>${d.ip||'<i>未设置</i>'}</td><td>${d.port||8100}</td>
+      <td>${d.wda_running?'运行中':'未运行'}</td>
+      <td class="${h.ok?'ok':'down'}">${h.ok?'OK':'DOWN'}</td>
+      <td class="${d.busy?'busy':'ok'}">${d.busy?'忙碌':'空闲'}</td>
+      <td>成功 <span class="ok">${m.sent_ok||0}</span> / 失败 <span class="down">${m.sent_fail||0}</span> / 共 ${m.total||0}</td>
+      <td><button onclick="act('${d.udid}')">激活</button>
+          <button onclick="stop('${d.udid}')">停止</button>
+          <button onclick="setip('${d.udid}')">设IP</button></td>`;
+    tb.appendChild(tr);
+  }
+  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+  loadCloud();
+}
+async function act(udid){ await fetch(`/api/devices/${udid}/activate`,{method:'POST'}); refresh(); }
+async function stop(udid){ await fetch(`/api/devices/${udid}/stop`,{method:'POST'}); refresh(); }
+async function setip(udid){
+  const ip = prompt('手机 Wi-Fi IP:'); if(!ip) return;
+  await fetch(`/api/devices/${udid}/set-ip?ip=${ip}`,{method:'POST'}); refresh();
+}
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "cloud": {
+    "ws_url": "",
+    "enabled": false
+  },
+  "health_interval": 30,
+  "devices": [
+    {
+      "udid": "5060c403afdee4c15a0edeab69dba0524e2ce592",
+      "ip": "192.168.20.33",
+      "port": 8100,
+      "auto_reactivate": true
+    }
+  ]
+}
