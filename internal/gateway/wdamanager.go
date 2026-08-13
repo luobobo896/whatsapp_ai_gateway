@@ -1,0 +1,182 @@
+package gateway
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+// WDAManager 按 UDID 激活/停止/看护 WDA（xcodebuild build-for-testing + test-without-building）。
+type WDAManager struct {
+	mu          sync.Mutex
+	processes   map[string]*exec.Cmd
+	startedAt   map[string]time.Time
+	xctestrun   string
+	projectRoot string
+	derivedData string
+}
+
+// NewWDAManager 构造管理器；projectRoot 为 WhatsAppDeviceAgent 工程路径。
+func NewWDAManager(projectRoot, derivedData string) *WDAManager {
+	if derivedData == "" {
+		derivedData = "/tmp/WebDriverAgentFarmDerived"
+	}
+	return &WDAManager{
+		processes:   map[string]*exec.Cmd{},
+		startedAt:   map[string]time.Time{},
+		projectRoot: projectRoot,
+		derivedData: derivedData,
+	}
+}
+
+// Running 返回指定 UDID 的 WDA 进程是否在运行。
+func (m *WDAManager) Running(udid string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.processes[udid]
+	return p != nil && p.ProcessState == nil
+}
+
+// StartedSecondsAgo 进程已启动秒数（无进程返回 0）。
+func (m *WDAManager) StartedSecondsAgo(udid string) float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.startedAt[udid]
+	if !ok || m.processes[udid] == nil {
+		return 0
+	}
+	return time.Since(t).Seconds()
+}
+
+// ensureBuilt 构建一次 WDA，产物复用。
+func (m *WDAManager) ensureBuilt() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.xctestrun != "" {
+		if _, err := os.Stat(m.xctestrun); err == nil {
+			return m.xctestrun, nil
+		}
+	}
+	cmd := exec.Command("xcodebuild",
+		"-project", filepath.Join(m.projectRoot, "WebDriverAgent.xcodeproj"),
+		"-scheme", "WebDriverAgentRunner", "-configuration", "Debug",
+		"-destination", "generic/platform=iOS",
+		"-derivedDataPath", m.derivedData,
+		"-allowProvisioningUpdates",
+		"ENABLE_DEFAULT_HEADER_SEARCH_PATHS=NO",
+		"GCC_TREAT_WARNINGS_AS_ERRORS=NO",
+		"OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
+		"RUN_CLANG_STATIC_ANALYZER=NO",
+		"build-for-testing",
+	)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("build-for-testing: %w", err)
+	}
+	hits, _ := filepath.Glob(filepath.Join(m.derivedData, "Build", "Products", "WebDriverAgentRunner_iphoneos*.xctestrun"))
+	if len(hits) == 0 {
+		return "", fmt.Errorf("xctestrun not found after build")
+	}
+	m.xctestrun = hits[0]
+	return m.xctestrun, nil
+}
+
+// Activate 激活单台 WDA（xcodebuild test-without-building）。
+func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error {
+	if port == 0 {
+		port = 8100
+	}
+	if reportedUDID == "" {
+		reportedUDID = udid
+	}
+	m.mu.Lock()
+	if p := m.processes[udid]; p != nil && p.ProcessState == nil {
+		m.mu.Unlock()
+		return nil // 已在运行
+	}
+	m.mu.Unlock()
+
+	xctestrun, err := m.ensureBuilt()
+	if err != nil {
+		return err
+	}
+	tmp := xctestrun + ".runtime.xctestrun"
+	if err := copyFile(xctestrun, tmp); err != nil {
+		return err
+	}
+	// 与 scripts/start-wda.sh 一致：把 USE_PORT / WDA_DEVICE_UDID 注入 xctestrun 的 EnvironmentVariables。
+	env := os.Environ()
+	env = append(env, "EXPANDED_CODE_SIGN_IDENTITY="+signingIdentity())
+	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:USE_PORT", fmt.Sprint(port))
+	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:WDA_DEVICE_UDID", reportedUDID)
+	cmd := exec.Command("xcodebuild", "-xctestrun", tmp, "-destination", "id="+udid, "test-without-building")
+	cmd.Env = env
+	logPath := filepath.Join("/tmp", "wda-"+udid[:8]+".log")
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		cmd.Stdout, cmd.Stderr = f, f
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.processes[udid] = cmd
+	m.startedAt[udid] = time.Now()
+	m.mu.Unlock()
+	return nil
+}
+
+// Stop 停止单台 WDA。
+func (m *WDAManager) Stop(udid string) bool {
+	m.mu.Lock()
+	p := m.processes[udid]
+	delete(m.processes, udid)
+	delete(m.startedAt, udid)
+	m.mu.Unlock()
+	if p == nil || p.Process == nil {
+		return false
+	}
+	_ = p.Process.Signal(os.Interrupt)
+	done := make(chan struct{})
+	go func() { _ = p.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = p.Process.Kill()
+	}
+	return true
+}
+
+func signingIdentity() string {
+	out, err := exec.Command("security", "find-identity", "-v", "-p", "codesigning").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "CSSMERR_TP_CERT_REVOKED") || !strings.Contains(line, "Apple Development") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) > 1 {
+			return parts[1]
+		}
+	}
+	return ""
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0o644)
+}
+
+// plistSet 用 PlistBuddy 设置/替换 xctestrun 里 <key>:<value>（失败返回 err，但不中断激活）。
+func plistSet(path, key, value string) error {
+	_ = exec.Command("/usr/libexec/PlistBuddy", "-c", "Delete :"+key, path).Run()
+	return exec.Command("/usr/libexec/PlistBuddy", "-c", "Add :"+key+" string "+value, path).Run()
+}

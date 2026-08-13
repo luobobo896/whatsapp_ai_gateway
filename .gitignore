@@ -5,3 +5,4 @@ data/
 .DS_Store
 tools/easytier/easytier-core
 tools/easytier/easytier-cli
+/gateway
