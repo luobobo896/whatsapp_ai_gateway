@@ -291,6 +291,10 @@ func (m *EasyTierManager) Start(authorize bool) (bool, error) {
 	if err := m.writeTOML(); err != nil {
 		return false, err
 	}
+	// 清理遗留的孤儿进程（网关重启/异常退出时留下的 core 仍占用 11010/15888 端口，
+	// 会导致新进程 "Address already in use" 起不来）。本网关无托管进程时，任何使用
+	// 同一配置文件的 core 都是孤儿，直接清掉。
+	m.killStale()
 	args := m.cmdArgs()
 	cmd := exec.Command(args[0], args[1:]...)
 	if f, err := os.OpenFile(m.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
@@ -304,6 +308,16 @@ func (m *EasyTierManager) Start(authorize bool) (bool, error) {
 	m.mu.Lock()
 	m.process = &easyTierProc{cmd: cmd, done: done}
 	m.mu.Unlock()
+	// 进程意外退出时留痕，方便排查"启动一会就停止"。
+	go func() {
+		<-done
+		m.mu.Lock()
+		current := m.process
+		m.mu.Unlock()
+		if current != nil && current.cmd == cmd {
+			slog.Warn("easytier-core 进程退出", "log", m.logPath)
+		}
+	}()
 
 	for i := 0; i < 25; i++ {
 		select {
@@ -317,6 +331,12 @@ func (m *EasyTierManager) Start(authorize bool) (bool, error) {
 		time.Sleep(time.Second)
 	}
 	return m.cliOK(), nil
+}
+
+// killStale 杀掉使用同一配置文件的所有遗留 core（含孤儿与 sudo 包装进程）。
+func (m *EasyTierManager) killStale() {
+	_ = exec.Command("sudo", "-n", "pkill", "-f", "easytier-core --config-file "+m.tomlPath).Run()
+	time.Sleep(500 * time.Millisecond) // 等端口释放
 }
 
 // Stop 停止 easytier（含遗留 root 进程）。
@@ -336,7 +356,7 @@ func (m *EasyTierManager) Stop() bool {
 			stopped = true
 		}
 	}
-	_ = exec.Command("sudo", "-n", "pkill", "-f", "easytier-core --config-file "+m.tomlPath).Run()
+	m.killStale()
 	return stopped
 }
 
@@ -352,8 +372,7 @@ func (m *EasyTierManager) Recover() {
 	if !m.Configured() {
 		return
 	}
-	_ = exec.Command("sudo", "-n", "pkill", "-f", "easytier-core --config-file "+m.tomlPath).Run()
-	time.Sleep(time.Second)
+	m.killStale()
 	if _, err := m.Start(false); err != nil {
 		slog.Warn("easytier recover start failed", "error", err)
 	}
@@ -414,7 +433,7 @@ func (m *EasyTierManager) Status() map[string]any {
 	}
 	pid := 0
 	m.mu.Lock()
-	if m.process != nil && m.process.cmd.Process != nil {
+	if running && m.process != nil && m.process.cmd.Process != nil {
 		pid = m.process.cmd.Process.Pid
 	}
 	m.mu.Unlock()
