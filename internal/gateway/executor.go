@@ -404,10 +404,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			assist = nil
 		}
 		// 模板变量：明细有逐条渲染内容时优先使用（兼容旧平台任务）。
-		content := t.Content
-		if it.Content != "" {
-			content = it.Content
-		}
+		content := itemContent(t, it)
 		var serr error
 		if assist == nil {
 			serr = wda.SendMessageToPhone(context.Background(), client, it.Phone, content)
@@ -451,6 +448,15 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			}
 		}
 	}
+}
+
+// itemContent 返回单条明细的实际发送内容：明细有逐条渲染内容（平台模板变量）
+// 时优先使用，否则回退任务级内容（兼容旧平台/旧任务）。
+func itemContent(t TaskDispatch, it TaskItem) string {
+	if it.Content != "" {
+		return it.Content
+	}
+	return t.Content
 }
 
 func (e *Executor) markCancelled(t TaskDispatch, it TaskItem) {
