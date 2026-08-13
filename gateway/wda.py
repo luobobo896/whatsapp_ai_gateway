@@ -110,10 +110,35 @@ class WDAManager:
         return time.time() - t
 
 
-# ---------- WhatsApp 发送（移植自平台 internal/wda/whatsapp.go）----------
+# ---------- WhatsApp 发送（移植自平台 internal/wda/whatsapp.go；iOS 15.8 深链不可用时走 UI 兜底）----------
 
 class WDAError(Exception):
     pass
+
+
+# WhatsApp 候选 bundle id（普通 WhatsApp / WhatsApp Business），按序自动识别。
+WHATSAPP_BUNDLE_IDS = ["net.whatsapp.WhatsApp", "net.whatsapp.WhatsAppSMB"]
+# WhatsApp 界面元素选择器（真机联调时按需覆盖）。
+MESSAGE_INPUT_SELECTOR = ("class chain", "**/XCUIElementTypeTextView[1]")
+SEND_BUTTON_SELECTORS = [
+    ("accessibility id", "ChatBar_SendButton"),
+    ("accessibility id", "Send"),
+    ("accessibility id", "send"),
+    ("predicate string", "name == 'Send'"),
+    ("predicate string", "name == '发送'"),
+    ("predicate string", "label == '发送'"),
+]
+# 从聊天页返回聊天列表的返回键候选（label 随语言变化）。
+BACK_TO_CHATS_SELECTORS = [
+    ("predicate string", "label == '聊天'"),
+    ("predicate string", "label == 'Chats'"),
+    ("predicate string", "name == 'Back'"),
+    ("predicate string", "name == '返回'"),
+]
+
+
+def _digits(s: str) -> str:
+    return "".join(ch for ch in (s or "") if ch.isdigit())
 
 
 def _decode_value(data: bytes) -> str:
@@ -131,42 +156,20 @@ def _decode_value(data: bytes) -> str:
     return ""
 
 
-def send_message(ip: str, port: int, phone: str, content: str, timeout: float = 20) -> None:
-    """驱动手机 WDA 给指定手机号发送一条文本（同平台 internal/wda 流程）：
-    建会话 -> whatsapp://send?phone= 深链 -> 定位输入框 -> 输入 -> 点发送。"""
-    import httpx
-    base = f"http://{ip}:{port}"
-    with httpx.Client(timeout=timeout) as client:
-        # 1) 建立 WhatsApp 会话
+def _create_session(client, base: str, bundle_id: str | None) -> tuple[str, str]:
+    """建立 WhatsApp 会话，返回 (session_id, 实际 bundle id)。
+    未指定 bundle_id 时按候选列表自动识别（普通 WhatsApp / WhatsApp Business）。"""
+    candidates = [bundle_id] if bundle_id else WHATSAPP_BUNDLE_IDS
+    for bid in candidates:
         r = client.post(f"{base}/session", json={
-            "capabilities": {"alwaysMatch": {"bundleId": WHATSAPP_BUNDLE_ID}},
+            "capabilities": {"alwaysMatch": {"bundleId": bid}},
         })
-        r.raise_for_status()
-        session_id = _decode_value(r.content)
-        if not session_id:
-            raise WDAError("wda create session returned no sessionId")
-        try:
-            # 2) 深链打开目标会话
-            deeplink = f"whatsapp://send?phone={phone}"
-            r = client.post(f"{base}/session/{session_id}/url", json={
-                "url": deeplink, "bundleId": WHATSAPP_BUNDLE_ID, "idleTimeoutMs": 3000,
-            })
-            r.raise_for_status()
-            # 3) 等待输入框（最多 15s）
-            input_id = _wait_element(client, base, session_id, MESSAGE_INPUT_SELECTOR, 15)
-            # 4) 输入内容
-            r = client.post(f"{base}/session/{session_id}/element/{input_id}/value",
-                            json={"value": [content]})
-            r.raise_for_status()
-            # 5) 点击发送（候选选择器，最多 10s）
-            send_id = _wait_any_element(client, base, session_id, SEND_BUTTON_SELECTORS, 10)
-            r = client.post(f"{base}/session/{session_id}/element/{send_id}/click")
-            r.raise_for_status()
-        finally:
-            try:
-                client.delete(f"{base}/session/{session_id}")
-            except Exception:
-                pass
+        if r.status_code >= 300:
+            continue
+        sid = _decode_value(r.content)
+        if sid:
+            return sid, bid
+    raise WDAError(f"whatsapp not installed (tried: {', '.join(candidates)})")
 
 
 def _find_element(client, base: str, session_id: str, using: str, value: str) -> str:
@@ -197,6 +200,120 @@ def _wait_any_element(client, base, session_id, selectors, timeout: float) -> st
                 return eid
         time.sleep(0.5)
     raise WDAError(f"no send button found within {timeout}s: {selectors}")
+
+
+def _source_cells(client, base: str, session_id: str) -> list:
+    """返回当前页面按文档顺序排列的 XCUIElementTypeCell 列表（解析 accessibility 树）。"""
+    import xml.etree.ElementTree as ET
+    r = client.get(f"{base}/session/{session_id}/source")
+    r.raise_for_status()
+    xml = _decode_value(r.content)
+    if not xml:
+        return []
+    root = ET.fromstring(xml)
+    return [el for el in root.iter() if el.tag.endswith("XCUIElementTypeCell")]
+
+
+def _cell_digits(cell) -> str:
+    return _digits(cell.get("name") or "")
+
+
+def _first_chat_index(client, base: str, session_id: str) -> int | None:
+    """聊天列表中第一个真实会话 cell 的序号（1 起）；跳过筛选/工具行。"""
+    cells = _source_cells(client, base, session_id)
+    for i, cell in enumerate(cells, start=1):
+        if _cell_digits(cell):
+            return i
+        for sub in cell.iter():
+            if (sub.get("name") or "") == "WAChatSessionCell_Message":
+                return i
+    return None
+
+
+def _chat_index_by_phone(client, base: str, session_id: str, digits: str) -> int | None:
+    """按号码在聊天列表中找会话 cell（name 去非数字后 == 目标号码），返回序号；找不到返回 None。"""
+    cells = _source_cells(client, base, session_id)
+    for i, cell in enumerate(cells, start=1):
+        if _cell_digits(cell) == digits:
+            return i
+    return None
+
+
+def _tap_cell(client, base: str, session_id: str, idx: int) -> None:
+    eid = _find_element(client, base, session_id, "class chain", f"**/XCUIElementTypeCell[{idx}]")
+    if not eid:
+        raise WDAError(f"chat cell [{idx}] not found")
+    r = client.post(f"{base}/session/{session_id}/element/{eid}/click")
+    r.raise_for_status()
+    time.sleep(1.5)
+
+
+def _goto_chat_list(client, base: str, session_id: str) -> None:
+    """确保停在聊天列表页：当前若在聊天页（输入框可见）则点返回。"""
+    if not _find_element(client, base, session_id, *MESSAGE_INPUT_SELECTOR):
+        return
+    for using, value in BACK_TO_CHATS_SELECTORS:
+        eid = _find_element(client, base, session_id, using, value)
+        if eid:
+            r = client.post(f"{base}/session/{session_id}/element/{eid}/click")
+            r.raise_for_status()
+            time.sleep(1.5)
+            return
+
+
+def _open_target_chat(client, base: str, session_id: str, bundle_id: str, phone: str) -> None:
+    """打开指定号码的会话：优先深链（iOS 16.4+）；iOS 15.8 深链不可用时回退到聊天列表按号码匹配。"""
+    digits = _digits(phone)
+    if not digits:
+        raise WDAError(f"invalid phone: {phone!r}")
+    r = client.post(f"{base}/session/{session_id}/url", json={
+        "url": f"whatsapp://send?phone={digits}", "bundleId": bundle_id, "idleTimeoutMs": 3000,
+    })
+    if r.status_code < 300:
+        return  # 深链成功打开目标会话
+    _goto_chat_list(client, base, session_id)
+    idx = _chat_index_by_phone(client, base, session_id, digits)
+    if idx is None:
+        raise WDAError(f"deep link unsupported and no chat for {digits} in chat list")
+    _tap_cell(client, base, session_id, idx)
+
+
+def _open_default_chat(client, base: str, session_id: str) -> None:
+    """不指定号码：当前已有打开的会话则直接使用，否则打开聊天列表第一个会话。"""
+    if _find_element(client, base, session_id, *MESSAGE_INPUT_SELECTOR):
+        return
+    idx = _first_chat_index(client, base, session_id)
+    if idx is None:
+        raise WDAError("no chat available to send to")
+    _tap_cell(client, base, session_id, idx)
+
+
+def send_message(ip: str, port: int, phone: str, content: str, bundle_id: str | None = None, timeout: float = 20) -> None:
+    """驱动手机 WDA 发送一条文本：
+    - 传了手机号：深链（iOS 16.4+）或聊天列表按号码打开会话；
+    - 没传手机号：发送到当前已打开的会话，否则聊天列表第一个会话。
+    之后定位输入框 -> 输入 -> 点发送。"""
+    import httpx
+    base = f"http://{ip}:{port}"
+    with httpx.Client(timeout=timeout) as client:
+        session_id, bid = _create_session(client, base, bundle_id)
+        try:
+            if phone:
+                _open_target_chat(client, base, session_id, bid, phone)
+            else:
+                _open_default_chat(client, base, session_id)
+            input_id = _wait_element(client, base, session_id, MESSAGE_INPUT_SELECTOR, 15)
+            r = client.post(f"{base}/session/{session_id}/element/{input_id}/value",
+                            json={"value": [content]})
+            r.raise_for_status()
+            send_id = _wait_any_element(client, base, session_id, SEND_BUTTON_SELECTORS, 10)
+            r = client.post(f"{base}/session/{session_id}/element/{send_id}/click")
+            r.raise_for_status()
+        finally:
+            try:
+                client.delete(f"{base}/session/{session_id}")
+            except Exception:
+                pass
 
 
 def _signing_identity() -> str:

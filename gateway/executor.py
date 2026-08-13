@@ -144,7 +144,7 @@ class Executor:
                 t0 = time.time()
                 status, err = "sent", ""
                 try:
-                    await asyncio.to_thread(send_message, ip, port, phone, payload.get("content", ""))
+                    await asyncio.to_thread(send_message, ip, port, phone, payload.get("content", ""), (dev or {}).get("whatsapp_bundle_id"))
                 except Exception as e:
                     status, err = "failed", str(e)[:500]
                 duration_ms = int((time.time() - t0) * 1000)
