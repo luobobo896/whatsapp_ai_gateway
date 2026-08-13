@@ -3,17 +3,21 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
 
-var msgCounter int64
+var msgCounter atomic.Int64
 
 type envelope struct {
 	V       int    `json:"v"`
@@ -24,13 +28,31 @@ type envelope struct {
 }
 
 func newEnvelope(typ string, payload any) envelope {
-	msgCounter++
 	return envelope{
 		V: 1, Type: typ,
-		MsgID:   fmt.Sprintf("g:%d", msgCounter),
+		MsgID:   fmt.Sprintf("g:%d", msgCounter.Add(1)),
 		SentAt:  time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Payload: payload,
 	}
+}
+
+// describeCloudError 把底层错误转成可读说明：
+// EOF（无关闭帧）= 远端直接把 TCP 断开；关闭码 = 平台主动关闭（4005 为凭证被吊销）。
+func describeCloudError(err error) string {
+	if code := websocket.CloseStatus(err); code != -1 {
+		switch code {
+		case websocket.StatusNormalClosure:
+			return "平台主动关闭连接（正常关闭）"
+		case 4005:
+			return "平台已吊销该网关凭证（关闭码 4005），请到平台「组网」页重新签发"
+		default:
+			return fmt.Sprintf("平台主动关闭连接（关闭码 %d）", code)
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		return "连接被远端断开（TCP EOF，未收到关闭帧）：通常是平台重启或网络抖动，已自动重连"
+	}
+	return err.Error()
 }
 
 // CloudLoop 云通道：凭证登录 -> hello -> 补报 -> device_list -> 心跳/报告泵 -> 收任务；断线退避重连。
@@ -42,26 +64,47 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 	if name == "" {
 		name, _ = os.Hostname()
 	}
-	if url == "" {
-		slog.Info("cloud ws_url 未配置，跳过云连接")
+	if !cfg.Cloud.Enabled || url == "" {
+		slog.Info("云通道未启用（enabled=false 或 ws_url 未配置），跳过云连接")
 		return
 	}
 	backoff := time.Second
+	revoked := false
 	for ctx.Err() == nil {
+		start := time.Now()
 		err := g.cloudSession(ctx, url, token, name)
-		if err != nil {
-			slog.Warn("cloud error", "error", err)
-			g.SetConnected(false)
-			g.SetLastError(err.Error())
+		g.SetConnected(false)
+		if ctx.Err() != nil {
+			return
+		}
+		switch {
+		case err == nil:
+			// server:disconnect 等干净断开：短退避。
+			backoff = time.Second
+		default:
+			text := describeCloudError(err)
+			slog.Warn("cloud session ended", "error", text,
+				"duration", time.Since(start).Round(time.Second).String())
+			g.SetLastError(text)
+			if websocket.CloseStatus(err) == 4005 {
+				revoked = true
+			}
+			switch {
+			case revoked:
+				backoff = 60 * time.Second // 凭证吊销，重连也会被拒，慢点试
+			case time.Since(start) > 60*time.Second:
+				backoff = time.Second // 稳定会话断开：快速重连，不累积退避
+			default:
+				backoff *= 2
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
 		}
 	}
 }
@@ -79,8 +122,18 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	g.SetConnected(true)
 	slog.Info("cloud connected", "url", url, "gateway", name)
 
+	// 会话级上下文：会话结束时取消，让写入泵及时退出，避免向已关闭连接写入。
+	sessCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 所有写帧共用一把锁与写超时：避免并发写交叉，也避免半死连接上写卡死。
+	var writeMu sync.Mutex
 	write := func(typ string, payload any) error {
-		return wsjson.Write(ctx, conn, newEnvelope(typ, payload))
+		wctx, wcancel := context.WithTimeout(sessCtx, 10*time.Second)
+		defer wcancel()
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return wsjson.Write(wctx, conn, newEnvelope(typ, payload))
 	}
 	if err := write("gateway:hello", map[string]string{"name": name, "version": "0.3.0"}); err != nil {
 		return err
@@ -100,17 +153,24 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	reportDone := make(chan struct{})
 	statusDone := make(chan struct{})
 	hbDone := make(chan struct{})
-	go func() { defer close(reportDone); pump(ctx, conn, g.Exec.ReportQ, "item:result", write) }()
-	go func() { defer close(statusDone); pump(ctx, conn, g.Exec.StatusQ, "device:status", write) }()
+	go func() { defer close(reportDone); pump(sessCtx, conn, g.Exec.ReportQ, "item:result", write) }()
+	go func() { defer close(statusDone); pump(sessCtx, conn, g.Exec.StatusQ, "device:status", write) }()
 	go func() {
 		defer close(hbDone)
 		t := time.NewTicker(hb)
 		defer t.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-sessCtx.Done():
 				return
 			case <-t.C:
+				// 协议层 ping 探活（对方 WS 库自动回 pong），再发应用层心跳。
+				pctx, pcancel := context.WithTimeout(sessCtx, 5*time.Second)
+				err := conn.Ping(pctx)
+				pcancel()
+				if err != nil {
+					return
+				}
 				if err := write("gateway:heartbeat", map[string]any{}); err != nil {
 					return
 				}
@@ -119,14 +179,17 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	}()
 
 	// 收帧
+	var readErr error
+readLoop:
 	for {
 		var raw json.RawMessage
 		var msg struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := wsjson.Read(ctx, conn, &raw); err != nil {
-			return err
+		if err := wsjson.Read(sessCtx, conn, &raw); err != nil {
+			readErr = err
+			break
 		}
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			continue
@@ -154,7 +217,8 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 			}
 		case "server:disconnect":
 			slog.Warn("platform asked to disconnect")
-			return nil
+			readErr = nil
+			break readLoop
 		case "easytier:config":
 			if g.EasyTier != nil {
 				if err := g.EasyTier.Apply(msg.Payload); err != nil {
@@ -165,6 +229,13 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 			}
 		}
 	}
+
+	// 会话结束：先取消写入泵并等它们全部退出，再关闭连接。
+	cancel()
+	<-reportDone
+	<-statusDone
+	<-hbDone
+	return readErr
 }
 
 func pump[T any](ctx context.Context, conn *websocket.Conn, q <-chan T, typ string, write func(string, any) error) {

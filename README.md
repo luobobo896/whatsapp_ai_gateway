@@ -77,6 +77,11 @@ go build -o gateway ./cmd/gateway
 - 重连后先补报本地已持久化结果，再上报 device_list；平台随后补推 pending 任务。
 - 收到 `task:cancel` 停止循环，未执行 items 标 cancelled 上报。
 - 平台「组网」页吊销凭证后本网关会被踢出（关闭码 4005）且重连被拒。
+- 断线自愈：会话断开后按指数退避重连（1s→30s，封顶），稳定会话（>60s）断开则直接快速重连；
+  凭证被吊销（4005）时改为 60s 慢速重试。
+- 常见告警「failed to read JSON message: … frame header: EOF」表示平台侧 TCP 直接断开（未发关闭帧），
+  通常是平台重启/部署或网络抖动，网关会自动重连，并非 JSON 解析错误；每 20s 心跳含协议层
+  ping + 应用层 `gateway:heartbeat`，同时有写超时与会话级上下文兜底，不会卡死或向旧连接写数据。
 
 ## REST API
 
