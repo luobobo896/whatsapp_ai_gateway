@@ -7,10 +7,11 @@ import (
 
 // Gateway 聚合配置/设备/执行器/LLM/云通道的运行时状态。
 type Gateway struct {
-	Cfg  *Config
-	WDA  *WDAManager
-	Exec *Executor
-	LLM  *LLMClient
+	Cfg      *Config
+	WDA      *WDAManager
+	Exec     *Executor
+	LLM      *LLMClient
+	EasyTier *EasyTierManager
 
 	connected   atomic.Bool
 	connectedAt atomic.Value // string
@@ -18,8 +19,8 @@ type Gateway struct {
 }
 
 // New 构造网关。
-func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient) *Gateway {
-	return &Gateway{Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm}
+func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *EasyTierManager) *Gateway {
+	return &Gateway{Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et}
 }
 
 // SetConnected 更新云通道连接状态。

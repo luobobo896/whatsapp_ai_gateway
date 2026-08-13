@@ -40,17 +40,46 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 	})
 
 	mux.HandleFunc("/api/easytier/status", func(w http.ResponseWriter, r *http.Request) {
-		// easytier 为可选后备通道，Go 网关 v1 未实现：返回未启用状态供前端正常渲染。
-		writeJSON(w, map[string]any{"running": false, "configured": false, "peers": []any{}, "error": "", "node": nil})
+		if g.EasyTier == nil {
+			writeJSON(w, map[string]any{"running": false, "configured": false, "peers": []any{}, "error": "", "node": nil})
+			return
+		}
+		writeJSON(w, g.EasyTier.Status())
 	})
 	mux.HandleFunc("/api/easytier/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{
-			"network_name": "", "relay_host": "", "relay_port": 0, "network_cidr": "",
-			"gateway_ipv4": "", "mtu": 0, "tun": false, "network_secret_set": false,
-		})
+		if g.EasyTier == nil {
+			writeJSON(w, map[string]any{})
+			return
+		}
+		writeJSON(w, g.EasyTier.PublicConfig())
 	})
 	mux.HandleFunc("/api/easytier/action", func(w http.ResponseWriter, r *http.Request) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"detail": "easytier 未配置（Go 网关暂未启用后备通道）"})
+		if g.EasyTier == nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"detail": "easytier 未配置"})
+			return
+		}
+		var body struct {
+			Action string `json:"action"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		var ok bool
+		var err error
+		switch body.Action {
+		case "start":
+			ok, err = g.EasyTier.Start(true)
+		case "stop":
+			ok = g.EasyTier.Stop()
+		case "restart":
+			ok, err = g.EasyTier.Restart(true)
+		default:
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"detail": "action 必须为 start/stop/restart"})
+			return
+		}
+		if err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"detail": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": ok, "running": g.EasyTier.Running()})
 	})
 
 	mux.HandleFunc("/api/devices/", func(w http.ResponseWriter, r *http.Request) {

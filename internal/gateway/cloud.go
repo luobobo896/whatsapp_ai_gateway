@@ -146,8 +146,13 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 			slog.Warn("platform asked to disconnect")
 			return nil
 		case "easytier:config":
-			// 可选后备通道：v1 默认不启用，忽略并记录。
-			slog.Info("easytier:config received (optional, ignored in go gateway)")
+			if g.EasyTier != nil {
+				if err := g.EasyTier.Apply(msg.Payload); err != nil {
+					slog.Warn("easytier:config apply failed", "error", err)
+				} else {
+					slog.Info("easytier:config applied", "running", g.EasyTier.Running())
+				}
+			}
 		}
 	}
 }

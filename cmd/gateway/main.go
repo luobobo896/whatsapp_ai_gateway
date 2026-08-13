@@ -53,10 +53,15 @@ func main() {
 	llm := gateway.NewLLMClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
 	resultsDir := filepath.Join(filepath.Dir(cfgPath), "data", "results")
 	exec := gateway.NewExecutor(cfg, wdaMgr, llm, resultsDir)
-	gw := gateway.New(cfg, wdaMgr, exec, llm)
+	et := gateway.NewEasyTierManager(filepath.Dir(cfgPath), cfg)
+	gw := gateway.New(cfg, wdaMgr, exec, llm, et)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// easytier 后备通道自愈：按最新配置恢复（若已配置）。
+	if et.Configured() {
+		et.Recover()
+	}
 	go gw.WatchdogLoop(ctx)
 	go gw.CloudLoop(ctx)
 
