@@ -2,67 +2,434 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>WDA Farm Gateway</title>
 <style>
-  body{font-family:system-ui;margin:2rem;background:#f5f6f8;color:#222}
-  table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-  th,td{border-bottom:1px solid #eee;padding:.6rem .8rem;text-align:left;font-size:14px}
-  th{background:#fafbfc}
-  .ok{color:#1a7f37}.down{color:#cf222e}.busy{color:#9a6700}
-  button{padding:.3rem .7rem;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}
-  button:hover{background:#f0f0f0}
-  #cloud{margin-bottom:16px;padding:12px 16px;background:#fff;border:1px solid #eee;border-radius:8px;font-size:14px}
+  :root{
+    --bg:#f5f5f7;
+    --bg-grad-1:#fbfbfd;
+    --bg-grad-2:#eef0f4;
+    --card:#ffffff;
+    --card-hover:#ffffff;
+    --text:#1d1d1f;
+    --text-2:#6e6e73;
+    --text-3:#a1a1a6;
+    --border:rgba(0,0,0,.08);
+    --shadow:0 8px 24px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
+    --shadow-lg:0 20px 48px rgba(0,0,0,.12), 0 4px 16px rgba(0,0,0,.06);
+    --accent:#0071e3;
+    --accent-hover:#0077ed;
+    --green:#34c759;
+    --red:#ff3b30;
+    --orange:#ff9500;
+    --gray:#8e8e93;
+    --mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#000;
+      --bg-grad-1:#1c1c1e;
+      --bg-grad-2:#111113;
+      --card:#1c1c1e;
+      --card-hover:#222226;
+      --text:#f5f5f7;
+      --text-2:#98989f;
+      --text-3:#636366;
+      --border:rgba(255,255,255,.1);
+      --shadow:0 8px 24px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+      --shadow-lg:0 20px 48px rgba(0,0,0,.65), 0 4px 16px rgba(0,0,0,.4);
+      --accent:#0a84ff;
+      --accent-hover:#409cff;
+    }
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(1200px 500px at 20% -10%, var(--bg-grad-1), transparent 60%),
+      radial-gradient(1000px 460px at 90% 0%, var(--bg-grad-2), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+    letter-spacing:-.01em;
+  }
+  /* ---------- 顶部栏 ---------- */
+  header{
+    position:sticky;top:0;z-index:50;
+    backdrop-filter:saturate(180%) blur(20px);
+    -webkit-backdrop-filter:saturate(180%) blur(20px);
+    background:color-mix(in srgb, var(--bg) 72%, transparent);
+    border-bottom:1px solid var(--border);
+  }
+  .header-inner{
+    max-width:1080px;margin:0 auto;padding:14px 24px;
+    display:flex;align-items:center;justify-content:space-between;gap:16px;
+  }
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .brand-icon{
+    width:34px;height:34px;border-radius:9px;flex:none;
+    background:linear-gradient(135deg,#5ac8fa,#0a84ff 55%,#0071e3);
+    display:flex;align-items:center;justify-content:center;color:#fff;
+    box-shadow:0 4px 12px rgba(10,132,255,.35);
+  }
+  .brand-icon svg{width:20px;height:20px}
+  .brand h1{font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brand .sub{font-size:12px;color:var(--text-2);white-space:nowrap}
+  .header-actions{display:flex;align-items:center;gap:10px;flex:none}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;
+    padding:6px 13px;border-radius:980px;font-size:12.5px;font-weight:500;
+    background:var(--card);border:1px solid var(--border);color:var(--text-2);
+    box-shadow:var(--shadow);
+  }
+  .pill.on{color:var(--green)}
+  .pill.off{color:var(--text-2)}
+  /* ---------- 通用按钮 ---------- */
+  .btn{
+    appearance:none;border:0;cursor:pointer;font-family:inherit;
+    font-size:13.5px;font-weight:500;border-radius:980px;
+    padding:8px 18px;color:#fff;background:var(--accent);
+    transition:background .18s ease, transform .12s ease, box-shadow .18s ease, opacity .18s ease;
+    box-shadow:0 2px 8px rgba(0,113,227,.25);
+  }
+  .btn:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,113,227,.32)}
+  .btn:active{transform:translateY(0) scale(.97)}
+  .btn:disabled{opacity:.4;cursor:default;transform:none}
+  .btn.ghost{background:transparent;color:var(--accent);box-shadow:none}
+  .btn.ghost:hover{background:color-mix(in srgb, var(--accent) 10%, transparent)}
+  .btn.ghost.red{color:var(--red)}
+  .btn.ghost.red:hover{background:color-mix(in srgb, var(--red) 10%, transparent)}
+  .btn.sm{padding:5px 13px;font-size:12.5px}
+  /* ---------- 主体 ---------- */
+  main{max-width:1080px;margin:0 auto;padding:36px 24px 80px}
+  .hero h2{font-size:34px;font-weight:700;letter-spacing:-.02em}
+  .hero p{font-size:15px;color:var(--text-2);margin-top:6px;line-height:1.5}
+  /* 状态卡片 */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0 34px}
+  .stat{
+    background:var(--card);border:1px solid var(--border);border-radius:16px;
+    padding:16px 18px;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;gap:6px;
+    transition:transform .18s ease, box-shadow .18s ease;
+  }
+  .stat:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
+  .stat .k{font-size:12px;color:var(--text-2);font-weight:500}
+  .stat .v{font-size:24px;font-weight:700;letter-spacing:-.02em;display:flex;align-items:center;gap:8px}
+  .stat .v .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  /* 设备区 */
+  .section-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+  .section-head h3{font-size:20px;font-weight:700;letter-spacing:-.01em}
+  .section-head .count{font-size:13px;color:var(--text-2)}
+  .devices{display:flex;flex-direction:column;gap:12px}
+  .device{
+    background:var(--card);border:1px solid var(--border);border-radius:18px;
+    padding:18px 20px;box-shadow:var(--shadow);
+    display:flex;align-items:center;gap:18px;
+    transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  }
+  .device:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:color-mix(in srgb, var(--accent) 30%, var(--border))}
+  .device-icon{
+    width:52px;height:52px;border-radius:14px;flex:none;
+    background:linear-gradient(145deg,#f2f2f4,#e4e4e9);
+    display:flex;align-items:center;justify-content:center;color:#7a7a80;
+  }
+  @media (prefers-color-scheme: dark){
+    .device-icon{background:linear-gradient(145deg,#2c2c2e,#232326);color:#98989f}
+  }
+  .device-icon svg{width:30px;height:30px}
+  .device-main{min-width:0;flex:1 1 240px}
+  .device-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .device-title .name{font-size:16px;font-weight:600}
+  .device-title .tag{
+    font-size:11px;font-weight:600;padding:2px 9px;border-radius:980px;
+    color:var(--text-2);background:color-mix(in srgb, var(--text-2) 12%, transparent);
+  }
+  .device-meta{font-family:var(--mono);font-size:11.5px;color:var(--text-2);margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
+  .device-meta .sep{opacity:.4}
+  .device-right{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex:none}
+  .status-row{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  .dot.on{background:var(--green);box-shadow:0 0 0 0 rgba(52,199,89,.5);animation:pulse 2.2s infinite}
+  .dot.busy{background:var(--orange);box-shadow:0 0 0 0 rgba(255,149,0,.5);animation:pulse 1.4s infinite}
+  .dot.off{background:var(--gray)}
+  .dot.err{background:var(--red)}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(52,199,89,.45)}
+    70%{box-shadow:0 0 0 7px rgba(52,199,89,0)}
+    100%{box-shadow:0 0 0 0 rgba(52,199,89,0)}
+  }
+  .dot.busy{animation-name:pulseBusy}
+  @keyframes pulseBusy{
+    0%{box-shadow:0 0 0 0 rgba(255,149,0,.45)}
+    70%{box-shadow:0 0 0 7px rgba(255,149,0,0)}
+    100%{box-shadow:0 0 0 0 rgba(255,149,0,0)}
+  }
+  .metrics{display:flex;gap:14px;font-size:12px;color:var(--text-2)}
+  .metrics b{font-variant-numeric:tabular-nums;font-size:14px}
+  .metrics .ok b{color:var(--green)}
+  .metrics .fail b{color:var(--red)}
+  .actions{display:flex;gap:6px}
+  /* 空状态 */
+  .empty{
+    text-align:center;padding:60px 20px;color:var(--text-2);
+    background:var(--card);border:1px dashed var(--border);border-radius:18px;
+  }
+  .empty svg{width:44px;height:44px;opacity:.4;margin-bottom:12px}
+  .empty h4{font-size:16px;font-weight:600;color:var(--text)}
+  .empty p{font-size:13px;margin-top:4px}
+  /* 弹窗 */
+  .modal-mask{
+    position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  }
+  .modal-mask.open{display:flex}
+  .modal{
+    width:min(420px, calc(100vw - 40px));background:var(--card);border-radius:18px;
+    padding:24px;box-shadow:var(--shadow-lg);
+    transform:translateY(12px) scale(.97);opacity:0;transition:.22s cubic-bezier(.2,.8,.3,1);
+  }
+  .modal-mask.open .modal{transform:none;opacity:1}
+  .modal h4{font-size:18px;font-weight:700}
+  .modal p{font-size:13px;color:var(--text-2);margin-top:4px}
+  .modal input{
+    width:100%;margin-top:16px;padding:12px 14px;border-radius:12px;
+    border:1px solid var(--border);background:var(--bg);color:var(--text);
+    font-family:var(--mono);font-size:14px;outline:none;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .modal input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(10,132,255,.15)}
+  .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+  /* 提示 toast */
+  #toast{
+    position:fixed;left:50%;bottom:36px;transform:translateX(-50%) translateY(20px);
+    background:var(--text);color:var(--bg);padding:10px 18px;border-radius:980px;
+    font-size:13px;font-weight:500;opacity:0;pointer-events:none;
+    transition:.25s cubic-bezier(.2,.8,.3,1);z-index:200;box-shadow:var(--shadow-lg);
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  footer{max-width:1080px;margin:0 auto;padding:0 24px 40px;font-size:12px;color:var(--text-3);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  @media (max-width: 860px){
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .device{flex-wrap:wrap}
+    .device-right{align-items:flex-start;width:100%}
+    .hero h2{font-size:28px}
+  }
+  @media (max-width: 520px){.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
-<h1>WDA Farm Gateway</h1>
-<div id="cloud"><span id="cloudState">加载中…</span></div>
-<p><button onclick="refresh()">刷新</button> <span id="ts"></span></p>
-<table id="devices">
-  <thead><tr><th>UDID</th><th>名称</th><th>型号</th><th>IP</th><th>端口</th><th>WDA 进程</th><th>健康</th><th>状态</th><th>发送结果</th><th>操作</th></tr></thead>
-  <tbody></tbody>
-</table>
+
+<header>
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      </div>
+      <div>
+        <h1>WDA Farm Gateway</h1>
+        <div class="sub" id="brandSub">本地网关控制台</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="pill" id="cloudPill"><span class="dot off" id="cloudDot"></span><span id="cloudText">连接中…</span></span>
+      <button class="btn sm" id="refreshBtn" onclick="refreshAll()">刷新</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <h2>设备总览</h2>
+    <p id="heroSub">管理本地连接的 iPhone 与 WebDriverAgent · 数据每 5 秒自动刷新</p>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><span class="k">云通道</span><span class="v"><span class="dot" id="stCloudDot"></span><span id="stCloud">—</span></span></div>
+    <div class="stat"><span class="k">设备在线</span><span class="v"><span class="dot" id="stOnlineDot"></span><span id="stOnline">0</span></span></div>
+    <div class="stat"><span class="k">正在执行</span><span class="v"><span class="dot" id="stBusyDot"></span><span id="stBusy">0</span></span></div>
+    <div class="stat"><span class="k">待处理任务</span><span class="v"><span id="stPending">0</span></span></div>
+  </div>
+
+  <div class="section-head">
+    <h3>设备</h3>
+    <span class="count" id="deviceCount"></span>
+  </div>
+
+  <div class="devices" id="devices"></div>
+
+  <div class="empty" id="empty" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M10 4v4M14 4v4"/><rect x="5" y="8" width="14" height="13" rx="2"/><path d="M9 12v3M12 12v3M15 12v3"/></svg>
+    <h4>暂无已连接设备</h4>
+    <p>将 iPhone 接入 USB 并在 devices.json 中配置 IP 后，设备会出现在这里</p>
+  </div>
+</main>
+
+<footer>
+  <span>WDA Farm Gateway · <span id="footerTs">—</span></span>
+  <span id="footerWs"></span>
+</footer>
+
+<!-- 设 IP 弹窗 -->
+<div class="modal-mask" id="ipMask">
+  <div class="modal">
+    <h4>设置设备 IP</h4>
+    <p id="ipUdidLabel"></p>
+    <input id="ipInput" type="text" placeholder="例如 192.168.20.33" autocomplete="off" spellcheck="false">
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeIp()">取消</button>
+      <button class="btn" onclick="saveIp()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
 <script>
+let devicesCache = [];
+let ipTarget = null;
+const $ = (id) => document.getElementById(id);
+
+function toast(msg){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 async function loadCloud(){
-  try {
-    const r = await fetch('/api/cloud'); const c = await r.json();
-    const state = c.connected ? '<span class="ok">● 已连接平台</span>' : '<span class="down">● 未连接</span>';
-    const ex = c.executor || {};
-    document.getElementById('cloudState').innerHTML =
-      `云通道：${state}｜网关名：${c.gateway_name||'-'}｜地址：${c.ws_url||'-'}｜凭证已配置：${c.token_configured?'是':'否'}` +
-      (c.connected_at ? `｜连接时间：${c.connected_at}` : '') +
-      (c.last_error ? `｜<span class="down">${c.last_error}</span>` : '') +
-      `｜执行中 UDID：${(ex.busy_udids||[]).join(',')||'无'}｜待处理任务：${(ex.pending_tasks||[]).join(',')||'无'}`;
-  } catch(e){ document.getElementById('cloudState').textContent = '云状态读取失败: '+e; }
-}
-async function refresh(){
-  const r = await fetch('/api/devices'); const list = await r.json();
-  const tb = document.querySelector('#devices tbody'); tb.innerHTML='';
-  for (const d of list){
-    const h = d.last_health || {};
-    const m = d.metrics || {};
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${d.udid}</td><td>${d.name||'-'}</td><td>${d.model||'-'}</td>
-      <td>${d.ip||'<i>未设置</i>'}</td><td>${d.port||8100}</td>
-      <td>${d.wda_running?'运行中':'未运行'}</td>
-      <td class="${h.ok?'ok':'down'}">${h.ok?'OK':'DOWN'}</td>
-      <td class="${d.busy?'busy':'ok'}">${d.busy?'忙碌':'空闲'}</td>
-      <td>成功 <span class="ok">${m.sent_ok||0}</span> / 失败 <span class="down">${m.sent_fail||0}</span> / 共 ${m.total||0}</td>
-      <td><button onclick="act('${d.udid}')">激活</button>
-          <button onclick="stop('${d.udid}')">停止</button>
-          <button onclick="setip('${d.udid}')">设IP</button></td>`;
-    tb.appendChild(tr);
+  try{
+    const r = await fetch('/api/cloud');
+    const c = await r.json();
+    const on = !!c.connected;
+    $('cloudDot').className = 'dot ' + (on ? 'on' : 'off');
+    $('cloudText').textContent = on ? '已连接平台' : '未连接平台';
+    $('cloudPill').classList.toggle('on', on);
+    $('cloudPill').classList.toggle('off', !on);
+    $('stCloud').textContent = on ? '在线' : '离线';
+    $('stCloudDot').className = 'dot ' + (on ? 'on' : 'off');
+    $('stPending').textContent = (c.executor?.pending_tasks?.length ?? 0);
+    $('footerWs').textContent = c.ws_url ? '云通道 ' + c.ws_url : '';
+    $('brandSub').textContent = c.gateway_name ? c.gateway_name + (c.connected_at ? ' · 连接于 ' + c.connected_at : '') : '本地网关控制台';
+    if(c.last_error) toast('云通道错误：' + c.last_error);
+  }catch(e){
+    $('cloudText').textContent = '云状态读取失败';
+    $('cloudDot').className = 'dot err';
   }
-  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
-  loadCloud();
 }
-async function act(udid){ await fetch(`/api/devices/${udid}/activate`,{method:'POST'}); refresh(); }
-async function stop(udid){ await fetch(`/api/devices/${udid}/stop`,{method:'POST'}); refresh(); }
-async function setip(udid){
-  const ip = prompt('手机 Wi-Fi IP:'); if(!ip) return;
-  await fetch(`/api/devices/${udid}/set-ip?ip=${ip}`,{method:'POST'}); refresh();
+
+function deviceState(d){
+  if(d.busy) return {cls:'busy', txt:'忙碌', color:'var(--orange)'};
+  if(d.last_health?.ok) return {cls:'on', txt:'在线', color:'var(--green)'};
+  return {cls:'off', txt:'离线', color:'var(--gray)'};
 }
-refresh(); setInterval(refresh, 5000);
+
+function deviceCard(d){
+  const st = deviceState(d);
+  const h = d.last_health || {};
+  const m = d.metrics || {};
+  const name = esc(d.name || '未命名设备');
+  const model = esc(d.model || 'iPhone');
+  const ios = esc(d.ios_version || h.ios_version || '');
+  const udid = esc(d.udid);
+  const ip = esc(d.ip || '未设置 IP');
+  const health = h.ok ? 'WDA 健康' : (h.error ? 'WDA 异常' : 'WDA 未探测');
+  return `
+    <div class="device">
+      <div class="device-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      </div>
+      <div class="device-main">
+        <div class="device-title">
+          <span class="name">${name}</span>
+          <span class="tag">${esc(model)}</span>
+          ${ios ? `<span class="tag">iOS ${esc(ios)}</span>` : ''}
+        </div>
+        <div class="device-meta">
+          <span>${udid}</span><span class="sep">·</span>
+          <span>${ip}:${esc(d.port || 8100)}</span><span class="sep">·</span>
+          <span class="${h.ok ? '' : (h.error ? 'dot-err' : '')}" style="${h.ok?'color:var(--green)':(h.error?'color:var(--red)':'')}">${health}</span>
+        </div>
+      </div>
+      <div class="device-right">
+        <div class="status-row"><span class="dot ${st.cls}"></span>${st.txt}</div>
+        <div class="metrics">
+          <span class="ok">成功 <b>${m.sent_ok || 0}</b></span>
+          <span class="fail">失败 <b>${m.sent_fail || 0}</b></span>
+          <span>共 <b>${m.total || 0}</b></span>
+        </div>
+        <div class="actions">
+          <button class="btn ghost sm" onclick="act('${d.udid}')">激活</button>
+          <button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>
+          <button class="btn ghost sm" onclick="openIp('${d.udid}','${ip}')">设 IP</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function refreshDevices(){
+  let list = [];
+  try{
+    const r = await fetch('/api/devices');
+    list = await r.json();
+  }catch(e){
+    toast('设备列表读取失败');
+    return;
+  }
+  devicesCache = list;
+  const on = list.filter(d => d.last_health?.ok && !d.busy).length;
+  const busy = list.filter(d => d.busy).length;
+  $('stOnline').textContent = on;
+  $('stBusy').textContent = busy;
+  $('stOnlineDot').className = 'dot ' + (on ? 'on' : 'off');
+  $('stBusyDot').className = 'dot ' + (busy ? 'busy' : 'off');
+  $('deviceCount').textContent = '共 ' + list.length + ' 台';
+  const box = $('devices');
+  box.innerHTML = list.map(deviceCard).join('');
+  $('empty').style.display = list.length ? 'none' : 'block';
+  $('footerTs').textContent = new Date().toLocaleTimeString();
+  $('heroSub').textContent = '管理本地连接的 iPhone 与 WebDriverAgent · 最后刷新 ' + new Date().toLocaleTimeString();
+}
+
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices()]); }
+
+async function act(udid){
+  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'}); toast('已触发激活'); refreshDevices(); }
+  catch(e){ toast('激活失败'); }
+}
+async function stop(udid){
+  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'}); toast('已停止 WDA'); refreshDevices(); }
+  catch(e){ toast('停止失败'); }
+}
+function openIp(udid, current){
+  ipTarget = udid;
+  $('ipUdidLabel').textContent = udid;
+  $('ipInput').value = (current && current !== '未设置 IP') ? current : '';
+  $('ipMask').classList.add('open');
+  setTimeout(() => $('ipInput').focus(), 60);
+}
+function closeIp(){ $('ipMask').classList.remove('open'); ipTarget = null; }
+async function saveIp(){
+  const ip = $('ipInput').value.trim();
+  if(!ip){ toast('请输入 IP'); return; }
+  try{
+    await fetch('/api/devices/' + encodeURIComponent(ipTarget) + '/set-ip?ip=' + encodeURIComponent(ip), {method:'POST'});
+    toast('IP 已更新');
+    closeIp();
+    refreshDevices();
+  }catch(e){ toast('保存失败'); }
+}
+$('ipMask').addEventListener('click', (e) => { if(e.target === $('ipMask')) closeIp(); });
+$('ipInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') saveIp(); if(e.key === 'Escape') closeIp(); });
+
+refreshAll();
+setInterval(refreshAll, 5000);
 </script>
 </body>
 </html>
