@@ -96,9 +96,14 @@ async def handle_command(cmd: dict):
     if action == "activate":
         if dev is None:
             raise HTTPException(404, f"device {udid} not configured")
+        dev["auto_reactivate"] = True
+        _config.config.save()
         await asyncio.to_thread(wda.activate, udid, port, udid)
         return {"udid": udid, "status": "activated"}
     if action == "stop":
+        if dev is not None:
+            dev["auto_reactivate"] = False
+            _config.config.save()
         await asyncio.to_thread(wda.stop, udid)
         return {"udid": udid, "status": "stopped"}
     if action == "status":
@@ -144,15 +149,21 @@ async def api_activate(udid: str, port: int = 8100):
     if dev is None:
         dev = {"udid": udid, "ip": "", "port": port, "auto_reactivate": True}
         _config.config.devices.append(dev)
-        _config.config.save()
+    dev["auto_reactivate"] = True  # 激活 = 恢复看护（watchdog 自动重拉）
+    _config.config.save()
     await asyncio.to_thread(wda.activate, udid, port, udid)
-    return {"udid": udid, "status": "activated"}
+    return {"udid": udid, "status": "activated", "auto_reactivate": True}
 
 
 @app.post("/api/devices/{udid}/stop")
 async def api_stop(udid: str):
+    # 停止 = 真正停止：关掉自动看护，watchdog 不再自动拉起
+    dev = next((d for d in _config.config.devices if d["udid"] == udid), None)
+    if dev is not None:
+        dev["auto_reactivate"] = False
+        _config.config.save()
     await asyncio.to_thread(wda.stop, udid)
-    return {"udid": udid, "status": "stopped"}
+    return {"udid": udid, "status": "stopped", "auto_reactivate": False}
 
 
 @app.get("/api/devices/{udid}/health")
@@ -199,25 +210,6 @@ async def api_easytier_status():
 @app.get("/api/easytier/config")
 async def api_easytier_config():
     from .easytier import manager as et
-    return et.public_config()
-
-
-class EasyTierConfigBody(BaseModel):
-    network_name: str | None = None
-    network_secret: str | None = None
-    relay_host: str | None = None
-    relay_port: int | None = None
-    network_cidr: str | None = None
-    gateway_ipv4: str | None = None
-    mtu: int | None = None
-    tun: bool | None = None
-
-
-@app.put("/api/easytier/config")
-async def api_easytier_config_put(body: EasyTierConfigBody):
-    from .easytier import manager as et
-    cfg = {k: v for k, v in body.model_dump().items() if v is not None}
-    et.save(cfg)
     return et.public_config()
 
 

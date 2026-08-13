@@ -65,13 +65,14 @@ class EasyTierManager:
         return c
 
     def apply(self, cfg: dict) -> bool:
-        """收到平台 easytier:config：保存并启动集成的 easytier 服务（设计 §7.2）。"""
+        """收到平台 easytier:config：保存并重启集成的 easytier 服务使新配置生效（设计 §7.2）。
+        运行中 -> restart；未运行 -> start。"""
         self.save(cfg)
         if not self.configured():
             raise RuntimeError("easytier 配置不完整（缺 network_secret 或 relay_host）")
-        if not self.running():
-            return self.start()
-        return True
+        if self.running():
+            return self.restart()
+        return self.start()
 
     # ---------- 生成配置 / 启停 ----------
     def write_toml(self) -> None:

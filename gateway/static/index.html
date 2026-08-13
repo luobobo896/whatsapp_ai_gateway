@@ -10,7 +10,6 @@
     --bg-grad-1:#fbfbfd;
     --bg-grad-2:#eef0f4;
     --card:#ffffff;
-    --card-hover:#ffffff;
     --text:#1d1d1f;
     --text-2:#6e6e73;
     --text-3:#a1a1a6;
@@ -31,7 +30,6 @@
       --bg-grad-1:#1c1c1e;
       --bg-grad-2:#111113;
       --card:#1c1c1e;
-      --card-hover:#222226;
       --text:#f5f5f7;
       --text-2:#98989f;
       --text-3:#636366;
@@ -67,7 +65,7 @@
     max-width:1080px;margin:0 auto;padding:14px 24px;
     display:flex;align-items:center;justify-content:space-between;gap:16px;
   }
-  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0;cursor:pointer}
   .brand-icon{
     width:34px;height:34px;border-radius:9px;flex:none;
     background:linear-gradient(135deg,#5ac8fa,#0a84ff 55%,#0071e3);
@@ -77,15 +75,30 @@
   .brand-icon svg{width:20px;height:20px}
   .brand h1{font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .brand .sub{font-size:12px;color:var(--text-2);white-space:nowrap}
-  .header-actions{display:flex;align-items:center;gap:10px;flex:none}
+  .header-actions{display:flex;align-items:center;gap:10px;flex:none;flex-wrap:wrap}
   .pill{
     display:inline-flex;align-items:center;gap:7px;
-    padding:6px 13px;border-radius:980px;font-size:12.5px;font-weight:500;
+    padding:7px 14px;border-radius:980px;font-size:12.5px;font-weight:500;
     background:var(--card);border:1px solid var(--border);color:var(--text-2);
-    box-shadow:var(--shadow);
+    box-shadow:var(--shadow);cursor:pointer;transition:transform .15s ease, box-shadow .15s ease;
   }
+  .pill:hover{transform:translateY(-1px);box-shadow:var(--shadow-lg)}
   .pill.on{color:var(--green)}
   .pill.off{color:var(--text-2)}
+  /* 快捷开关 */
+  .switch{position:relative;display:inline-block;width:40px;height:24px;flex:none;cursor:pointer}
+  .switch input{opacity:0;width:0;height:0}
+  .switch .slider{
+    position:absolute;inset:0;border-radius:980px;background:color-mix(in srgb, var(--text-2) 35%, transparent);
+    transition:.2s ease;
+  }
+  .switch .slider:before{
+    content:"";position:absolute;width:20px;height:20px;border-radius:50%;
+    left:2px;top:2px;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.25);transition:.2s cubic-bezier(.2,.8,.3,1);
+  }
+  .switch input:checked + .slider{background:var(--green)}
+  .switch input:checked + .slider:before{transform:translateX(16px)}
+  .switch input:disabled + .slider{opacity:.5}
   /* ---------- 通用按钮 ---------- */
   .btn{
     appearance:none;border:0;cursor:pointer;font-family:inherit;
@@ -104,10 +117,12 @@
   .btn.sm{padding:5px 13px;font-size:12.5px}
   /* ---------- 主体 ---------- */
   main{max-width:1080px;margin:0 auto;padding:36px 24px 80px}
-  .hero h2{font-size:34px;font-weight:700;letter-spacing:-.02em}
+  .hero h2{font-size:30px;font-weight:700;letter-spacing:-.02em;display:flex;align-items:center;gap:12px}
   .hero p{font-size:15px;color:var(--text-2);margin-top:6px;line-height:1.5}
+  .back{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--accent);cursor:pointer;margin-bottom:14px;font-weight:500}
+  .back:hover{text-decoration:underline}
   /* 状态卡片 */
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0 34px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:24px 0 30px}
   .stat{
     background:var(--card);border:1px solid var(--border);border-radius:16px;
     padding:16px 18px;box-shadow:var(--shadow);
@@ -135,17 +150,12 @@
     background:linear-gradient(145deg,#f2f2f4,#e4e4e9);
     display:flex;align-items:center;justify-content:center;color:#7a7a80;
   }
-  @media (prefers-color-scheme: dark){
-    .device-icon{background:linear-gradient(145deg,#2c2c2e,#232326);color:#98989f}
-  }
+  @media (prefers-color-scheme: dark){.device-icon{background:linear-gradient(145deg,#2c2c2e,#232326);color:#98989f}}
   .device-icon svg{width:30px;height:30px}
   .device-main{min-width:0;flex:1 1 240px}
   .device-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .device-title .name{font-size:16px;font-weight:600}
-  .device-title .tag{
-    font-size:11px;font-weight:600;padding:2px 9px;border-radius:980px;
-    color:var(--text-2);background:color-mix(in srgb, var(--text-2) 12%, transparent);
-  }
+  .device-title .tag{font-size:11px;font-weight:600;padding:2px 9px;border-radius:980px;color:var(--text-2);background:color-mix(in srgb, var(--text-2) 12%, transparent)}
   .device-meta{font-family:var(--mono);font-size:11.5px;color:var(--text-2);margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
   .device-meta .sep{opacity:.4}
   .device-right{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex:none}
@@ -171,59 +181,49 @@
   .metrics .ok b{color:var(--green)}
   .metrics .fail b{color:var(--red)}
   .actions{display:flex;gap:6px}
+  .et-actions{display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+  /* peer 表 */
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{color:var(--text-2);font-weight:500;text-align:left;padding:12px 16px}
+  td{padding:10px 16px;border-top:1px solid var(--border)}
+  td.mono{font-family:var(--mono)}
   /* 空状态 */
-  .empty{
-    text-align:center;padding:60px 20px;color:var(--text-2);
-    background:var(--card);border:1px dashed var(--border);border-radius:18px;
-  }
+  .empty{text-align:center;padding:60px 20px;color:var(--text-2);background:var(--card);border:1px dashed var(--border);border-radius:18px}
   .empty svg{width:44px;height:44px;opacity:.4;margin-bottom:12px}
   .empty h4{font-size:16px;font-weight:600;color:var(--text)}
   .empty p{font-size:13px;margin-top:4px}
   /* 弹窗 */
-  .modal-mask{
-    position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;
-    background:rgba(0,0,0,.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
-  }
+  .modal-mask{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
   .modal-mask.open{display:flex}
-  .modal{
-    width:min(420px, calc(100vw - 40px));background:var(--card);border-radius:18px;
-    padding:24px;box-shadow:var(--shadow-lg);
-    transform:translateY(12px) scale(.97);opacity:0;transition:.22s cubic-bezier(.2,.8,.3,1);
-  }
+  .modal{width:min(520px, calc(100vw - 40px));background:var(--card);border-radius:18px;padding:24px;box-shadow:var(--shadow-lg);transform:translateY(12px) scale(.97);opacity:0;transition:.22s cubic-bezier(.2,.8,.3,1)}
   .modal-mask.open .modal{transform:none;opacity:1}
   .modal h4{font-size:18px;font-weight:700}
   .modal p{font-size:13px;color:var(--text-2);margin-top:4px}
-  .modal input{
-    width:100%;margin-top:16px;padding:12px 14px;border-radius:12px;
-    border:1px solid var(--border);background:var(--bg);color:var(--text);
-    font-family:var(--mono);font-size:14px;outline:none;
-    transition:border-color .15s, box-shadow .15s;
-  }
+  .modal .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+  .modal label{display:block;font-size:12px;color:var(--text-2);margin-bottom:4px}
+  .modal input{width:100%;padding:11px 13px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13.5px;outline:none;transition:border-color .15s, box-shadow .15s}
   .modal input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(10,132,255,.15)}
+  .modal .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);padding-top:10px}
+  .modal .check input{width:auto}
   .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
-  /* 提示 toast */
-  #toast{
-    position:fixed;left:50%;bottom:36px;transform:translateX(-50%) translateY(20px);
-    background:var(--text);color:var(--bg);padding:10px 18px;border-radius:980px;
-    font-size:13px;font-weight:500;opacity:0;pointer-events:none;
-    transition:.25s cubic-bezier(.2,.8,.3,1);z-index:200;box-shadow:var(--shadow-lg);
-  }
+  /* toast */
+  #toast{position:fixed;left:50%;bottom:36px;transform:translateX(-50%) translateY(20px);background:var(--text);color:var(--bg);padding:10px 18px;border-radius:980px;font-size:13px;font-weight:500;opacity:0;pointer-events:none;transition:.25s cubic-bezier(.2,.8,.3,1);z-index:200;box-shadow:var(--shadow-lg)}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   footer{max-width:1080px;margin:0 auto;padding:0 24px 40px;font-size:12px;color:var(--text-3);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
   @media (max-width: 860px){
     .stats{grid-template-columns:repeat(2,1fr)}
     .device{flex-wrap:wrap}
     .device-right{align-items:flex-start;width:100%}
-    .hero h2{font-size:28px}
+    .hero h2{font-size:26px}
   }
-  @media (max-width: 520px){.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 
 <header>
   <div class="header-inner">
-    <div class="brand">
+    <div class="brand" onclick="showView('devices')">
       <div class="brand-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M10 18.5h4"/></svg>
       </div>
@@ -234,120 +234,100 @@
     </div>
     <div class="header-actions">
       <span class="pill" id="cloudPill"><span class="dot off" id="cloudDot"></span><span id="cloudText">连接中…</span></span>
+      <button class="pill" id="etPill" onclick="showView('network')">
+        <span class="dot off" id="etPillDot"></span>组网
+        <span id="etPillText">未启用</span>
+      </button>
+      <label class="switch" title="easytier 快捷开关" id="etSwitchLabel">
+        <input type="checkbox" id="etToggle" onchange="etToggleChange(this)">
+        <span class="slider"></span>
+      </label>
       <button class="btn sm" id="refreshBtn" onclick="refreshAll()">刷新</button>
     </div>
   </div>
 </header>
 
 <main>
-  <div class="hero">
-    <h2>设备总览</h2>
-    <p id="heroSub">管理本地连接的 iPhone 与 WebDriverAgent · 数据每 5 秒自动刷新</p>
+  <!-- ================= 设备总览 ================= -->
+  <div id="viewDevices">
+    <div class="hero">
+      <h2>设备总览</h2>
+      <p id="heroSub">管理本地连接的 iPhone 与 WebDriverAgent · 数据每 5 秒自动刷新</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="k">云通道</span><span class="v"><span class="dot" id="stCloudDot"></span><span id="stCloud">—</span></span></div>
+      <div class="stat"><span class="k">设备在线</span><span class="v"><span class="dot" id="stOnlineDot"></span><span id="stOnline">0</span></span></div>
+      <div class="stat"><span class="k">正在执行</span><span class="v"><span class="dot" id="stBusyDot"></span><span id="stBusy">0</span></span></div>
+      <div class="stat"><span class="k">待处理任务</span><span class="v"><span id="stPending">0</span></span></div>
+    </div>
+    <div class="section-head">
+      <h3>设备</h3>
+      <span class="count" id="deviceCount"></span>
+    </div>
+    <div class="devices" id="devices"></div>
+    <div class="empty" id="empty" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M10 4v4M14 4v4"/><rect x="5" y="8" width="14" height="13" rx="2"/><path d="M9 12v3M12 12v3M15 12v3"/></svg>
+      <h4>暂无已连接设备</h4>
+      <p>将 iPhone 接入 USB 并配置后，设备会出现在这里</p>
+    </div>
   </div>
 
-  <div class="stats">
-    <div class="stat"><span class="k">云通道</span><span class="v"><span class="dot" id="stCloudDot"></span><span id="stCloud">—</span></span></div>
-    <div class="stat"><span class="k">设备在线</span><span class="v"><span class="dot" id="stOnlineDot"></span><span id="stOnline">0</span></span></div>
-    <div class="stat"><span class="k">正在执行</span><span class="v"><span class="dot" id="stBusyDot"></span><span id="stBusy">0</span></span></div>
-    <div class="stat"><span class="k">待处理任务</span><span class="v"><span id="stPending">0</span></span></div>
-  </div>
-
-  <div class="section-head">
-    <h3>设备</h3>
-    <span class="count" id="deviceCount"></span>
-  </div>
-
-  <div class="devices" id="devices"></div>
-
-  <div class="empty" id="empty" style="display:none">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M10 4v4M14 4v4"/><rect x="5" y="8" width="14" height="13" rx="2"/><path d="M9 12v3M12 12v3M15 12v3"/></svg>
-    <h4>暂无已连接设备</h4>
-    <p>将 iPhone 接入 USB 并在 devices.json 中配置 IP 后，设备会出现在这里</p>
+  <!-- ================= 组网（easytier） ================= -->
+  <div id="viewNetwork" style="display:none">
+    <div class="back" onclick="showView('devices')">‹ 返回设备总览</div>
+    <div class="hero">
+      <h2>组网 · easytier 后备通道</h2>
+      <p>可选能力，默认关闭；平台下发 easytier:config 后作为 WSS 之外的后备链路</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="k">配置状态</span><span class="v"><span id="etCfgDot" class="dot off"></span><span id="etCfg">—</span></span></div>
+      <div class="stat"><span class="k">服务状态</span><span class="v"><span id="etRunDot" class="dot off"></span><span id="etRun">—</span></span></div>
+      <div class="stat"><span class="k">节点 IP</span><span class="v" style="font-size:17px" id="etIp">—</span></div>
+      <div class="stat"><span class="k">Peer 数</span><span class="v" id="etPeers">0</span></div>
+    </div>
+    <div class="et-actions">
+      <button class="btn sm" onclick="etAction('start')">启动</button>
+      <button class="btn ghost sm" onclick="etAction('restart')">重启</button>
+      <button class="btn ghost red sm" onclick="etAction('stop')">停止</button>
+      <button class="btn ghost sm" onclick="loadEt()">刷新</button>
+    </div>
+    <div class="panel" style="padding:18px 20px;margin-bottom:14px">
+      <div style="font-size:15px;font-weight:600;margin-bottom:4px">当前配置</div>
+      <div style="font-size:12px;color:var(--text-2);margin-bottom:12px">由平台「组网」页下发，网关端只读；平台重新下发后自动重启生效</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px">
+        <div><div style="font-size:11px;color:var(--text-2)">network_name</div><div id="etCfgName" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">relay_host</div><div id="etCfgHost" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">relay_port</div><div id="etCfgPort" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">network_cidr</div><div id="etCfgCidr" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">gateway_ipv4</div><div id="etCfgIp" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">mtu</div><div id="etCfgMtu" style="font-family:var(--mono);font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">模式</div><div id="etCfgTun" style="font-size:13px;margin-top:2px">-</div></div>
+        <div><div style="font-size:11px;color:var(--text-2)">network_secret</div><div id="etCfgSecret" style="font-size:13px;margin-top:2px">-</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <table id="etPeersTable">
+        <thead><tr>
+          <th>Hostname</th><th>IPv4</th><th>链路</th><th>延迟</th><th>NAT</th><th>版本</th>
+        </tr></thead>
+        <tbody id="etPeersBody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="etEmpty" style="display:none">
+      <h4>easytier 未配置或未运行</h4>
+      <p>在平台「组网」页下发 easytier:config，或点击上方「配置」手动填写后启动</p>
+    </div>
   </div>
 </main>
-
-  <!-- easytier 后备通道（可选，平台 easytier:config 下发） -->
-  <div class="hero" style="margin-top:8px">
-    <h2>组网（easytier 后备通道）</h2>
-    <p>可选能力，默认关闭；平台下发 easytier:config 或本地配置后启动，作为 WSS 之外的后备链路</p>
-  </div>
-  <div class="stats" id="etStats" style="grid-template-columns:repeat(4,1fr)">
-    <div class="stat"><span class="k">配置状态</span><span class="v"><span id="etCfgDot" class="dot off"></span><span id="etCfg">—</span></span></div>
-    <div class="stat"><span class="k">服务状态</span><span class="v"><span id="etRunDot" class="dot off"></span><span id="etRun">—</span></span></div>
-    <div class="stat"><span class="k">节点 IP</span><span class="v" style="font-size:17px" id="etIp">—</span></div>
-    <div class="stat"><span class="k">Peer 数</span><span class="v" id="etPeers">0</span></div>
-  </div>
-  <div style="display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap">
-    <button class="btn sm" onclick="etAction('start')">启动</button>
-    <button class="btn ghost sm" onclick="etAction('restart')">重启</button>
-    <button class="btn ghost red sm" onclick="etAction('stop')">停止</button>
-    <button class="btn ghost sm" onclick="loadEt()">刷新</button>
-    <button class="btn ghost sm" onclick="openEtConfig()">配置</button>
-  </div>
-  <div class="device" style="padding:0">
-    <table id="etPeersTable" style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead><tr style="color:var(--text-2);text-align:left">
-        <th style="padding:12px 16px;font-weight:500">Hostname</th>
-        <th style="padding:12px 16px;font-weight:500">IPv4</th>
-        <th style="padding:12px 16px;font-weight:500">链路</th>
-        <th style="padding:12px 16px;font-weight:500">延迟</th>
-        <th style="padding:12px 16px;font-weight:500">NAT</th>
-        <th style="padding:12px 16px;font-weight:500">版本</th>
-      </tr></thead>
-      <tbody id="etPeersBody"></tbody>
-    </table>
-  </div>
-  <div class="empty" id="etEmpty" style="display:none">
-    <h4>easytier 未配置或未运行</h4>
-    <p>在平台「组网」页下发 easytier:config，或点击上方「配置」手动填写后启动</p>
-  </div>
 
 <footer>
   <span>WDA Farm Gateway · <span id="footerTs">—</span></span>
   <span id="footerWs"></span>
 </footer>
 
-<!-- 设 IP 弹窗 -->
-<div class="modal-mask" id="ipMask">
-  <div class="modal">
-    <h4>设置设备 IP</h4>
-    <p id="ipUdidLabel"></p>
-    <input id="ipInput" type="text" placeholder="例如 192.168.20.33" autocomplete="off" spellcheck="false">
-    <div class="modal-actions">
-      <button class="btn ghost" onclick="closeIp()">取消</button>
-      <button class="btn" onclick="saveIp()">保存</button>
-    </div>
-  </div>
-</div>
-
 <div id="toast"></div>
 
-<!-- easytier 配置弹窗 -->
-<div class="modal-mask" id="etMask">
-  <div class="modal" style="width:min(520px, calc(100vw - 40px))">
-    <h4>easytier 配置</h4>
-    <p>保存后需「重启」生效；network_secret 不回显，留空表示保持不变</p>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-      <div><label style="font-size:12px;color:var(--text-2)">network_name</label><input id="et_network_name" placeholder="wa-ios"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">relay_host</label><input id="et_relay_host" placeholder="hk.hsddns.com"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">relay_port</label><input id="et_relay_port" type="number" placeholder="11010"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">network_cidr</label><input id="et_network_cidr" placeholder="10.168.0.0/16"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">gateway_ipv4</label><input id="et_gateway_ipv4" placeholder="10.168.1.2"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">mtu</label><input id="et_mtu" type="number" placeholder="1380"></div>
-      <div><label style="font-size:12px;color:var(--text-2)">network_secret（新值覆盖）</label><input id="et_secret" type="password" placeholder="留空不变"></div>
-      <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2)">
-        <input id="et_tun" type="checkbox" style="width:auto"> TUN 模式（需 root，绑定虚 IP）
-      </div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn ghost" onclick="closeEtConfig()">取消</button>
-      <button class="btn" onclick="saveEtConfig()">保存</button>
-    </div>
-  </div>
-</div>
-
 <script>
-let devicesCache = [];
 let ipTarget = null;
 const $ = (id) => document.getElementById(id);
 
@@ -358,11 +338,16 @@ function toast(msg){
   clearTimeout(t._h);
   t._h = setTimeout(() => t.classList.remove('show'), 2200);
 }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-function esc(s){
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/* ---------- 视图切换 ---------- */
+function showView(v){
+  $('viewDevices').style.display = v === 'devices' ? 'block' : 'none';
+  $('viewNetwork').style.display = v === 'network' ? 'block' : 'none';
+  if(v === 'network') loadEt();
 }
 
+/* ---------- 云通道 ---------- */
 async function loadCloud(){
   try{
     const r = await fetch('/api/cloud');
@@ -384,22 +369,31 @@ async function loadCloud(){
   }
 }
 
+/* ---------- 设备 ---------- */
 function deviceState(d){
-  if(d.busy) return {cls:'busy', txt:'忙碌', color:'var(--orange)'};
-  if(d.last_health?.ok) return {cls:'on', txt:'在线', color:'var(--green)'};
-  return {cls:'off', txt:'离线', color:'var(--gray)'};
+  if(d.busy) return {cls:'busy', txt:'忙碌'};
+  if(d.last_health?.ok) return {cls:'on', txt:'在线'};
+  return {cls:'off', txt:'离线'};
 }
-
 function deviceCard(d){
   const st = deviceState(d);
   const h = d.last_health || {};
   const m = d.metrics || {};
+  const running = !!d.wda_running;
   const name = esc(d.name || '未命名设备');
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
   const ip = esc(d.ip || '未设置 IP');
-  const health = h.ok ? 'WDA 健康' : (h.error ? 'WDA 异常' : 'WDA 未探测');
+  const healthCls = h.ok ? 'color:var(--green)' : (h.error ? 'color:var(--red)' : 'color:var(--text-2)');
+  const healthTxt = h.ok ? 'WDA 健康' : (h.error ? 'WDA 异常' : 'WDA 未探测');
+  // 激活后不再显示「激活」；只有未运行才显示「激活」，运行/忙碌才显示「停止」
+  let actions = '';
+  if(!running && !d.busy){
+    actions += `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
+  } else if(running || d.busy){
+    actions += `<button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>`;
+  }
   return `
     <div class="device">
       <div class="device-icon">
@@ -408,13 +402,14 @@ function deviceCard(d){
       <div class="device-main">
         <div class="device-title">
           <span class="name">${name}</span>
-          <span class="tag">${esc(model)}</span>
-          ${ios ? `<span class="tag">iOS ${esc(ios)}</span>` : ''}
+          <span class="tag">${model}</span>
+          ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
+          ${running ? '<span class="tag" style="color:var(--green)">WDA 已激活</span>' : ''}
         </div>
         <div class="device-meta">
           <span>${udid}</span><span class="sep">·</span>
           <span>${ip}:${esc(d.port || 8100)}</span><span class="sep">·</span>
-          <span class="${h.ok ? '' : (h.error ? 'dot-err' : '')}" style="${h.ok?'color:var(--green)':(h.error?'color:var(--red)':'')}">${health}</span>
+          <span style="${healthCls}">${healthTxt}</span>
         </div>
       </div>
       <div class="device-right">
@@ -424,25 +419,14 @@ function deviceCard(d){
           <span class="fail">失败 <b>${m.sent_fail || 0}</b></span>
           <span>共 <b>${m.total || 0}</b></span>
         </div>
-        <div class="actions">
-          <button class="btn ghost sm" onclick="act('${d.udid}')">激活</button>
-          <button class="btn ghost red sm" onclick="stop('${d.udid}')">停止</button>
-          <button class="btn ghost sm" onclick="openIp('${d.udid}','${ip}')">设 IP</button>
-        </div>
+        <div class="actions">${actions || '<span style="font-size:12px;color:var(--text-3)">执行中…</span>'}</div>
       </div>
     </div>`;
 }
-
 async function refreshDevices(){
   let list = [];
-  try{
-    const r = await fetch('/api/devices');
-    list = await r.json();
-  }catch(e){
-    toast('设备列表读取失败');
-    return;
-  }
-  devicesCache = list;
+  try{ list = await (await fetch('/api/devices')).json(); }
+  catch(e){ toast('设备列表读取失败'); return; }
   const on = list.filter(d => d.last_health?.ok && !d.busy).length;
   const busy = list.filter(d => d.busy).length;
   $('stOnline').textContent = on;
@@ -450,75 +434,75 @@ async function refreshDevices(){
   $('stOnlineDot').className = 'dot ' + (on ? 'on' : 'off');
   $('stBusyDot').className = 'dot ' + (busy ? 'busy' : 'off');
   $('deviceCount').textContent = '共 ' + list.length + ' 台';
-  const box = $('devices');
-  box.innerHTML = list.map(deviceCard).join('');
+  $('devices').innerHTML = list.map(deviceCard).join('');
   $('empty').style.display = list.length ? 'none' : 'block';
   $('footerTs').textContent = new Date().toLocaleTimeString();
-  $('heroSub').textContent = '管理本地连接的 iPhone 与 WebDriverAgent · 最后刷新 ' + new Date().toLocaleTimeString();
 }
-
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices()]); }
-
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt()]); }
 async function act(udid){
-  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'}); toast('已触发激活'); refreshDevices(); }
+  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'}); toast('已激活 WDA（恢复自动看护）'); refreshDevices(); }
   catch(e){ toast('激活失败'); }
 }
 async function stop(udid){
-  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'}); toast('已停止 WDA'); refreshDevices(); }
+  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'}); toast('已停止 WDA（不再自动拉起）'); refreshDevices(); }
   catch(e){ toast('停止失败'); }
 }
-function openIp(udid, current){
-  ipTarget = udid;
-  $('ipUdidLabel').textContent = udid;
-  $('ipInput').value = (current && current !== '未设置 IP') ? current : '';
-  $('ipMask').classList.add('open');
-  setTimeout(() => $('ipInput').focus(), 60);
-}
-function closeIp(){ $('ipMask').classList.remove('open'); ipTarget = null; }
-async function saveIp(){
-  const ip = $('ipInput').value.trim();
-  if(!ip){ toast('请输入 IP'); return; }
-  try{
-    await fetch('/api/devices/' + encodeURIComponent(ipTarget) + '/set-ip?ip=' + encodeURIComponent(ip), {method:'POST'});
-    toast('IP 已更新');
-    closeIp();
-    refreshDevices();
-  }catch(e){ toast('保存失败'); }
-}
-$('ipMask').addEventListener('click', (e) => { if(e.target === $('ipMask')) closeIp(); });
-$('ipInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') saveIp(); if(e.key === 'Escape') closeIp(); });
 
+/* ---------- easytier ---------- */
 async function loadEt(){
+  let running = false, configured = false, ip = '—', peers = [], err = null;
   try{
-    const r = await fetch('/api/easytier/status');
-    const st = await r.json();
-    const cfgr = await fetch('/api/easytier/config');
-    const cfg = await cfgr.json();
-    const configured = !!st.configured;
-    $('etCfg').textContent = configured ? '已配置' : '未配置';
-    $('etCfgDot').className = 'dot ' + (configured ? 'on' : 'off');
-    $('etRun').textContent = st.running ? '运行中' : '未运行';
-    $('etRunDot').className = 'dot ' + (st.running ? 'on' : 'off');
-    $('etIp').textContent = (st.node && st.node.ipv4_addr) ? st.node.ipv4_addr : (cfg.gateway_ipv4 || '—');
-    $('etPeers').textContent = st.peers ? st.peers.length : 0;
-    const body = $('etPeersBody');
-    body.innerHTML = '';
-    for (const p of (st.peers || [])){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td style="padding:10px 16px;border-top:1px solid var(--border);font-weight:500">${esc(p.hostname||'-')}</td>
-        <td style="padding:10px 16px;border-top:1px solid var(--border);font-family:var(--mono)">${esc(p.ipv4||'-')}</td>
-        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.cost||'-')}</td>
-        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.lat_ms||'-')}</td>
-        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.nat_type||'-')}</td>
-        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.version||'-')}</td>`;
-      body.appendChild(tr);
-    }
-    $('etEmpty').style.display = (st.peers && st.peers.length) ? 'none' : 'block';
-    $('etPeersTable').style.display = (st.peers && st.peers.length) ? 'table' : 'none';
-    if(st.error) toast('easytier: ' + st.error);
-  }catch(e){ /* easytier 接口不可用则不渲染 */ }
+    const st = await (await fetch('/api/easytier/status')).json();
+    running = !!st.running; configured = !!st.configured; peers = st.peers || []; err = st.error;
+    ip = (st.node && st.node.ipv4_addr) || ip;
+  }catch(e){ /* easytier 未实现/不可达 */ }
+  // 顶栏组网 pill + 快捷开关
+  $('etPillDot').className = 'dot ' + (running ? 'on' : 'off');
+  $('etPillText').textContent = running ? '运行中' : (configured ? '已停止' : '未启用');
+  $('etPill').classList.toggle('on', running);
+  $('etPill').classList.toggle('off', !running);
+  $('etToggle').checked = running;
+  // 组网页状态卡
+  $('etCfg').textContent = configured ? '已配置' : '未配置';
+  $('etCfgDot').className = 'dot ' + (configured ? 'on' : 'off');
+  $('etRun').textContent = running ? '运行中' : '未运行';
+  $('etRunDot').className = 'dot ' + (running ? 'on' : 'off');
+  $('etIp').textContent = ip;
+  $('etPeers').textContent = peers.length;
+  const body = $('etPeersBody');
+  body.innerHTML = peers.map(p => `<tr>
+      <td style="font-weight:500">${esc(p.hostname||'-')}</td>
+      <td class="mono">${esc(p.ipv4||'-')}</td>
+      <td>${esc(p.cost||'-')}</td>
+      <td>${esc(p.lat_ms||'-')}</td>
+      <td>${esc(p.nat_type||'-')}</td>
+      <td>${esc(p.version||'-')}</td></tr>`).join('');
+  $('etEmpty').style.display = peers.length ? 'none' : 'block';
+  $('etPeersTable').style.display = peers.length ? 'table' : 'none';
+  if(err) toast('easytier: ' + err);
+  // 只读配置（平台下发，网关端不可修改）
+  try{
+    const cfg = await (await fetch('/api/easytier/config')).json();
+    $('etCfgName').textContent = cfg.network_name || '-';
+    $('etCfgHost').textContent = cfg.relay_host || '-';
+    $('etCfgPort').textContent = cfg.relay_port || '-';
+    $('etCfgCidr').textContent = cfg.network_cidr || '-';
+    $('etCfgIp').textContent = cfg.gateway_ipv4 || '-';
+    $('etCfgMtu').textContent = cfg.mtu || '-';
+    $('etCfgTun').textContent = cfg.tun ? 'TUN（需 root）' : '无 TUN';
+    $('etCfgSecret').textContent = cfg.network_secret_set ? '已设置' : '未设置';
+  }catch(e){}
 }
-
+async function etToggleChange(el){
+  el.disabled = true;
+  try{
+    const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action: el.checked ? 'start' : 'stop'})});
+    const d = await r.json();
+    toast(el.checked ? 'easytier 已启动' : 'easytier 已停止');
+  }catch(e){ toast('操作失败'); }
+  el.disabled = false;
+  loadEt();
+}
 async function etAction(action){
   try{
     const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
@@ -528,47 +512,8 @@ async function etAction(action){
   }catch(e){ toast('操作失败'); }
 }
 
-async function openEtConfig(){
-  try{
-    const r = await fetch('/api/easytier/config');
-    const c = await r.json();
-    $('et_network_name').value = c.network_name || '';
-    $('et_relay_host').value = c.relay_host || '';
-    $('et_relay_port').value = c.relay_port || '';
-    $('et_network_cidr').value = c.network_cidr || '';
-    $('et_gateway_ipv4').value = c.gateway_ipv4 || '';
-    $('et_mtu').value = c.mtu || '';
-    $('et_secret').value = '';
-    $('et_tun').checked = !!c.tun;
-    $('etMask').classList.add('open');
-  }catch(e){ toast('配置读取失败'); }
-}
-function closeEtConfig(){ $('etMask').classList.remove('open'); }
-async function saveEtConfig(){
-  const body = {
-    network_name: $('et_network_name').value.trim(),
-    relay_host: $('et_relay_host').value.trim(),
-    relay_port: parseInt($('et_relay_port').value || '0') || undefined,
-    network_cidr: $('et_network_cidr').value.trim(),
-    gateway_ipv4: $('et_gateway_ipv4').value.trim(),
-    mtu: parseInt($('et_mtu').value || '0') || undefined,
-    tun: $('et_tun').checked,
-  };
-  const secret = $('et_secret').value.trim();
-  if(secret) body.network_secret = secret;
-  for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
-  try{
-    await fetch('/api/easytier/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    toast('配置已保存，重启 easytier 生效');
-    closeEtConfig();
-    loadEt();
-  }catch(e){ toast('保存失败'); }
-}
-$('etMask').addEventListener('click', (e) => { if(e.target === $('etMask')) closeEtConfig(); });
-
 refreshAll();
 setInterval(refreshAll, 5000);
-loadEt();
 </script>
 </body>
 </html>
