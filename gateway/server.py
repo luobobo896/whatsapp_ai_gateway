@@ -30,14 +30,15 @@ class ReportBody(BaseModel):
 
 
 def _device_list():
+    """只展示已配置设备（devices.json）。discover 仅用于为已知设备补充名称/型号，
+    未配置的发现设备（无 IP、无法管理）不展示，避免出现「未设置 IP / 异常」的幻影行。"""
     cfg = _config.config
-    known = {d["udid"]: d for d in cfg.devices}
+    discovered = {d["udid"]: d for d in discover()}
     out = []
-    for d in discover():
-        udid = d["udid"]
-        entry = known.get(udid, {"udid": udid, "ip": "", "port": 8100, "auto_reactivate": True})
-        entry = dict(entry)
-        entry.update(d)
+    for dev in cfg.devices:
+        udid = dev.get("udid")
+        entry = dict(dev)
+        entry.update(discovered.get(udid, {}))  # 补充 name/model（仅当配置过该 UDID）
         entry["wda_running"] = wda.running(udid)
         entry["metrics"] = metrics.get(udid)
         entry["busy"] = executor.is_busy(udid)
@@ -146,9 +147,9 @@ async def api_devices():
 @app.post("/api/devices/{udid}/activate")
 async def api_activate(udid: str, port: int = 8100):
     dev = next((d for d in _config.config.devices if d["udid"] == udid), None)
-    if dev is None:
-        dev = {"udid": udid, "ip": "", "port": port, "auto_reactivate": True}
-        _config.config.devices.append(dev)
+    if dev is None or not dev.get("ip"):
+        # 未配置 IP 的设备无法激活（WDA 需手机局域网 IP 直连）；拒绝且不写入配置，避免幻影设备。
+        raise HTTPException(400, "设备未配置 IP，无法激活（请先在 devices.json 配置或调用 set-ip）")
     dev["auto_reactivate"] = True  # 激活 = 恢复看护（watchdog 自动重拉）
     _config.config.save()
     await asyncio.to_thread(wda.activate, udid, port, udid)
