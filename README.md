@@ -1,7 +1,7 @@
 # WDA Farm Gateway（本地网关）
 
-> 独立项目，与手机应用（WebDriverAgent / agent）代码无关，仅通过 xcodebuild 构建依赖
-> 引用的 WDA 工程（默认同级 `WhatsAppDeviceAgent/`，可用 `WDA_PROJECT_ROOT` 覆盖）。
+> 独立 Go 项目，与手机应用（WebDriverAgent / agent）代码无关，仅通过 xcodebuild 构建依赖
+> 引用的 WDA 工程（默认同级 `WhatsAppDeviceAgent/`，可用 `-project` 覆盖）。
 
 Mac mini 上常驻的本地网关：发现 USB 真机、按 UDID 激活/看护 WDA、Web 页面管理、
 通过 WSS 向云平台上报设备列表并接收任务（三端串联 v6：手机零直连，全部由网关中转）。
@@ -18,11 +18,14 @@ Mac mini 上常驻的本地网关：发现 USB 真机、按 UDID 激活/看护 W
 ## 快速开始
 
 ```bash
-cd gateway
-./run.sh                  # 首次自动建 venv 并装依赖，监听 0.0.0.0:8300
+go build -o gateway ./cmd/gateway
+./gateway -config devices.json -listen 0.0.0.0:8300
 # Web 页面:  http://localhost:8300/
 # API:       http://localhost:8300/api/devices  |  /api/cloud
 ```
+
+- `-project`：WhatsAppDeviceAgent 工程路径（默认 `../whatsapp_ai_ios/WhatsAppDeviceAgent`）。
+- `-derived`：xcodebuild derivedDataPath（默认 `/tmp/WebDriverAgentFarmDerived`）。
 
 ## 配置（devices.json）
 
@@ -35,6 +38,11 @@ cd gateway
     "enabled": true
   },
   "health_interval": 30,
+  "llm": {
+    "base_url": "https://api.example.com/v1",
+    "api_key": "<密钥>",
+    "model": "<视觉模型名>"
+  },
   "devices": [
     { "udid": "40位UDID", "ip": "手机Wi-FiIP", "port": 8100, "auto_reactivate": true }
   ]
@@ -42,6 +50,7 @@ cd gateway
 ```
 
 - 网关凭证在平台「组网」页签发，凭证明文仅展示一次，请保存到 `cloud.token`。
+- `llm` 为可选视觉兜底：配置后，发送键选择器找不到时用截图 + 视觉模型定位坐标点击；不配置则保持默认选择器发送。
 - 每台手机一行；IP 是手机 Wi-Fi IP（WDA 默认端口 8100，各机 IP 不同互不冲突）。
 - 未配置 IP 的设备可在 Web 页面点「设IP」，或调 `POST /api/devices/{udid}/set-ip?ip=192.168.x.x`。
 
