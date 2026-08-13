@@ -193,12 +193,16 @@ uri = "tcp://{c.get('relay_host', '')}:{int(c.get('relay_port', 11010))}"
             return None
 
     def peers(self) -> list[dict]:
+        """远端 peer 列表（过滤本机行 cost=Local——本机无虚 IP/延迟，展示只会是残缺行）。
+        只保留远端节点，保证每行 hostname/ipv4/cost/lat/nat/version 数据完整。"""
         try:
             r = self._cli(["-o", "json", "peer", "list"])
             if r.returncode != 0:
                 return []
             data = json.loads(r.stdout)
-            return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            return [p for p in data if p.get("cost") != "Local"]
         except Exception:
             return []
 
