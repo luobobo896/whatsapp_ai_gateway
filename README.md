@@ -82,6 +82,9 @@ go build -o gateway ./cmd/gateway
 - 常见告警「failed to read JSON message: … frame header: EOF」表示平台侧 TCP 直接断开（未发关闭帧），
   通常是平台重启/部署或网络抖动，网关会自动重连，并非 JSON 解析错误；每 20s 心跳含协议层
   ping + 应用层 `gateway:heartbeat`，同时有写超时与会话级上下文兜底，不会卡死或向旧连接写数据。
+- 拨号告警「…handshake response status code 101 but got 502/503/504」表示连接握手时平台暂不可用
+  （正在重启/部署），401/403 表示凭证无效或被吊销；两类都会自动重试（后者慢速），无需干预，
+  平台恢复后网关自行重连。
 
 ## REST API
 

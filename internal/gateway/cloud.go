@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,19 @@ import (
 )
 
 var msgCounter atomic.Int64
+
+// dialStatusRe 匹配拨号错误尾部 "…but got 502" 里的 HTTP 状态码。
+var dialStatusRe = regexp.MustCompile(`but got (\d{3})$`)
+
+// dialStatus 从 "failed to WebSocket dial: … but got 502" 中提取 HTTP 状态码。
+func dialStatus(err error) (int, bool) {
+	m := dialStatusRe.FindStringSubmatch(err.Error())
+	if len(m) != 2 {
+		return 0, false
+	}
+	code, e := strconv.Atoi(m[1])
+	return code, e == nil
+}
 
 type envelope struct {
 	V       int    `json:"v"`
@@ -37,8 +52,19 @@ func newEnvelope(typ string, payload any) envelope {
 }
 
 // describeCloudError 把底层错误转成可读说明：
-// EOF（无关闭帧）= 远端直接把 TCP 断开；关闭码 = 平台主动关闭（4005 为凭证被吊销）。
+// EOF（无关闭帧）= 远端直接把 TCP 断开；关闭码 = 平台主动关闭（4005 为凭证被吊销）；
+// 拨号握手非 101 = 平台暂不可用（502/503/504）或凭证被拒（401/403）。
 func describeCloudError(err error) string {
+	if code, ok := dialStatus(err); ok {
+		switch code {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "平台拒绝连接（HTTP 401/403）：网关凭证无效或已被吊销，请到平台「组网」页重新签发"
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return fmt.Sprintf("平台服务暂不可用（HTTP %d）：平台正在重启/部署，网关会自动重试恢复", code)
+		default:
+			return fmt.Sprintf("WebSocket 握手失败（HTTP %d）：平台暂不可用或网络异常，网关会自动重试", code)
+		}
+	}
 	if code := websocket.CloseStatus(err); code != -1 {
 		switch code {
 		case websocket.StatusNormalClosure:
@@ -89,6 +115,9 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 			if websocket.CloseStatus(err) == 4005 {
 				revoked = true
 			}
+			if code, ok := dialStatus(err); ok && (code == http.StatusUnauthorized || code == http.StatusForbidden) {
+				revoked = true
+			}
 			switch {
 			case revoked:
 				backoff = 60 * time.Second // 凭证吊销，重连也会被拒，慢点试
@@ -120,6 +149,7 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	g.SetConnected(true)
+	g.SetLastError("") // 连接成功即清掉上一次的旧错误，避免 UI 一直展示历史告警
 	slog.Info("cloud connected", "url", url, "gateway", name)
 
 	// 会话级上下文：会话结束时取消，让写入泵及时退出，避免向已关闭连接写入。

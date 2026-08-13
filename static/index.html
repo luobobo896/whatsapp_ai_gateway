@@ -344,6 +344,7 @@
 
 <script>
 let ipTarget = null;
+let lastCloudErr = ''; // 最近一次已提示的云通道错误，避免同一条错误反复弹 toast
 const $ = (id) => document.getElementById(id);
 
 function toast(msg){
@@ -378,7 +379,12 @@ async function loadCloud(){
     $('footerWs').textContent = c.ws_url ? '云通道 ' + c.ws_url : '';
     const who = c.tenant_name ? (c.tenant_name + (c.user_name ? ' / ' + c.user_name : '')) : '';
     $('brandSub').textContent = (c.gateway_name ? c.gateway_name : '本地网关控制台') + (who ? ' · ' + who : '') + (c.connected_at ? ' · 连接于 ' + c.connected_at : '');
-    if(c.last_error) toast('云通道错误：' + c.last_error);
+    if(c.last_error && c.last_error !== lastCloudErr){
+      lastCloudErr = c.last_error;
+      toast('云通道错误：' + c.last_error);
+    }else if(!c.last_error){
+      lastCloudErr = ''; // 连接恢复后清空，下次新错误才提示
+    }
   }catch(e){
     $('cloudText').textContent = '云状态读取失败';
     $('cloudDot').className = 'dot err';
