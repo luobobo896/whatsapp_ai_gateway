@@ -76,8 +76,8 @@ class EasyTierManager:
         if not self.configured():
             raise RuntimeError("easytier 配置不完整（缺 network_secret 或 relay_host）")
         if self.running():
-            return self.restart()
-        return self.start()
+            return self.restart(authorize=False)
+        return self.start(authorize=False)
 
     # ---------- 生成配置 / 启停 ----------
     def _proxy_networks(self) -> list[str]:
@@ -167,7 +167,9 @@ class EasyTierManager:
         except Exception:
             return False
 
-    def start(self) -> bool:
+    def start(self, authorize: bool = True) -> bool:
+        """启动 easytier。authorize=True（页面手动启动）：未授权时弹系统授权框输一次密码；
+        authorize=False（平台下发重启/网关自愈，无人值守）：未授权直接报错，不弹窗。"""
         if self.running():
             return True
         if not self.configured():
@@ -175,9 +177,10 @@ class EasyTierManager:
         if not CORE_BIN.exists():
             raise RuntimeError(f"easytier-core 不存在：{CORE_BIN}")
         if os.geteuid() != 0 and not self._sudo_ok():
-            # 首次：弹系统授权框（输一次密码）配置 sudoers，之后免密
-            if not self._authorize():
-                raise RuntimeError("开启虚拟网卡需要管理员授权，但授权未完成或已取消")
+            if authorize and self._authorize():
+                pass  # 授权完成，继续
+            else:
+                raise RuntimeError("开启虚拟网卡需管理员授权：请先在网关页点一次「启动」完成授权（仅首次）")
         self.write_toml()
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         logf = open(LOG_PATH, "ab")
@@ -210,10 +213,10 @@ class EasyTierManager:
             pass
         return stopped
 
-    def restart(self) -> bool:
+    def restart(self, authorize: bool = True) -> bool:
         self.stop()
         time.sleep(1)
-        return self.start()
+        return self.start(authorize=authorize)
 
     def recover(self) -> None:
         """网关（本应用）重启后自愈：杀掉遗留的旧 easytier-core 进程并用最新配置重新启动。"""
@@ -227,7 +230,7 @@ class EasyTierManager:
                 pass
             time.sleep(1)
             try:
-                self.start()
+                self.start(authorize=False)
             except Exception as e:
                 _log().warning("easytier recover start failed: %s", e)
 
