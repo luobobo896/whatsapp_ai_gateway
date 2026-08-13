@@ -1,7 +1,10 @@
 {
   "cloud": {
-    "ws_url": "",
-    "enabled": false
+    "ws_url": "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
+    "token": "",
+    "gateway_name": "macmini-01",
+    "enabled": true,
+    "heartbeat_interval": 20
   },
   "health_interval": 30,
   "devices": [

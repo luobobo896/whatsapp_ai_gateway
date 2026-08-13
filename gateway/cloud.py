@@ -118,10 +118,8 @@ async def run(stop: asyncio.Event, _on_command=None, on_connected=None):
                         typ = msg.get("type")
                         if typ == "task:dispatch":
                             executor.submit(msg.get("payload") or {})
-                            await _send(ws, _envelope("server:ack", {"ackedMsgId": msg.get("msgId", "")}))
                         elif typ == "task:cancel":
                             executor.cancel((msg.get("payload") or {}).get("task_id", ""))
-                            await _send(ws, _envelope("server:ack", {"ackedMsgId": msg.get("msgId", "")}))
                         elif typ == "server:disconnect":
                             log.warning("platform asked to disconnect")
                             break
