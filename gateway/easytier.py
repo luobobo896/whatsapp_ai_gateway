@@ -14,6 +14,8 @@ CONFIG_PATH = _config.DATA_DIR / "easytier.json"
 TOML_PATH = _config.DATA_DIR / "easytier.toml"
 LOG_PATH = pathlib.Path("/tmp") / "easytier-gateway.log"
 RPC_PORTAL = "127.0.0.1:15888"
+# 开启虚拟网卡（TUN）需 root：一次性授权脚本（Web 启动时自动弹系统授权框执行）
+SETUP_SUDO_SCRIPT = _config.ROOT / "scripts" / "setup-easytier-sudo.sh"
 
 DEFAULTS = {
     "network_name": "wa-ios",
@@ -151,6 +153,20 @@ class EasyTierManager:
         except Exception:
             return False
 
+    def _authorize(self) -> bool:
+        """开启虚拟网卡需要管理员授权：弹 macOS 系统密码框，以管理员权限执行授权脚本一次，
+        之后 sudo -n 免密（Web 页面点「启动」首次会触发，体验为输一次密码）。"""
+        if not SETUP_SUDO_SCRIPT.exists():
+            return False
+        script = f'do shell script "sh {SETUP_SUDO_SCRIPT}" with administrator privileges'
+        try:
+            r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=180)
+            if r.returncode == 0:
+                return self._sudo_ok()
+            return False
+        except Exception:
+            return False
+
     def start(self) -> bool:
         if self.running():
             return True
@@ -159,7 +175,9 @@ class EasyTierManager:
         if not CORE_BIN.exists():
             raise RuntimeError(f"easytier-core 不存在：{CORE_BIN}")
         if os.geteuid() != 0 and not self._sudo_ok():
-            raise RuntimeError("网关节点需要有虚 IP（TUN 需 root）；请先运行一次：sudo sh scripts/setup-easytier-sudo.sh")
+            # 首次：弹系统授权框（输一次密码）配置 sudoers，之后免密
+            if not self._authorize():
+                raise RuntimeError("开启虚拟网卡需要管理员授权，但授权未完成或已取消")
         self.write_toml()
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         logf = open(LOG_PATH, "ab")

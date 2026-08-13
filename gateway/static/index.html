@@ -506,7 +506,14 @@ async function etToggleChange(el){
 async function etAction(action){
   try{
     const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
-    const d = await r.json();
+    let d = {};
+    try{ d = await r.json(); }catch(e){}
+    if(!r.ok){
+      const detail = d.detail || d.error?.message || ('操作失败（HTTP ' + r.status + '）');
+      toast(detail);
+      if(String(detail).includes('授权')) toast('请在弹出的系统授权框中输入密码（仅首次）');
+      return;
+    }
     toast(action + (d.running ? ' 成功，服务运行中' : ' 完成，服务未运行'));
     loadEt();
   }catch(e){ toast('操作失败'); }
