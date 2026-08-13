@@ -219,6 +219,12 @@
   }
 .modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:100}
 .modal-mask .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.panel-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.mh-list{display:flex;flex-wrap:wrap;gap:8px}
+.mh-row{display:flex;align-items:center;gap:10px;background:var(--panel-2, #f6f8fa);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:12px}
+.mh-row .ok b{color:var(--green)} .mh-row .fail b{color:var(--red)}
+.empty-sm{font-size:12px;color:var(--text-3);padding:6px 0}
+@media (max-width:720px){ .stats{grid-template-columns:repeat(2,1fr)} }
 </style>
 </head>
 <body>
@@ -264,6 +270,13 @@
       <div class="stat"><span class="k">待处理任务</span><span class="v"><span id="stPending">0</span></span></div>
       <div class="stat"><span class="k">今日发送成功</span><span class="v"><span id="stSentOk" style="color:var(--green)">0</span></span></div>
       <div class="stat"><span class="k">今日发送失败</span><span class="v"><span id="stSentFail" style="color:var(--red)">0</span></span></div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <div class="panel-head">
+        <h3 style="margin:0;font-size:14px">历史发送（按天归档）</h3>
+        <span style="font-size:11px;color:var(--text-3)">最近 14 天 · 重启不丢</span>
+      </div>
+      <div class="mh-list" id="metricsHistory"><div class="empty-sm">暂无历史（发送后按天归档）</div></div>
     </div>
     <div class="section-head">
       <h3>设备</h3>
@@ -578,6 +591,10 @@ async function loadMetrics(){
     const m = await r.json();
     $('stSentOk').textContent = m.today?.sent_ok ?? 0;
     $('stSentFail').textContent = m.today?.sent_fail ?? 0;
+    const hist = (m.history || []).slice(0, 14);
+    $('metricsHistory').innerHTML = hist.length
+      ? hist.map(h => `<div class="mh-row"><span>${esc(h.day)}</span><span class="ok">成功 <b>${h.sent_ok}</b></span><span class="fail">失败 <b>${h.sent_fail}</b></span></div>`).join('')
+      : '<div class="empty-sm">暂无历史（发送后按天归档）</div>';
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
