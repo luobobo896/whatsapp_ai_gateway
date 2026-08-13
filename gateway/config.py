@@ -16,7 +16,7 @@ class Config:
         self.health_interval = float(os.environ.get("GATEWAY_HEALTH_INTERVAL", data.get("health_interval", 30)))
         self.heartbeat_interval = float(self.cloud.get("heartbeat_interval", 20))
         # WDA 工程路径（构建 WebDriverAgent 用）：默认同级 WhatsAppDeviceAgent，可用 WDA_PROJECT_ROOT 覆盖
-        self.project_root = pathlib.Path(os.environ.get("WDA_PROJECT_ROOT", ROOT.parent / "WhatsAppDeviceAgent"))
+        self.project_root = pathlib.Path(os.environ.get("WDA_PROJECT_ROOT", ROOT.parent / "whatsapp_ai_ios" / "WhatsAppDeviceAgent"))
         self.derived_data = data.get("derived_data", "/tmp/WebDriverAgentFarmDerived")
 
     def device(self, udid: str) -> dict | None:
