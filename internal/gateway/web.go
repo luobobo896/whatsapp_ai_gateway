@@ -13,6 +13,12 @@ import (
 // Handler 返回网关 HTTP 路由（REST + 静态页）。
 func (g *Gateway) Handler(staticDir string) http.Handler {
 	mux := http.NewServeMux()
+	auth := NewWebAuth(g.Cfg)
+
+	// 登录/登出/会话状态（公开）。
+	mux.HandleFunc("/api/login", auth.HandleLogin)
+	mux.HandleFunc("/api/logout", auth.HandleLogout)
+	mux.HandleFunc("/api/session", auth.HandleSession)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -186,7 +192,17 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		}
 	})
 
-	return mux
+	// 除 login/logout/session 外的 /api/* 需要会话（未配置密码时开放）。
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") &&
+			r.URL.Path != "/api/login" && r.URL.Path != "/api/logout" && r.URL.Path != "/api/session" {
+			if !(auth.PasswordRequired() == false) && !auth.ss.valid(auth.cookieToken(r)) {
+				writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map[string]any {

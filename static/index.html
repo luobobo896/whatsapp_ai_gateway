@@ -217,6 +217,8 @@
     .device-right{align-items:flex-start;width:100%}
     .hero h2{font-size:26px}
   }
+.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal-mask .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
 </style>
 </head>
 <body>
@@ -243,6 +245,7 @@
         <span class="slider"></span>
       </label>
       <button class="btn sm" id="refreshBtn" onclick="refreshAll()">刷新</button>
+      <button class="btn sm ghost" id="logoutBtn" style="display:none" onclick="logout()">登出</button>
     </div>
   </div>
 </header>
@@ -342,6 +345,20 @@
 
 <div id="toast"></div>
 
+<!-- 登录弹层（未登录时覆盖管理页） -->
+<div class="modal-mask" id="loginMask" style="display:none">
+  <div class="modal" style="width:min(380px, calc(100vw - 40px))">
+    <h3 style="margin:0 0 4px">网关管理登录</h3>
+    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">请输入 devices.json 中配置的管理密码</p>
+    <input type="password" id="loginPassword" placeholder="管理密码" style="width:100%;box-sizing:border-box" onkeydown="if(event.key==='Enter')login()">
+    <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn ghost" onclick="hideLogin()">取消</button>
+      <button class="btn" id="loginBtn" onclick="login()">登录</button>
+    </div>
+    <div id="loginErr" style="font-size:12px;color:var(--red);margin-top:8px;display:none"></div>
+  </div>
+</div>
+
 <script>
 let ipTarget = null;
 let lastCloudErr = sessionStorage.getItem('cloudErrToast') || ''; // 同一条凭证错误跨刷新只弹一次
@@ -364,9 +381,52 @@ function showView(v){
 }
 
 /* ---------- 云通道 ---------- */
+/* ---------- 登录鉴权 ---------- */
+async function api(path, opts = {}){
+  const r = await fetch(path, opts);
+  if(r.status === 401){ showLogin(); throw new Error('unauthorized'); }
+  return r;
+}
+function showLogin(){
+  $('loginMask').style.display = 'flex';
+  $('loginErr').style.display = 'none';
+  setTimeout(() => $('loginPassword').focus(), 50);
+}
+function hideLogin(){
+  $('loginMask').style.display = 'none';
+  $('loginPassword').value = '';
+  $('loginErr').style.display = 'none';
+}
+async function login(){
+  try{
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: $('loginPassword').value})});
+    if(!r.ok){ $('loginErr').textContent = '密码错误'; $('loginErr').style.display = 'block'; return; }
+    hideLogin();
+    $('logoutBtn').style.display = '';
+    refreshAll();
+  }catch(e){ $('loginErr').textContent = '登录失败'; $('loginErr').style.display = 'block'; }
+}
+async function logout(){
+  try{ await fetch('/api/logout', {method:'POST'}); }catch(e){}
+  $('logoutBtn').style.display = 'none';
+  showLogin();
+}
+async function checkSession(){
+  try{
+    const s = await (await fetch('/api/session')).json();
+    if(s.passwordRequired){
+      $('logoutBtn').style.display = s.authenticated ? '' : 'none';
+      if(!s.authenticated){ showLogin(); return; }
+    } else {
+      $('logoutBtn').style.display = 'none';
+    }
+  }catch(e){}
+  refreshAll();
+}
+
 async function loadCloud(){
   try{
-    const r = await fetch('/api/cloud');
+    const r = await api('/api/cloud');
     const c = await r.json();
     const on = !!c.connected;
     const errTxt = c.last_error || '';
@@ -507,14 +567,14 @@ function renderDevices(list){
 }
 
 async function refreshDevices(){
-  try{ devicesCache = await (await fetch('/api/devices')).json(); }
+  try{ devicesCache = await (await api('/api/devices')).json(); }
   catch(e){ toast('设备列表读取失败'); return; }
   renderDevices(devicesCache);
 }
 /* ---------- 统计聚合（落盘 metrics） ---------- */
 async function loadMetrics(){
   try{
-    const r = await fetch('/api/metrics');
+    const r = await api('/api/metrics');
     const m = await r.json();
     $('stSentOk').textContent = m.today?.sent_ok ?? 0;
     $('stSentFail').textContent = m.today?.sent_fail ?? 0;
@@ -528,7 +588,7 @@ async function act(udid){
   renderDevices(devicesCache);
   let settled = false;
   try{
-    const r = await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'});
+    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'});
     let d = {};
     try{ d = await r.json(); }catch(e){}
     if (!r.ok){
@@ -561,7 +621,7 @@ async function stop(udid){
   }
   renderDevices(devicesCache);
   try{
-    const r = await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'});
+    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'});
     if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('停止失败：' + (d.detail || r.status)); }
     else toast('已停止 WDA（不再自动拉起）');
   }catch(e){ toast('停止失败'); }
@@ -579,7 +639,7 @@ async function saveIp(){
   const ip = $('ipInput').value.trim();
   if(!ip){ toast('请输入 IP'); return; }
   try{
-    await fetch('/api/devices/' + encodeURIComponent(ipTarget) + '/set-ip?ip=' + encodeURIComponent(ip), {method:'POST'});
+    await api('/api/devices/' + encodeURIComponent(ipTarget) + '/set-ip?ip=' + encodeURIComponent(ip), {method:'POST'});
     toast('IP 已保存');
     closeIp();
     refreshDevices();
@@ -592,7 +652,7 @@ $('ipInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') saveIp()
 async function loadEt(){
   let running = false, configured = false, ip = '—', peers = [], err = null;
   try{
-    const st = await (await fetch('/api/easytier/status')).json();
+    const st = await (await api('/api/easytier/status')).json();
     running = !!st.running; configured = !!st.configured; peers = st.peers || []; err = st.error;
     ip = (st.node && st.node.ipv4_addr) || ip;
   }catch(e){ /* easytier 未实现/不可达 */ }
@@ -622,7 +682,7 @@ async function loadEt(){
   if(err) toast('easytier: ' + err);
   // 只读配置（平台下发，网关端不可修改）
   try{
-    const cfg = await (await fetch('/api/easytier/config')).json();
+    const cfg = await (await api('/api/easytier/config')).json();
     $('etCfgName').textContent = cfg.network_name || '-';
     $('etCfgHost').textContent = cfg.relay_host || '-';
     $('etCfgPort').textContent = cfg.relay_port || '-';
@@ -636,7 +696,7 @@ async function loadEt(){
 async function etToggleChange(el){
   el.disabled = true;
   try{
-    const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action: el.checked ? 'start' : 'stop'})});
+    const r = await api('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action: el.checked ? 'start' : 'stop'})});
     const d = await r.json();
     toast(el.checked ? 'easytier 已启动' : 'easytier 已停止');
   }catch(e){ toast('操作失败'); }
@@ -645,7 +705,7 @@ async function etToggleChange(el){
 }
 async function etAction(action){
   try{
-    const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
+    const r = await api('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
     let d = {};
     try{ d = await r.json(); }catch(e){}
     if(!r.ok){
@@ -659,8 +719,8 @@ async function etAction(action){
   }catch(e){ toast('操作失败'); }
 }
 
-refreshAll();
-setInterval(refreshAll, 5000);
+checkSession();
+setInterval(() => { if($('loginMask').style.display !== 'flex') refreshAll(); }, 5000);
 </script>
 </body>
 </html>
