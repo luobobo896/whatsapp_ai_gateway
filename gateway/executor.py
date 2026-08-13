@@ -161,6 +161,7 @@ class Executor:
                         pass
         finally:
             self._busy.discard(udid)
+            self._cancel.pop(task_id, None)
             await self._status(udid, "online", "")
 
     async def _report(self, item_id: str, item: dict, task_id: str, status: str, error: str, duration_ms: int) -> None:
