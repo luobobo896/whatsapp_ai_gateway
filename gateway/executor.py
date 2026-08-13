@@ -1,6 +1,7 @@
 import asyncio, json, logging, time
 from pathlib import Path
 from . import config as _config
+from . import metrics
 from .wda import send_message
 
 log = logging.getLogger("executor")
@@ -150,6 +151,13 @@ class Executor:
                 duration_ms = int((time.time() - t0) * 1000)
                 _persist_result(task_id, item_id, phone, status, err, duration_ms)
                 await self._report(item_id, item, task_id, status, err, duration_ms)
+                # 网关本地发送统计（/api/devices 与 Web 页展示；sent/failed 计入，cancelled 不计）
+                if status in ("sent", "failed"):
+                    await metrics.record(udid, {
+                        "sent_ok": 1 if status == "sent" else 0,
+                        "sent_fail": 1 if status == "failed" else 0,
+                        "batch_id": task_id,
+                    })
                 log.info("item done task=%s item=%s phone=%s status=%s", task_id, item_id, phone, status)
                 if status == "failed" and ("not reachable" in err.lower() or "connection" in err.lower()):
                     log.warning("device unreachable, stop current task: %s", task_id)

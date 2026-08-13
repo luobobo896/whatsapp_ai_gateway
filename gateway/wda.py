@@ -158,11 +158,18 @@ def _decode_value(data: bytes) -> str:
 
 def _create_session(client, base: str, bundle_id: str | None) -> tuple[str, str]:
     """建立 WhatsApp 会话，返回 (session_id, 实际 bundle id)。
-    未指定 bundle_id 时按候选列表自动识别（普通 WhatsApp / WhatsApp Business）。"""
+    未指定 bundle_id 时按候选列表自动识别（普通 WhatsApp / WhatsApp Business）。
+
+    shouldTerminateApp=false：会话删除/重建时 WDA 不再强杀 WhatsApp（否则每条发完 App 闪退）；
+    forceAppLaunch=false：App 已在前台时复用，不终止重拉（批量发送间不重启，也避免闪退观感）。"""
     candidates = [bundle_id] if bundle_id else WHATSAPP_BUNDLE_IDS
     for bid in candidates:
         r = client.post(f"{base}/session", json={
-            "capabilities": {"alwaysMatch": {"bundleId": bid}},
+            "capabilities": {"alwaysMatch": {
+                "bundleId": bid,
+                "shouldTerminateApp": False,
+                "forceAppLaunch": False,
+            }},
         })
         if r.status_code >= 300:
             continue
@@ -261,21 +268,73 @@ def _goto_chat_list(client, base: str, session_id: str) -> None:
             return
 
 
-def _open_target_chat(client, base: str, session_id: str, bundle_id: str, phone: str) -> None:
-    """打开指定号码的会话：优先深链（iOS 16.4+）；iOS 15.8 深链不可用时回退到聊天列表按号码匹配。"""
+def _ios_major(client, base: str) -> int:
+    """读取 WDA /status 的 iOS 主版本；读取失败返回 0（保守按支持深链处理）。"""
+    try:
+        r = client.get(f"{base}/status")
+        v = (r.json().get("value") or {}).get("os", {}).get("version", "")
+        return int(str(v).split(".")[0] or 0)
+    except Exception:
+        return 0
+
+
+def _open_target_chat(client, base: str, session_id: str, bundle_id: str, phone: str, ios_major: int = 0) -> None:
+    """打开指定号码的会话：iOS 16.4+ 走深链；iOS 15.8 深链不可用，直接回退到聊天列表按号码匹配/新聊天搜索。"""
     digits = _digits(phone)
     if not digits:
         raise WDAError(f"invalid phone: {phone!r}")
-    r = client.post(f"{base}/session/{session_id}/url", json={
-        "url": f"whatsapp://send?phone={digits}", "bundleId": bundle_id, "idleTimeoutMs": 3000,
-    })
-    if r.status_code < 300:
-        return  # 深链成功打开目标会话
+    if ios_major >= 16:
+        r = client.post(f"{base}/session/{session_id}/url", json={
+            "url": f"whatsapp://send?phone={digits}", "bundleId": bundle_id, "idleTimeoutMs": 3000,
+        })
+        if r.status_code < 300:
+            return  # 深链成功打开目标会话
     _goto_chat_list(client, base, session_id)
     idx = _chat_index_by_phone(client, base, session_id, digits)
-    if idx is None:
-        raise WDAError(f"deep link unsupported and no chat for {digits} in chat list")
-    _tap_cell(client, base, session_id, idx)
+    if idx is not None:
+        _tap_cell(client, base, session_id, idx)
+        return
+    # 聊天列表没有该号码：走「新聊天→搜索→选中联系人」兜底（号码是联系人/可搜到时可用）。
+    if _open_new_chat_by_phone(client, base, session_id, digits):
+        return
+    raise WDAError(
+        f"deep link unsupported and no chat/contact for {digits} "
+        f"(iOS < 16.4 无法通过深链打开陌生号码会话)"
+    )
+
+
+def _open_new_chat_by_phone(client, base: str, session_id: str, digits: str) -> bool:
+    """新聊天 -> 搜索号码 -> 命中联系人则点其「聊天」动作并进入会话；返回是否成功。"""
+    newchat = _find_element(client, base, session_id, "accessibility id", "NavigationBar_NewChatButton")
+    if not newchat:
+        return False
+    r = client.post(f"{base}/session/{session_id}/element/{newchat}/click")
+    r.raise_for_status()
+    time.sleep(1.5)
+    sf = _find_element(client, base, session_id, "class chain", "**/XCUIElementTypeSearchField")
+    if not sf:
+        return False
+    r = client.post(f"{base}/session/{session_id}/element/{sf}/click")
+    r.raise_for_status()
+    time.sleep(0.8)
+    r = client.post(f"{base}/session/{session_id}/element/{sf}/value", json={"value": [digits]})
+    r.raise_for_status()
+    time.sleep(2.5)
+    # 联系人 cell（name == 'PickerView_ContactCell'）：动作在 cell 右侧（「聊天」/「给自己发消息」），
+    # cell 中央是姓名点不到动作区，改用 cell frame 右侧坐标点击。
+    cell = _find_element(client, base, session_id, "accessibility id", "PickerView_ContactCell")
+    if not cell:
+        return False
+    try:
+        rect = client.get(f"{base}/session/{session_id}/element/{cell}/rect").json()["value"]
+        x = int(rect["x"] + rect["width"] - 30)
+        y = int(rect["y"] + rect["height"] / 2)
+    except Exception:
+        return False
+    r = client.post(f"{base}/session/{session_id}/wda/tap", json={"x": x, "y": y})
+    r.raise_for_status()
+    time.sleep(2.5)
+    return True
 
 
 def _open_default_chat(client, base: str, session_id: str) -> None:
@@ -299,7 +358,7 @@ def send_message(ip: str, port: int, phone: str, content: str, bundle_id: str | 
         session_id, bid = _create_session(client, base, bundle_id)
         try:
             if phone:
-                _open_target_chat(client, base, session_id, bid, phone)
+                _open_target_chat(client, base, session_id, bid, phone, _ios_major(client, base))
             else:
                 _open_default_chat(client, base, session_id)
             input_id = _wait_element(client, base, session_id, MESSAGE_INPUT_SELECTOR, 15)
