@@ -124,7 +124,13 @@ async def run(stop: asyncio.Event, _on_command=None, on_connected=None):
                             log.warning("platform asked to disconnect")
                             break
                         elif typ == "easytier:config":
-                            log.info("easytier:config received (optional capability, not enabled)")
+                            # 可选能力：平台下发 easytier 配置 -> 保存并启动集成的 easytier 服务（设计 §5.1/§7.2）
+                            try:
+                                from .easytier import manager as et
+                                et.apply(msg.get("payload") or {})
+                                log.info("easytier:config applied, running=%s", et.running())
+                            except Exception as e:
+                                log.warning("easytier:config apply failed: %s", e)
                         # server:ack 忽略
                 finally:
                     hb.cancel()

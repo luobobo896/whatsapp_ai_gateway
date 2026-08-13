@@ -91,3 +91,23 @@ cd gateway
   健康状态变化通过 `device:status` 上报平台。
 - 激活用 `USE_PORT` 指定端口（默认 8100）；多台走各自 IP 时无需改端口。
 - easytier 为可选后备能力、默认关闭：仅当平台下发 `easytier:config`（v1 默认不启用）时按需集成。
+
+## easytier 后备通道（可选，默认关闭）
+
+平台「组网」页可向在线网关下发 `easytier:config`（WSS 下行）；网关收到后保存配置并启动本机
+集成的 easytier 服务加入 mesh，作为 WSS 之外的后备链路（v6 §5.1/§7.2）。
+
+- 二进制（项目内，不入库）：下载 easytier v2.6.4 macOS aarch64 到 `tools/easytier/`：
+  ```bash
+  curl -fsSL -o /tmp/et.zip https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-macos-aarch64-v2.6.4.zip
+  mkdir -p tools/easytier
+  python3 -c "import zipfile; zipfile.ZipFile('/tmp/et.zip').extractall('/tmp/et')"
+  install -m 0700 /tmp/et/easytier-macos-aarch64/easytier-core tools/easytier/easytier-core
+  install -m 0700 /tmp/et/easytier-macos-aarch64/easytier-cli tools/easytier/easytier-cli
+  ```
+- 查询复用 easytier RPC 门户（`easytier-cli -p 127.0.0.1:15888`），与平台 `internal/easytierrpc` 同源语义。
+- 本地 REST：`GET /api/easytier/status`（运行/节点/peers）、`GET /api/easytier/config`（脱敏）、
+  `PUT /api/easytier/config`（编辑）、`POST /api/easytier/action {start|stop|restart}`。
+- Web 页底部「组网（easytier 后备通道）」区块可查看配置/状态/peer 并启停。
+- 默认无 TUN 模式（`ipv4=""`，普通用户可运行，纯转发节点）；配置 `tun=true` 且填 `gateway_ipv4`
+  时以 TUN 模式运行并绑定虚 IP（需 root 权限）。

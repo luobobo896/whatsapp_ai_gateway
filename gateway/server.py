@@ -1,5 +1,7 @@
-import asyncio, pathlib, time
+import asyncio, logging, pathlib, time
 from fastapi import FastAPI, HTTPException
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -49,6 +51,9 @@ async def startup():
     from .cloud import run as cloud_run
     from .watchdog import loop as watchdog_loop
     _watchdog_task = asyncio.create_task(watchdog_loop(_stop))
+    # easytier 后备通道自愈：网关重启后按最新配置恢复 easytier 服务（若已配置）。
+    from .easytier import manager as et
+    et.recover()
 
     def mark_connected(v):
         global _connected, _connected_at
@@ -181,3 +186,61 @@ async def api_metrics(udid: str):
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+# ---------- easytier（可选，默认关闭；配置由平台 easytier:config 下发或本地 PUT 维护）----------
+
+@app.get("/api/easytier/status")
+async def api_easytier_status():
+    from .easytier import manager as et
+    return et.status()
+
+
+@app.get("/api/easytier/config")
+async def api_easytier_config():
+    from .easytier import manager as et
+    return et.public_config()
+
+
+class EasyTierConfigBody(BaseModel):
+    network_name: str | None = None
+    network_secret: str | None = None
+    relay_host: str | None = None
+    relay_port: int | None = None
+    network_cidr: str | None = None
+    gateway_ipv4: str | None = None
+    mtu: int | None = None
+    tun: bool | None = None
+
+
+@app.put("/api/easytier/config")
+async def api_easytier_config_put(body: EasyTierConfigBody):
+    from .easytier import manager as et
+    cfg = {k: v for k, v in body.model_dump().items() if v is not None}
+    et.save(cfg)
+    return et.public_config()
+
+
+class EasyTierActionBody(BaseModel):
+    action: str
+
+
+@app.post("/api/easytier/action")
+async def api_easytier_action(body: EasyTierActionBody):
+    from .easytier import manager as et
+    action = body.action
+    if action == "start":
+        try:
+            ok = et.start()
+        except Exception as e:
+            raise HTTPException(400, f"启动失败：{e}")
+        return {"ok": ok, "running": et.running()}
+    if action == "stop":
+        return {"ok": et.stop(), "running": et.running()}
+    if action == "restart":
+        try:
+            ok = et.restart()
+        except Exception as e:
+            raise HTTPException(400, f"重启失败：{e}")
+        return {"ok": ok, "running": et.running()}
+    raise HTTPException(400, "action 必须为 start/stop/restart")

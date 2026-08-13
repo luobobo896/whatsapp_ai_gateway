@@ -266,6 +266,42 @@
   </div>
 </main>
 
+  <!-- easytier 后备通道（可选，平台 easytier:config 下发） -->
+  <div class="hero" style="margin-top:8px">
+    <h2>组网（easytier 后备通道）</h2>
+    <p>可选能力，默认关闭；平台下发 easytier:config 或本地配置后启动，作为 WSS 之外的后备链路</p>
+  </div>
+  <div class="stats" id="etStats" style="grid-template-columns:repeat(4,1fr)">
+    <div class="stat"><span class="k">配置状态</span><span class="v"><span id="etCfgDot" class="dot off"></span><span id="etCfg">—</span></span></div>
+    <div class="stat"><span class="k">服务状态</span><span class="v"><span id="etRunDot" class="dot off"></span><span id="etRun">—</span></span></div>
+    <div class="stat"><span class="k">节点 IP</span><span class="v" style="font-size:17px" id="etIp">—</span></div>
+    <div class="stat"><span class="k">Peer 数</span><span class="v" id="etPeers">0</span></div>
+  </div>
+  <div style="display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap">
+    <button class="btn sm" onclick="etAction('start')">启动</button>
+    <button class="btn ghost sm" onclick="etAction('restart')">重启</button>
+    <button class="btn ghost red sm" onclick="etAction('stop')">停止</button>
+    <button class="btn ghost sm" onclick="loadEt()">刷新</button>
+    <button class="btn ghost sm" onclick="openEtConfig()">配置</button>
+  </div>
+  <div class="device" style="padding:0">
+    <table id="etPeersTable" style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="color:var(--text-2);text-align:left">
+        <th style="padding:12px 16px;font-weight:500">Hostname</th>
+        <th style="padding:12px 16px;font-weight:500">IPv4</th>
+        <th style="padding:12px 16px;font-weight:500">链路</th>
+        <th style="padding:12px 16px;font-weight:500">延迟</th>
+        <th style="padding:12px 16px;font-weight:500">NAT</th>
+        <th style="padding:12px 16px;font-weight:500">版本</th>
+      </tr></thead>
+      <tbody id="etPeersBody"></tbody>
+    </table>
+  </div>
+  <div class="empty" id="etEmpty" style="display:none">
+    <h4>easytier 未配置或未运行</h4>
+    <p>在平台「组网」页下发 easytier:config，或点击上方「配置」手动填写后启动</p>
+  </div>
+
 <footer>
   <span>WDA Farm Gateway · <span id="footerTs">—</span></span>
   <span id="footerWs"></span>
@@ -285,6 +321,30 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- easytier 配置弹窗 -->
+<div class="modal-mask" id="etMask">
+  <div class="modal" style="width:min(520px, calc(100vw - 40px))">
+    <h4>easytier 配置</h4>
+    <p>保存后需「重启」生效；network_secret 不回显，留空表示保持不变</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div><label style="font-size:12px;color:var(--text-2)">network_name</label><input id="et_network_name" placeholder="wa-ios"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">relay_host</label><input id="et_relay_host" placeholder="hk.hsddns.com"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">relay_port</label><input id="et_relay_port" type="number" placeholder="11010"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">network_cidr</label><input id="et_network_cidr" placeholder="10.168.0.0/16"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">gateway_ipv4</label><input id="et_gateway_ipv4" placeholder="10.168.1.2"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">mtu</label><input id="et_mtu" type="number" placeholder="1380"></div>
+      <div><label style="font-size:12px;color:var(--text-2)">network_secret（新值覆盖）</label><input id="et_secret" type="password" placeholder="留空不变"></div>
+      <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2)">
+        <input id="et_tun" type="checkbox" style="width:auto"> TUN 模式（需 root，绑定虚 IP）
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeEtConfig()">取消</button>
+      <button class="btn" onclick="saveEtConfig()">保存</button>
+    </div>
+  </div>
+</div>
 
 <script>
 let devicesCache = [];
@@ -428,8 +488,87 @@ async function saveIp(){
 $('ipMask').addEventListener('click', (e) => { if(e.target === $('ipMask')) closeIp(); });
 $('ipInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') saveIp(); if(e.key === 'Escape') closeIp(); });
 
+async function loadEt(){
+  try{
+    const r = await fetch('/api/easytier/status');
+    const st = await r.json();
+    const cfgr = await fetch('/api/easytier/config');
+    const cfg = await cfgr.json();
+    const configured = !!st.configured;
+    $('etCfg').textContent = configured ? '已配置' : '未配置';
+    $('etCfgDot').className = 'dot ' + (configured ? 'on' : 'off');
+    $('etRun').textContent = st.running ? '运行中' : '未运行';
+    $('etRunDot').className = 'dot ' + (st.running ? 'on' : 'off');
+    $('etIp').textContent = (st.node && st.node.ipv4_addr) ? st.node.ipv4_addr : (cfg.gateway_ipv4 || '—');
+    $('etPeers').textContent = st.peers ? st.peers.length : 0;
+    const body = $('etPeersBody');
+    body.innerHTML = '';
+    for (const p of (st.peers || [])){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td style="padding:10px 16px;border-top:1px solid var(--border);font-weight:500">${esc(p.hostname||'-')}</td>
+        <td style="padding:10px 16px;border-top:1px solid var(--border);font-family:var(--mono)">${esc(p.ipv4||'-')}</td>
+        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.cost||'-')}</td>
+        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.lat_ms||'-')}</td>
+        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.nat_type||'-')}</td>
+        <td style="padding:10px 16px;border-top:1px solid var(--border)">${esc(p.version||'-')}</td>`;
+      body.appendChild(tr);
+    }
+    $('etEmpty').style.display = (st.peers && st.peers.length) ? 'none' : 'block';
+    $('etPeersTable').style.display = (st.peers && st.peers.length) ? 'table' : 'none';
+    if(st.error) toast('easytier: ' + st.error);
+  }catch(e){ /* easytier 接口不可用则不渲染 */ }
+}
+
+async function etAction(action){
+  try{
+    const r = await fetch('/api/easytier/action', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
+    const d = await r.json();
+    toast(action + (d.running ? ' 成功，服务运行中' : ' 完成，服务未运行'));
+    loadEt();
+  }catch(e){ toast('操作失败'); }
+}
+
+async function openEtConfig(){
+  try{
+    const r = await fetch('/api/easytier/config');
+    const c = await r.json();
+    $('et_network_name').value = c.network_name || '';
+    $('et_relay_host').value = c.relay_host || '';
+    $('et_relay_port').value = c.relay_port || '';
+    $('et_network_cidr').value = c.network_cidr || '';
+    $('et_gateway_ipv4').value = c.gateway_ipv4 || '';
+    $('et_mtu').value = c.mtu || '';
+    $('et_secret').value = '';
+    $('et_tun').checked = !!c.tun;
+    $('etMask').classList.add('open');
+  }catch(e){ toast('配置读取失败'); }
+}
+function closeEtConfig(){ $('etMask').classList.remove('open'); }
+async function saveEtConfig(){
+  const body = {
+    network_name: $('et_network_name').value.trim(),
+    relay_host: $('et_relay_host').value.trim(),
+    relay_port: parseInt($('et_relay_port').value || '0') || undefined,
+    network_cidr: $('et_network_cidr').value.trim(),
+    gateway_ipv4: $('et_gateway_ipv4').value.trim(),
+    mtu: parseInt($('et_mtu').value || '0') || undefined,
+    tun: $('et_tun').checked,
+  };
+  const secret = $('et_secret').value.trim();
+  if(secret) body.network_secret = secret;
+  for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
+  try{
+    await fetch('/api/easytier/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    toast('配置已保存，重启 easytier 生效');
+    closeEtConfig();
+    loadEt();
+  }catch(e){ toast('保存失败'); }
+}
+$('etMask').addEventListener('click', (e) => { if(e.target === $('etMask')) closeEtConfig(); });
+
 refreshAll();
 setInterval(refreshAll, 5000);
+loadEt();
 </script>
 </body>
 </html>
