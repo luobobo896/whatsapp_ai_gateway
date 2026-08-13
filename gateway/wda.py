@@ -128,12 +128,12 @@ SEND_BUTTON_SELECTORS = [
     ("predicate string", "name == '发送'"),
     ("predicate string", "label == '发送'"),
 ]
-# 从聊天页返回聊天列表的返回键候选（label 随语言变化）。
+# 从聊天页返回聊天列表的返回键候选（label 带 RTL 不可见字符，须用 CONTAINS；限定 Button 避免误匹配标题）。
 BACK_TO_CHATS_SELECTORS = [
-    ("predicate string", "label == '聊天'"),
-    ("predicate string", "label == 'Chats'"),
-    ("predicate string", "name == 'Back'"),
-    ("predicate string", "name == '返回'"),
+    ("predicate string", "type == 'XCUIElementTypeButton' AND label CONTAINS '聊天'"),
+    ("predicate string", "type == 'XCUIElementTypeButton' AND label CONTAINS 'Chats'"),
+    ("predicate string", "type == 'XCUIElementTypeButton' AND name CONTAINS 'Back'"),
+    ("predicate string", "type == 'XCUIElementTypeButton' AND name CONTAINS '返回'"),
 ]
 
 
@@ -321,7 +321,7 @@ def _open_new_chat_by_phone(client, base: str, session_id: str, digits: str) -> 
     r.raise_for_status()
     time.sleep(2.5)
     # 联系人 cell（name == 'PickerView_ContactCell'）：动作在 cell 右侧（「聊天」/「给自己发消息」），
-    # cell 中央是姓名点不到动作区，改用 cell frame 右侧坐标点击。
+    # cell 中央是姓名点不到动作区。依次尝试：cell 右侧坐标点击 -> cell 内动作文本点击。
     cell = _find_element(client, base, session_id, "accessibility id", "PickerView_ContactCell")
     if not cell:
         return False
@@ -329,12 +329,37 @@ def _open_new_chat_by_phone(client, base: str, session_id: str, digits: str) -> 
         rect = client.get(f"{base}/session/{session_id}/element/{cell}/rect").json()["value"]
         x = int(rect["x"] + rect["width"] - 30)
         y = int(rect["y"] + rect["height"] / 2)
+        r = client.post(f"{base}/session/{session_id}/wda/tap", json={"x": x, "y": y})
+        r.raise_for_status()
+        if _chat_opened(client, base, session_id, 6):
+            return True
     except Exception:
-        return False
-    r = client.post(f"{base}/session/{session_id}/wda/tap", json={"x": x, "y": y})
-    r.raise_for_status()
-    time.sleep(2.5)
-    return True
+        pass
+    # 兜底：点 cell 内动作文本（自己号码=PickerView_ContactCell_PhoneNumber；联系人=聊天）
+    for name in ("PickerView_ContactCell_PhoneNumber", "聊天"):
+        sel = ("class chain",
+               f"**/XCUIElementTypeCell[`name == 'PickerView_ContactCell'`]/**/XCUIElementTypeStaticText[`name == '{name}'`]")
+        act = _find_element(client, base, session_id, *sel)
+        if not act:
+            continue
+        try:
+            r = client.post(f"{base}/session/{session_id}/element/{act}/click")
+            r.raise_for_status()
+            if _chat_opened(client, base, session_id, 6):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _chat_opened(client, base: str, session_id: str, timeout: float) -> bool:
+    """点击联系人动作后是否已进入会话（输入框可见）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _find_element(client, base, session_id, *MESSAGE_INPUT_SELECTOR):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _open_default_chat(client, base: str, session_id: str) -> None:

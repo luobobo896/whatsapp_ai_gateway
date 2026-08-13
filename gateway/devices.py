@@ -50,31 +50,63 @@ def discover() -> list[dict]:
 
 # ---------- 局域网 WDA 探测（自动获取手机 Wi-Fi IP）----------
 
+def _is_private_ipv4(ip: str) -> bool:
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    return False
+
+
 def local_subnets() -> list[str]:
-    """本机所有 192.168.x.0/24 网段（手机所在局域网）。"""
+    """本机所有私网 IPv4 网段 /24（手机所在局域网，覆盖 10/8、172.16/12、192.168/16，
+    兼容 Mac 更换网络后网段变化）。"""
     out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
     subs = set()
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("inet ") and "192.168." in line:
-            ip = line.split()[1]
+        if not line.startswith("inet "):
+            continue
+        ip = line.split()[1]
+        if _is_private_ipv4(ip) and not ip.startswith("169.254."):
             subs.add(".".join(ip.split(".")[:3]) + ".0/24")
     return sorted(subs)
 
 
 def _wda_status_at(ip: str, timeout: float = 0.6):
-    """探测某 IP 的 WDA /status；返回 (ready, ios_ip) 或 (None, None)。"""
+    """探测某 IP 的 WDA /status；返回 (ready, ios_ip, ios_version) 或 (None, None, None)。"""
     try:
         import httpx
         r = httpx.get(f"http://{ip}:8100/status", timeout=timeout)
         value = r.json().get("value", {})
-        return bool(value.get("ready")), value.get("ios", {}).get("ip")
+        return bool(value.get("ready")), value.get("ios", {}).get("ip"), (value.get("os") or {}).get("version", "")
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def wda_info(ip: str, timeout: float = 3) -> dict:
+    """读取某 WDA 的设备信息（/wda/device/info）：uuid=identifierForVendor（跨网络变化稳定），name/model。"""
+    try:
+        import httpx
+        r = httpx.get(f"http://{ip}:8100/wda/device/info", timeout=timeout)
+        v = r.json().get("value", {}) or {}
+        return {"uuid": v.get("uuid", ""), "name": v.get("name", ""), "model": v.get("model", "")}
+    except Exception:
+        return {}
 
 
 def scan_lan_wda(timeout: float = 0.6, max_workers: int = 64) -> list[dict]:
-    """并发扫描本机局域网 8100 端口，返回 WDA 就绪的设备 [{ip, ios_ip}]。"""
+    """并发扫描本机局域网 8100 端口，返回 WDA 就绪的设备
+    [{ip, ios_ip, ios_version, uuid, name, model}]（uuid 用于网络变化后按设备匹配）。"""
     import concurrent.futures
     import ipaddress
     results: list[dict] = []
@@ -87,9 +119,15 @@ def scan_lan_wda(timeout: float = 0.6, max_workers: int = 64) -> list[dict]:
             futs = {ex.submit(_wda_status_at, h, timeout): h for h in hosts}
             for fut in concurrent.futures.as_completed(futs):
                 try:
-                    ready, ios_ip = fut.result()
+                    ready, ios_ip, ios_version = fut.result()
                 except Exception:
                     continue
                 if ready:
-                    results.append({"ip": futs[fut], "ios_ip": ios_ip})
+                    ip = futs[fut]
+                    info = wda_info(ip, timeout=2)
+                    results.append({
+                        "ip": ip, "ios_ip": ios_ip, "ios_version": ios_version,
+                        "uuid": info.get("uuid", ""), "name": info.get("name", ""),
+                        "model": info.get("model", ""),
+                    })
     return results

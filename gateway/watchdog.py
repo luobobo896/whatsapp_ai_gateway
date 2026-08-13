@@ -30,6 +30,57 @@ async def _auto_assign_ip() -> None:
         log.info("auto-assigned WDA IP %s to device %s", ip, udid[:8])
 
 
+def _config_devices_wda_info(ip: str) -> dict:
+    from .devices import wda_info
+    try:
+        return wda_info(ip, timeout=3)
+    except Exception:
+        return {}
+
+
+async def _follow_network_change() -> None:
+    """Mac 更换网络后自动跟随：已配置设备 IP 不可达时，重扫当前局域网 WDA，
+    用 WDA identifierForVendor(uuid)（在线时已记录）匹配设备；无 uuid 记录时用
+    ios_version+model 唯一匹配兜底。命中即更新配置 IP 并上报在线。"""
+    from .devices import scan_lan_wda
+    cfg = _config.config
+    stale = [d for d in cfg.devices
+             if d.get("udid") and d.get("ip") and not (d.get("last_health") or {}).get("ok")]
+    if not stale:
+        return
+    found = scan_lan_wda()
+    if not found:
+        return
+    by_uuid = {r["uuid"]: r for r in found if r.get("uuid")}
+    for dev in stale:
+        old_ip = dev.get("ip")
+        hit = by_uuid.get(dev.get("vendor_uuid") or "")
+        if not hit:
+            # 兜底：按 ios_version（+ 配置了 model 时再对 model）唯一匹配
+            cands = []
+            for r in found:
+                if r.get("ios_version") != dev.get("ios_version"):
+                    continue
+                if dev.get("model") and (r.get("model") or "").lower() != dev.get("model").lower():
+                    continue
+                cands.append(r)
+            if len(cands) == 1:
+                hit = cands[0]
+            elif len(cands) > 1:
+                log.warning("device %s new IP ambiguous across %d WDA, skip auto-follow", dev["udid"][:8], len(cands))
+        if not hit or hit["ip"] == old_ip:
+            continue
+        dev["ip"] = hit["ip"]
+        if hit.get("uuid") and dev.get("vendor_uuid") != hit["uuid"]:
+            dev["vendor_uuid"] = hit["uuid"]
+        cfg.save()
+        log.info("device %s followed network change: %s -> %s", dev["udid"][:8], old_ip, hit["ip"])
+        executor.status_q.put_nowait({
+            "udid": dev["udid"], "wda_status": "online",
+            "error": f"ip updated {old_ip} -> {hit['ip']}",
+        })
+
+
 async def loop(stop: asyncio.Event):
     """后台循环：逐台健康检查，不通且未在激活则自动重新激活；健康状态变化通过 device:status 上报平台。"""
     while not stop.is_set():
@@ -56,6 +107,13 @@ async def loop(stop: asyncio.Event):
             dev["last_health"] = h
             if h.get("ios_version"):
                 dev["ios_version"] = h["ios_version"]
+            # 在线时记录 WDA identifierForVendor(uuid)：Mac 换网/手机 IP 变化后按 uuid 重新匹配手机。
+            if h.get("ok") and not dev.get("vendor_uuid"):
+                info = _config_devices_wda_info(ip)
+                if info.get("uuid"):
+                    dev["vendor_uuid"] = info["uuid"]
+                    cfg.save()
+                    log.info("device %s recorded vendor_uuid=%s", udid[:8], info["uuid"])
             new_ok = bool(h.get("ok"))
             if prev_ok is not None and prev_ok != new_ok and not executor.is_busy(udid):
                 executor.status_q.put_nowait({
@@ -75,6 +133,11 @@ async def loop(stop: asyncio.Event):
             await _auto_assign_ip()
         except Exception as e:
             log.warning("auto assign ip failed: %s", e)
+        # Mac 换网后：把 IP 不可达的已配置设备按 uuid 重新匹配到新 IP
+        try:
+            await _follow_network_change()
+        except Exception as e:
+            log.warning("follow network change failed: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=cfg.health_interval)
         except asyncio.TimeoutError:
