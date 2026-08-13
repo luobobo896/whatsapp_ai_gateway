@@ -184,10 +184,8 @@ async def api_activate(udid: str, port: int = 8100):
         await asyncio.to_thread(wda.activate, udid, port, udid)
     except Exception as e:
         raise HTTPException(400, f"激活失败：{e}")
-    # 快速失败检测：xcodebuild 对不存在/未连接设备会立即退出，避免「假激活成功」
-    time.sleep(3)
-    if not wda.running(udid):
-        raise HTTPException(400, "激活失败：WDA 进程未能启动（请确认手机已 USB 连接并信任此电脑）")
+    # 立即返回（不阻塞）：前端点击后立即乐观显示「启动中」；真实状态由 watchdog/刷新体现，
+    # 激活失败（xcodebuild 退出）时页面会由「启动中」转为「未激活」。
     return {"udid": udid, "status": "activated", "auto_reactivate": True}
 
 

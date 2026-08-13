@@ -464,29 +464,69 @@ function deviceCard(d){
       </div>
     </div>`;
 }
-async function refreshDevices(){
-  let list = [];
-  try{ list = await (await fetch('/api/devices')).json(); }
-  catch(e){ toast('设备列表读取失败'); return; }
-  const on = list.filter(d => d.last_health?.ok && !d.busy).length;
-  const busy = list.filter(d => d.busy).length;
+let devicesCache = [];
+// 乐观激活保持期：点击激活后 30s 内，即使真实状态还没起来（xcodebuild 构建中），
+// 渲染也强制显示「启动中」，避免被定时刷新闪回「未激活」。
+const optimisticAct = {};
+
+function renderDevices(list){
+  const now = Date.now();
+  const view = list.map(d => {
+    const t = optimisticAct[d.udid];
+    if (t && (now - t) < 30000 && !d.wda_running) {
+      return { ...d, wda_running: true, last_health: { ok: false, starting: true, checked_at: now/1000 } };
+    }
+    return d;
+  });
+  const on = view.filter(d => d.last_health?.ok && !d.busy).length;
+  const busy = view.filter(d => d.busy).length;
   $('stOnline').textContent = on;
   $('stBusy').textContent = busy;
   $('stOnlineDot').className = 'dot ' + (on ? 'on' : 'off');
   $('stBusyDot').className = 'dot ' + (busy ? 'busy' : 'off');
-  $('deviceCount').textContent = '共 ' + list.length + ' 台';
-  $('devices').innerHTML = list.map(deviceCard).join('');
-  $('empty').style.display = list.length ? 'none' : 'block';
+  $('deviceCount').textContent = '共 ' + view.length + ' 台';
+  $('devices').innerHTML = view.map(deviceCard).join('');
+  $('empty').style.display = view.length ? 'none' : 'block';
   $('footerTs').textContent = new Date().toLocaleTimeString();
+}
+
+async function refreshDevices(){
+  try{ devicesCache = await (await fetch('/api/devices')).json(); }
+  catch(e){ toast('设备列表读取失败'); return; }
+  renderDevices(devicesCache);
 }
 async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt()]); }
 async function act(udid){
-  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'}); toast('已激活 WDA（恢复自动看护）'); refreshDevices(); }
-  catch(e){ toast('激活失败'); }
+  // 乐观更新：点击立即显示「启动中」，30s 保持期防止定时刷新闪回「未激活」
+  optimisticAct[udid] = Date.now();
+  renderDevices(devicesCache);
+  let ok = false;
+  try{
+    const r = await fetch('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'});
+    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('激活失败：' + (d.detail || d.error?.message || r.status)); }
+    else { ok = true; toast('已激活，WDA 启动中…'); }
+  }catch(e){ toast('激活失败'); }
+  if (!ok){
+    delete optimisticAct[udid];
+    renderDevices(devicesCache);
+  } else {
+    // 真实起来后（wda_running=true）乐观自动失效；30s 兜底清理
+    setTimeout(() => { delete optimisticAct[udid]; refreshDevices(); }, 30000);
+  }
+  refreshDevices();
 }
 async function stop(udid){
-  try{ await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'}); toast('已停止 WDA（不再自动拉起）'); refreshDevices(); }
-  catch(e){ toast('停止失败'); }
+  // 乐观更新：点击立即变「未激活」
+  for (const d of devicesCache){
+    if (d.udid === udid){ d.wda_running = false; d.last_health = { ok: false, starting: false, checked_at: Date.now()/1000 }; }
+  }
+  renderDevices(devicesCache);
+  try{
+    const r = await fetch('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'});
+    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('停止失败：' + (d.detail || r.status)); }
+    else toast('已停止 WDA（不再自动拉起）');
+  }catch(e){ toast('停止失败'); }
+  refreshDevices();
 }
 function openIp(udid, current){
   ipTarget = udid;
