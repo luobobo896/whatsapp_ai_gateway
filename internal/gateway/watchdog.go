@@ -40,7 +40,7 @@ func (g *Gateway) watchOnce() {
 		dev.LastHealth = map[string]any{
 			"ok": h.OK, "ready": h.Ready, "ip": h.IP,
 			"ios_version": h.Version, "checked_at": float64(time.Now().Unix()),
-			"starting": false,
+			"starting": false, "error": h.Error,
 		}
 		if h.Version != "" {
 			dev.IOSVersion = h.Version

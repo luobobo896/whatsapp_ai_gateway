@@ -39,6 +39,20 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		writeJSON(w, g.deviceList())
 	})
 
+	mux.HandleFunc("/api/easytier/status", func(w http.ResponseWriter, r *http.Request) {
+		// easytier 为可选后备通道，Go 网关 v1 未实现：返回未启用状态供前端正常渲染。
+		writeJSON(w, map[string]any{"running": false, "configured": false, "peers": []any{}, "error": "", "node": nil})
+	})
+	mux.HandleFunc("/api/easytier/config", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"network_name": "", "relay_host": "", "relay_port": 0, "network_cidr": "",
+			"gateway_ipv4": "", "mtu": 0, "tun": false, "network_secret_set": false,
+		})
+	})
+	mux.HandleFunc("/api/easytier/action", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"detail": "easytier 未配置（Go 网关暂未启用后备通道）"})
+	})
+
 	mux.HandleFunc("/api/devices/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/api/devices/")
 		parts := strings.SplitN(rest, "/", 2)
@@ -163,9 +177,6 @@ func (g *Gateway) deviceList() []map[string]any {
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
 			"configured": true, "wda_running": g.WDA.Running(d.UDID),
 			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
-		}
-		if d.IP != "" {
-			_ = entry
 		}
 		out = append(out, entry)
 	}
