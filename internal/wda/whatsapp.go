@@ -61,38 +61,55 @@ type SendAssist interface {
 
 // SendMessageToPhone 驱动 WDA 给指定手机号发送一条文本（保持原签名，供 runner 复用）。
 func SendMessageToPhone(ctx context.Context, client *Client, phone, content string) error {
-	return sendMessage(ctx, client, phone, content, nil)
+	_, err := SendMessageToPhoneInfo(ctx, client, phone, content, nil)
+	return err
 }
 
 // SendMessageWithAssist 同 SendMessageToPhone，但选择器找不到发送键时用视觉/LLM 兜底定位。
 func SendMessageWithAssist(ctx context.Context, client *Client, phone, content string, assist SendAssist) error {
-	return sendMessage(ctx, client, phone, content, assist)
+	_, err := SendMessageToPhoneInfo(ctx, client, phone, content, assist)
+	return err
 }
 
-func sendMessage(ctx context.Context, client *Client, phone, content string, assist SendAssist) error {
+// SendMessageToPhoneInfo 同 SendMessageToPhone，并返回该条是否为新会话
+// （新会话 = 聊天列表中无既有会话、经「新聊天→搜索」打开；用于新会话占比控制）。
+func SendMessageToPhoneInfo(ctx context.Context, client *Client, phone, content string, assist SendAssist) (isNew bool, err error) {
+	sid, isNew, err := OpenChatForSend(ctx, client, phone)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = client.DeleteSession(context.WithoutCancel(ctx), sid) }()
+	return isNew, TypeAndSend(ctx, client, sid, content, assist)
+}
+
+// OpenChatForSend 创建 WhatsApp 会话并打开目标会话（不发送）。返回会话 id 与该会话
+// 是否为新会话；调用方发送后需自行 DeleteSession。
+func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid string, isNew bool, err error) {
 	digits := ""
 	if phone != "" {
-		var err error
 		if digits, err = normalizeMobilePhone(phone); err != nil {
-			return err
+			return "", false, err
 		}
 	}
 	sid, bid, err := createWhatsAppSession(ctx, client)
 	if err != nil {
-		return fmt.Errorf("create wda session: %w", err)
+		return "", false, fmt.Errorf("create wda session: %w", err)
 	}
-	defer func() { _ = client.DeleteSession(context.WithoutCancel(ctx), sid) }()
-
 	if digits != "" {
-		if err := openTargetChat(ctx, client, sid, bid, digits); err != nil {
-			return err
+		isNew, err = openTargetChat(ctx, client, sid, bid, digits)
+		if err != nil {
+			return sid, false, err
 		}
 	} else {
 		if err := openDefaultChat(ctx, client, sid); err != nil {
-			return err
+			return sid, false, err
 		}
 	}
+	return sid, isNew, nil
+}
 
+// TypeAndSend 在已打开的会话中输入内容并点发送（发送键找不到时可用视觉/LLM 兜底）。
+func TypeAndSend(ctx context.Context, client *Client, sid, content string, assist SendAssist) error {
 	inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("find message input: %w", err)
@@ -138,22 +155,22 @@ func createWhatsAppSession(ctx context.Context, client *Client) (sid, bid string
 }
 
 // openTargetChat 打开指定号码的会话：优先深链（iOS 16.4+）；失败则聊天列表按号码匹配，再走新聊天搜索。
-func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string) error {
+// 返回 isNew 表示是否经「新聊天→搜索」路径打开（即该号码此前无既有会话）。
+func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string) (isNew bool, err error) {
 	deeplink := "whatsapp://send?phone=" + digits
 	if err := client.OpenDeepLink(ctx, sid, deeplink, bid); err == nil {
-		return nil
+		return false, nil
 	}
 	if err := gotoChatList(ctx, client, sid); err != nil {
-		return err
+		return false, err
 	}
-	idx, err := chatIndexByPhone(ctx, client, sid, digits)
-	if err == nil {
-		return tapCell(ctx, client, sid, idx)
+	if idx, err := chatIndexByPhone(ctx, client, sid, digits); err == nil {
+		return false, tapCell(ctx, client, sid, idx)
 	}
 	if openNewChatByPhone(ctx, client, sid, digits) {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
+	return false, fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
 }
 
 // openDefaultChat 不指定号码：当前已有打开的会话则直接使用，否则打开聊天列表第一个会话。

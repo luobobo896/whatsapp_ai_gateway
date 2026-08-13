@@ -25,9 +25,9 @@ func TestMetricsPersistAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	e := mustExec(t, dir)
 	e.now = dayAt(t, "2026-08-13")
-	e.recordMetric("udid-a", "task-1", "sent")
-	e.recordMetric("udid-a", "task-1", "sent")
-	e.recordMetric("udid-b", "task-1", "failed")
+	e.recordMetric("udid-a", "task-1", "sent", false)
+	e.recordMetric("udid-a", "task-1", "sent", false)
+	e.recordMetric("udid-b", "task-1", "failed", false)
 
 	// 模拟重启：同一目录新建 Executor。
 	e2 := mustExec(t, dir)
@@ -46,12 +46,12 @@ func TestMetricsDayRolloverFoldsHistory(t *testing.T) {
 	dir := t.TempDir()
 	e := mustExec(t, dir)
 	e.now = dayAt(t, "2026-08-13")
-	e.recordMetric("udid-a", "task-1", "sent")
-	e.recordMetric("udid-a", "task-1", "failed")
+	e.recordMetric("udid-a", "task-1", "sent", false)
+	e.recordMetric("udid-a", "task-1", "failed", false)
 
 	// 新的一天：昨日计数归档。
 	e.now = dayAt(t, "2026-08-14")
-	e.recordMetric("udid-b", "task-2", "sent")
+	e.recordMetric("udid-b", "task-2", "sent", false)
 
 	s := e.MetricsSummary()
 	if s.Day != "2026-08-14" {
@@ -74,9 +74,9 @@ func TestMetricsRolloverPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	e := mustExec(t, dir)
 	e.now = dayAt(t, "2026-08-13")
-	e.recordMetric("udid-a", "t1", "sent")
+	e.recordMetric("udid-a", "t1", "sent", false)
 	e.now = dayAt(t, "2026-08-14")
-	e.recordMetric("udid-a", "t2", "sent")
+	e.recordMetric("udid-a", "t2", "sent", false)
 
 	e2 := mustExec(t, dir)
 	e2.now = dayAt(t, "2026-08-14")
@@ -96,7 +96,7 @@ func TestMetricsCorruptFileIgnored(t *testing.T) {
 	}
 	e := mustExec(t, dir)
 	e.now = dayAt(t, "2026-08-13")
-	e.recordMetric("udid-a", "t1", "sent")
+	e.recordMetric("udid-a", "t1", "sent", false)
 	if got := e.MetricsSummary().Today.SentOK; got != 1 {
 		t.Fatalf("sent after corrupt file = %d, want 1", got)
 	}

@@ -170,10 +170,10 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			// 记录到 executor 统计
 			for i := 0; i < body.SentOK; i++ {
-				g.Exec.recordMetric(udid, body.BatchID, "sent")
+				g.Exec.recordMetric(udid, body.BatchID, "sent", false)
 			}
 			for i := 0; i < body.SentFail; i++ {
-				g.Exec.recordMetric(udid, body.BatchID, "failed")
+				g.Exec.recordMetric(udid, body.BatchID, "failed", false)
 			}
 			writeJSON(w, g.Exec.Metrics(udid))
 		case "metrics":

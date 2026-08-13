@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +45,13 @@ type GatewaySchedule struct {
 	WindowStart         string `json:"windowStart"`
 	WindowEnd           string `json:"windowEnd"`
 	MaxConsecutiveFails int    `json:"maxConsecutiveFails"`
+	// 账号预热（设备级按天计数）：第 1 天 startCap，每日 +dailyStep，稳态 steadyCap。
+	WarmUpEnabled   bool `json:"warmUpEnabled"`
+	WarmUpStartCap  int  `json:"warmUpStartCap"`
+	WarmUpDailyStep int  `json:"warmUpDailyStep"`
+	WarmUpSteadyCap int  `json:"warmUpSteadyCap"`
+	// MaxNewSessionRatio 当日新会话占比上限（百分比；0=不限制）。
+	MaxNewSessionRatio int `json:"maxNewSessionRatio"`
 }
 
 // ItemResult 单条发送结果（item:result 上行）。
@@ -88,11 +97,13 @@ type Executor struct {
 
 // Metrics 网关本地发送统计。
 type Metrics struct {
-	SentOK   int     `json:"sent_ok"`
-	SentFail int     `json:"sent_fail"`
-	Total    int     `json:"total"`
-	BatchID  string  `json:"batch_id"`
-	LastTime float64 `json:"last_time"`
+	SentOK   int `json:"sent_ok"`
+	SentFail int `json:"sent_fail"`
+	Total    int `json:"total"`
+	// NewSessions 当日经「新聊天→搜索」打开的新会话数（新会话占比控制用）。
+	NewSessions int     `json:"new_sessions"`
+	BatchID     string  `json:"batch_id"`
+	LastTime    float64 `json:"last_time"`
 }
 
 // metricsFileState 是 metrics.json 的落盘结构：当天分设备计数 + 历史按天聚合。
@@ -180,6 +191,7 @@ func (e *Executor) foldDayLocked(day string) {
 		agg.SentOK += m.SentOK
 		agg.SentFail += m.SentFail
 		agg.Total += m.Total
+		agg.NewSessions += m.NewSessions
 		if m.LastTime > agg.LastTime {
 			agg.LastTime = m.LastTime
 		}
@@ -215,6 +227,7 @@ func (e *Executor) MetricsSummary() MetricsSummary {
 		today.SentOK += m.SentOK
 		today.SentFail += m.SentFail
 		today.Total += m.Total
+		today.NewSessions += m.NewSessions
 		if m.LastTime > today.LastTime {
 			today.LastTime = m.LastTime
 		}
@@ -293,7 +306,54 @@ func (e *Executor) Metrics(udid string) Metrics {
 	return e.metrics[udid]
 }
 
-func (e *Executor) recordMetric(udid, taskID, status string) {
+// todayMetrics 返回某 UDID 今日统计快照（预热/占比控制用）。
+func (e *Executor) todayMetrics(udid string) Metrics {
+	e.metricsMu.Lock()
+	defer e.metricsMu.Unlock()
+	return e.metrics[udid]
+}
+
+// daysActive 返回该设备活跃天数（历史归档天数 + 今天；用于预热放量阶段计算）。
+func (e *Executor) daysActive() int {
+	e.metricsMu.Lock()
+	defer e.metricsMu.Unlock()
+	return len(e.metricsHistory) + 1
+}
+
+// warmupDailyCap 预热第 days 天的日发送上限（第 1 天 startCap，每日 +step，稳态封顶）。
+func warmupDailyCap(s GatewaySchedule, days int) int {
+	if days < 1 {
+		days = 1
+	}
+	start, step, steady := s.WarmUpStartCap, s.WarmUpDailyStep, s.WarmUpSteadyCap
+	if start <= 0 {
+		start = 5
+	}
+	if step <= 0 {
+		step = 10
+	}
+	if steady <= 0 {
+		steady = 40
+	}
+	cap := start + (days-1)*step
+	if cap > steady {
+		cap = steady
+	}
+	return cap
+}
+
+// newSessionRatioExceeded 判断「再开一个新会话」后是否超过占比上限（百分比整数比较，避免浮点）。
+func newSessionRatioExceeded(todayNew, todayTotal, ratioPct int) bool {
+	if ratioPct <= 0 {
+		return false
+	}
+	if todayTotal <= 0 {
+		return false // 首条不计入占比（分母为 0 时允许）
+	}
+	return (todayNew+1)*100 > ratioPct*(todayTotal+1)
+}
+
+func (e *Executor) recordMetric(udid, taskID, status string, newSession bool) {
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
 	// 跨天：先把昨天分设备计数折入 history，再重置当天计数。
@@ -307,6 +367,9 @@ func (e *Executor) recordMetric(udid, taskID, status string) {
 	m := e.metrics[udid]
 	if status == "sent" {
 		m.SentOK++
+		if newSession {
+			m.NewSessions++
+		}
 	} else if status == "failed" {
 		m.SentFail++
 	}
@@ -397,6 +460,18 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 				continue
 			}
 		}
+		// 账号预热：设备级按天放量，今日已达上限则停止本任务（剩余明细标记待次日）。
+		if sched.WarmUpEnabled {
+			days := e.daysActive()
+			cap := warmupDailyCap(sched, days)
+			if m := e.todayMetrics(udid); m.SentOK >= cap {
+				reason := fmt.Sprintf("预热控制：第 %d 天日上限 %d 条已用完，剩余明细未发送（请明日继续）", days, cap)
+				e.cancelRemainingReason(t, t.Items[idx:], reason)
+				e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason}
+				slog.Warn("warm-up cap reached", "task", t.TaskID, "udid", udid, "day", days, "cap", cap)
+				return
+			}
+		}
 		t0 := time.Now()
 		status, errMsg := "sent", ""
 		assist := e.llm
@@ -405,29 +480,50 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		}
 		// 模板变量：明细有逐条渲染内容时优先使用（兼容旧平台任务）。
 		content := itemContent(t, it)
-		var serr error
-		if assist == nil {
-			serr = wda.SendMessageToPhone(context.Background(), client, it.Phone, content)
-		} else {
-			serr = wda.SendMessageWithAssist(context.Background(), client, it.Phone, content, assist)
+		// 打开会话（返回是否为新会话），新会话占比控制：超额则该条标记失败待次日，
+		// 存量会话不受影响继续发送。
+		sid, isNew, oerr := wda.OpenChatForSend(context.Background(), client, it.Phone)
+		if oerr != nil {
+			status, errMsg = "failed", oerr.Error()
+		} else if isNew && sched.MaxNewSessionRatio > 0 {
+			m := e.todayMetrics(udid)
+			if newSessionRatioExceeded(m.NewSessions, m.Total, sched.MaxNewSessionRatio) {
+				status, errMsg = "failed",
+					fmt.Sprintf("新会话占比控制:今日新会话占比已达上限 %d%%，该号码请明日再发", sched.MaxNewSessionRatio)
+				_ = client.DeleteSession(context.Background(), sid)
+				sid = ""
+			}
 		}
-		if serr != nil {
-			status, errMsg = "failed", serr.Error()
+		if sid != "" {
+			var serr error
+			if assist == nil {
+				serr = wda.TypeAndSend(context.Background(), client, sid, content, nil)
+			} else {
+				serr = wda.TypeAndSend(context.Background(), client, sid, content, assist)
+			}
+			_ = client.DeleteSession(context.Background(), sid)
+			if serr != nil {
+				status, errMsg = "failed", serr.Error()
+			}
 		}
 		dur := time.Since(t0).Milliseconds()
 		e.persist(t.TaskID, it.ItemID, it.Phone, status, errMsg, dur)
 		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur}
-		e.recordMetric(udid, t.TaskID, status)
-		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status, "duration_ms", dur)
+		e.recordMetric(udid, t.TaskID, status, isNew && status == "sent")
+		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status, "new_session", isNew, "duration_ms", dur)
 
 		if status == "failed" {
+			// 占比控制的失败不计入连续失败熔断（非设备异常）。
+			if strings.Contains(errMsg, "占比控制") {
+				continue
+			}
 			if containsAny(errMsg, "not reachable", "connection", "timed out") {
 				slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
 				return
 			}
 			consecFails++
 			if consecFails >= maxFails {
-				e.cancelRemaining(t, t.Items[idx+1:])
+				e.cancelRemainingReason(t, t.Items[idx+1:], "熔断:连续失败 "+strconv.Itoa(consecFails)+" 条")
 				e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online", Error: fmt.Sprintf("熔断：连续失败 %d 条", consecFails)}
 				slog.Warn("circuit breaker triggered", "task", t.TaskID, "udid", udid, "consecutive_fails", consecFails)
 				return
@@ -464,10 +560,10 @@ func (e *Executor) markCancelled(t TaskDispatch, it TaskItem) {
 	e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"}
 }
 
-func (e *Executor) cancelRemaining(t TaskDispatch, rest []TaskItem) {
+func (e *Executor) cancelRemainingReason(t TaskDispatch, rest []TaskItem, reason string) {
 	for _, it := range rest {
-		e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by circuit breaker", 0)
-		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by circuit breaker"}
+		e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", reason, 0)
+		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: reason}
 	}
 }
 
