@@ -208,7 +208,7 @@
         <span class="dot off" id="etPillDot"></span>组网
         <span id="etPillText">未启用</span>
       </button>
-      <button class="pill" onclick="showView('tasks')" title="平台任务的逐条发送记录">发送明细</button>
+      <button class="pill" onclick="showView('tasks')" title="按设备分组的逐条发送记录">发送明细</button>
       <label class="switch" title="easytier 快捷开关" id="etSwitchLabel">
         <input type="checkbox" id="etToggle" onchange="etToggleChange(this)">
         <span class="slider"></span>
@@ -263,29 +263,16 @@
     <div class="back" onclick="showView('devices')">‹ 返回设备总览</div>
     <div class="hero" style="margin-bottom:20px">
       <h2>发送明细</h2>
-      <p>平台下发任务的逐条发送记录（本地落盘、断网不丢）：发给了谁、手机号、内容、结果与连接方式</p>
+      <p>按设备分组的逐条发送记录（本地落盘、断网不丢）：哪台设备、发给了谁、手机号、内容、结果与连接方式</p>
     </div>
-    <div class="panel">
-      <div class="panel-head">
-        <span style="font-size:13px;font-weight:600">任务</span>
-        <button class="btn sm ghost" onclick="loadTasks()">刷新</button>
-      </div>
-      <table id="taskTable" style="display:none">
-        <thead><tr><th>任务</th><th>设备</th><th>连接</th><th>状态</th><th>成功</th><th>失败</th><th>取消</th><th>未发</th><th>开始</th><th>耗时</th><th></th></tr></thead>
-        <tbody id="taskBody"></tbody>
-      </table>
-      <div class="panel-body" id="taskEmpty" style="display:none"><span class="empty-sm">暂无任务记录（收到平台下发后出现）</span></div>
+    <div class="mh-list" id="itemChips" style="margin-bottom:14px"></div>
+    <div id="itemGroups"></div>
+    <div class="panel" id="taskEmpty" style="display:none">
+      <div class="panel-body"><span class="empty-sm">暂无发送记录（收到平台下发后出现）</span></div>
     </div>
-    <div class="panel" id="taskDetailPanel" style="display:none">
-      <div class="panel-head">
-        <span style="font-size:13px;font-weight:600">逐条明细 · <span class="mono" id="tdTaskId"></span></span>
-        <button class="btn sm ghost" id="tdMore" style="display:none" onclick="loadTaskDetail(currentTaskId, taskOffset + 500)">加载更多</button>
-      </div>
-      <div style="overflow-x:auto">
-      <table>
-        <thead><tr><th>时间</th><th>手机号</th><th>收件人</th><th>发送内容</th><th>结果</th><th>原因 / 错误</th><th>耗时</th><th>连接</th><th>新会话</th></tr></thead>
-        <tbody id="tdBody"></tbody>
-      </table>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-body">
+        <span class="muted">说明：升级前落盘的历史明细没有设备上下文，已按网关统计尽力归因，仍无法归因的归入「未知设备」；历史记录中手机号为空却显示「成功」的条目，是升级前「无号码发送到默认会话」的行为，升级后此类明细一律拒绝发送并标记失败。</span>
       </div>
     </div>
   </div>
@@ -392,7 +379,7 @@ function showView(v){
   $('viewNetwork').style.display = v === 'network' ? 'block' : 'none';
   $('viewTasks').style.display = v === 'tasks' ? 'block' : 'none';
   if(v === 'network') loadEt();
-  if(v === 'tasks') loadTasks();
+  if(v === 'tasks') loadDeviceItems();
 }
 
 /* ---------- 云通道 ---------- */
@@ -543,6 +530,7 @@ function deviceCard(d){
   } else if (running || d.busy) {
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
   }
+  actions += ` <button class="btn sm ghost" onclick="showDeviceItems('${d.udid}')">明细</button>`;
   if (d.configured && !d.busy) {
     actions += ` <button class="btn sm ghost danger" onclick="delDevice('${d.udid}')">删除</button>`;
   }
@@ -702,12 +690,8 @@ async function delDevice(udid){
   }catch(e){ toast('删除失败'); }
   refreshDevices();
 }
-/* ---------- 发送明细（本地落盘 results） ---------- */
-let currentTaskId = '', taskOffset = 0;
-const taskStatusTxt = {
-  completed:'已完成', no_ip:'设备未配置IP', device_unreachable:'设备失联中断',
-  circuit_breaker:'熔断中断', warmup_cap:'预热上限暂停'
-};
+/* ---------- 发送明细（按设备分组，本地落盘 results） ---------- */
+let itemFilter = ''; // 当前按设备过滤（'' = 全部设备）
 const itemStatusBadge = {
   sent:'<span class="tag tag-green">成功</span>',
   failed:'<span class="tag tag-red">失败</span>',
@@ -728,59 +712,64 @@ function connTag(c){
   if (c === 'wifi') return '<span class="tag">Wi-Fi</span>';
   return '<span class="muted">—</span>';
 }
-async function loadTasks(){
-  let list = [];
-  try{ list = (await (await api('/api/tasks')).json()).tasks || []; }
-  catch(e){ return; }
-  const rows = list.map(t => {
-    const s = t.summary || {};
-    const dev = s.serial || s.device_name || (s.udid ? s.udid.slice(0, 8) : '—');
-    const stTxt = s.status ? (taskStatusTxt[s.status] || s.status) : '进行中';
-    const stTag = s.status === 'completed'
-      ? '<span class="tag tag-green">' + stTxt + '</span>'
-      : (s.status ? '<span class="tag tag-orange">' + stTxt + '</span>' : '<span class="tag tag-gray">进行中</span>');
-    const pending = (s.pending != null) ? s.pending : Math.max(0, (t.items || 0) - (t.sent_ok + t.sent_fail + t.cancelled));
-    return `<tr>
-      <td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.task_id)}">${esc(t.task_id)}</td>
-      <td>${esc(dev)}</td>
-      <td>${connTag(s.conn_type)}</td>
-      <td>${stTag}</td>
-      <td style="color:var(--green);font-weight:600">${t.sent_ok || 0}</td>
-      <td style="color:var(--red);font-weight:600">${t.sent_fail || 0}</td>
-      <td>${t.cancelled || 0}</td>
-      <td>${pending || 0}</td>
-      <td class="mono">${fmtTime(s.start_at)}</td>
-      <td>${fmtDur(s.duration_ms)}</td>
-      <td><button class="btn sm ghost" onclick="loadTaskDetail('${esc(t.task_id)}', 0)">明细</button></td>
-    </tr>`;
-  }).join('');
-  $('taskBody').innerHTML = rows;
-  $('taskTable').style.display = list.length ? 'table' : 'none';
-  $('taskEmpty').style.display = list.length ? 'none' : 'block';
+function phoneCell(r){
+  if (r.phone) return '<span class="mono">' + esc(r.phone) + '</span>';
+  // 升级前的历史记录：无号码却“发送成功”= 当时发送到了默认会话；升级后已拒绝此类明细。
+  return r.status === 'sent' ? '<span class="tag tag-orange" title="升级前无号码发送到默认会话的历史记录">无号码</span>' : '<span class="muted">—</span>';
 }
-async function loadTaskDetail(id, offset){
+function showDeviceItems(udid){
+  itemFilter = udid || '';
+  showView('tasks');
+}
+function pickDeviceChip(i){
+  itemFilter = i < 0 ? '' : ((devicesCache[i] || {}).udid || '');
+  loadDeviceItems();
+}
+function renderItemChips(){
+  let html = `<button class="pill${itemFilter === '' ? ' on' : ''}" onclick="pickDeviceChip(-1)">全部设备</button>`;
+  (devicesCache || []).forEach((d, i) => {
+    html += `<button class="pill${itemFilter === d.udid ? ' on' : ''}" onclick="pickDeviceChip(${i})">${esc(d.serial || d.name || d.udid.slice(0, 8))}</button>`;
+  });
+  $('itemChips').innerHTML = html;
+}
+async function loadDeviceItems(){
+  const q = itemFilter ? ('?udid=' + encodeURIComponent(itemFilter)) : '';
   let d = {};
-  try{ d = await (await api('/api/tasks/' + encodeURIComponent(id) + '?offset=' + offset + '&limit=500')).json(); }
-  catch(e){ toast('明细读取失败'); return; }
-  currentTaskId = id;
-  taskOffset = offset;
-  const items = d.items || [];
-  if (offset === 0) $('tdBody').innerHTML = '';
-  $('tdBody').insertAdjacentHTML('beforeend', items.map(r => `<tr>
-      <td class="mono">${fmtTime(r.sent_at)}</td>
-      <td class="mono">${esc(r.phone || '—')}</td>
-      <td>${r.contact_name ? esc(r.contact_name) : '<span class="muted">—</span>'}</td>
-      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.content || '')}">${esc(r.content || '—')}</td>
-      <td>${itemStatusBadge[r.status] || esc(r.status)}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.error || '')}">${r.error ? '<span style="color:var(--red)">' + esc(r.error) + '</span>' : '—'}</td>
-      <td>${fmtDur(r.duration_ms)}</td>
-      <td>${connTag(r.conn_type)}</td>
-      <td>${r.new_session ? '是' : '—'}</td>
-    </tr>`).join(''));
-  $('taskDetailPanel').style.display = 'block';
-  $('taskDetailPanel').scrollIntoView({behavior:'smooth', block:'start'});
-  $('tdTaskId').textContent = id + '（共 ' + (d.total || 0) + ' 条）';
-  $('tdMore').style.display = (offset + items.length) < (d.total || 0) ? '' : 'none';
+  try{ d = await (await api('/api/items' + q)).json(); }catch(e){ return; }
+  const groups = d.groups || [];
+  renderItemChips();
+  $('itemGroups').innerHTML = groups.map(g => {
+    const head = g.udid
+      ? '📱 ' + esc(g.name || g.serial || g.udid.slice(0, 8)) +
+        '<span class="tag tag-accent">' + esc(g.serial || g.udid.slice(0, 8)) + '</span>' +
+        (g.name && g.serial ? '<span class="tag">' + esc(g.name) + '</span>' : '')
+      : '<span class="tag tag-orange">未知设备（升级前历史记录）</span>';
+    return `<div class="panel">
+      <div class="panel-head">
+        <span style="font-size:13px;font-weight:600">${head}</span>
+        <span style="font-size:12px;color:var(--text-2)">成功 <b style="color:var(--green)">${g.sent_ok || 0}</b> · 失败 <b style="color:var(--red)">${g.sent_fail || 0}</b> · 取消 ${g.cancelled || 0} · 共 ${g.items.length} 条</span>
+      </div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>时间</th><th>手机号</th><th>收件人</th><th>发送内容</th><th>结果</th><th>原因 / 错误</th><th>耗时</th><th>连接</th><th>新会话</th><th>任务</th></tr></thead>
+        <tbody>${g.items.map(r => `<tr>
+          <td class="mono">${fmtTime(r.sent_at)}</td>
+          <td>${phoneCell(r)}</td>
+          <td>${r.contact_name ? esc(r.contact_name) : '<span class="muted">—</span>'}</td>
+          <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.content || '')}">${esc(r.content || '—')}</td>
+          <td>${itemStatusBadge[r.status] || esc(r.status)}</td>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.error || '')}">${r.error ? '<span style="color:var(--red)">' + esc(r.error) + '</span>' : '—'}</td>
+          <td>${fmtDur(r.duration_ms)}</td>
+          <td>${connTag(r.conn_type)}</td>
+          <td>${r.new_session ? '是' : '—'}</td>
+          <td class="mono" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.task_id)}">${esc(r.task_id)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      </div>
+    </div>`;
+  }).join('');
+  $('taskEmpty').style.display = groups.length ? 'none' : 'block';
+  if (d.truncated) toast('明细较多，仅显示最新 3000 条');
 }
 
 /* ---------- easytier ---------- */

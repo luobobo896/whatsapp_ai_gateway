@@ -572,6 +572,19 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		}
 		// 模板变量：明细有逐条渲染内容时优先使用（兼容旧平台任务）。
 		content := itemContent(t, it)
+		// 手机号缺失：禁止无号码发送——旧逻辑会落到「默认会话」把消息发给
+		// 当前打开的任意聊天，造成明细显示发送成功却无手机号。此类明细直接标记失败。
+		if strings.TrimSpace(it.Phone) == "" {
+			e.finishItem(ItemResult{
+				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone,
+				Status: "failed", Error: "明细缺少手机号，已拒绝发送（无号码禁止发送到默认会话）",
+				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+				Content: content, SentAt: e.now().Format(time.RFC3339),
+			})
+			e.recordMetric(udid, t.TaskID, "failed", false)
+			slog.Warn("item rejected: empty phone", "task", t.TaskID, "item", it.ItemID)
+			continue
+		}
 		// 打开会话（返回是否为新会话），新会话占比控制：超额则该条标记失败待次日，
 		// 存量会话不受影响继续发送。
 		sid, isNew, oerr := wda.OpenChatForSend(context.Background(), client, it.Phone)
@@ -989,6 +1002,133 @@ func isTaskResultsFile(name string) bool {
 		return false
 	}
 	return true
+}
+
+// DeviceItem 跨任务视图的单条明细（含 task_id，便于回平台核对）。
+type DeviceItem struct {
+	TaskID string `json:"task_id"`
+	ItemDetail
+}
+
+// DeviceItemGroup 是 /api/items 的按设备分组视图；udid 为空 = 无法归因的历史记录。
+type DeviceItemGroup struct {
+	Udid      string       `json:"udid"`
+	Serial    string       `json:"serial,omitempty"`
+	Name      string       `json:"name,omitempty"`
+	SentOK    int          `json:"sent_ok"`
+	SentFail  int          `json:"sent_fail"`
+	Cancelled int          `json:"cancelled"`
+	Items     []DeviceItem `json:"items"`
+}
+
+// DeviceItems 汇总所有任务落盘明细，按设备分组、最新活跃设备在前（每组内按时间倒序）。
+// 升级前落盘、缺 udid 的历史明细先按 metrics.json 的 batch_id→udid 映射尽力归因
+// （该映射只保留每设备最近一批任务），仍无法归因的归入 udid 为空的「未知设备」组。
+// udidFilter 非空时只返回该设备；limit<=0 默认 3000 条；第二返回值为是否已截断。
+func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup, bool) {
+	if limit <= 0 {
+		limit = 3000
+	}
+	batchUDID := map[string]string{}
+	e.metricsMu.Lock()
+	for u, m := range e.metrics {
+		if m.BatchID != "" {
+			batchUDID[m.BatchID] = u
+		}
+	}
+	e.metricsMu.Unlock()
+
+	entries, err := os.ReadDir(e.resultsDir)
+	if err != nil {
+		return nil, false
+	}
+	type rec struct {
+		TaskID string
+		ItemID string
+		itemRecord
+		mtime time.Time
+	}
+	var all []rec
+	for _, ent := range entries {
+		if ent.IsDir() || !isTaskResultsFile(ent.Name()) {
+			continue
+		}
+		taskID := ent.Name()[:len(ent.Name())-len(".json")]
+		var mtime time.Time
+		if info, err := ent.Info(); err == nil {
+			mtime = info.ModTime()
+		}
+		for itemID, r := range e.readItems(taskID) {
+			if udidFilter != "" {
+				udid := r.Udid
+				if udid == "" {
+					udid = batchUDID[taskID]
+				}
+				if udid != udidFilter {
+					continue
+				}
+			}
+			all = append(all, rec{TaskID: taskID, ItemID: itemID, itemRecord: r, mtime: mtime})
+		}
+	}
+	itemTime := func(r rec) time.Time {
+		if r.SentAt != "" {
+			if ts, err := time.Parse(time.RFC3339, r.SentAt); err == nil {
+				return ts
+			}
+		}
+		return r.mtime
+	}
+	sort.Slice(all, func(i, j int) bool {
+		ti, tj := itemTime(all[i]), itemTime(all[j])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return all[i].ItemID > all[j].ItemID
+	})
+	truncated := len(all) > limit
+	if truncated {
+		all = all[:limit]
+	}
+
+	groups := map[string]*DeviceItemGroup{}
+	var order []string
+	for _, r := range all {
+		udid := r.Udid
+		if udid == "" {
+			udid = batchUDID[r.TaskID]
+		}
+		g := groups[udid]
+		if g == nil {
+			g = &DeviceItemGroup{Udid: udid}
+			if e.cfg != nil {
+				if dev := e.cfg.Device(udid); dev != nil {
+					g.Serial, g.Name = dev.Serial, dev.Name
+				}
+			}
+			groups[udid] = g
+			order = append(order, udid)
+		}
+		g.Items = append(g.Items, DeviceItem{TaskID: r.TaskID, ItemDetail: ItemDetail{ItemID: r.ItemID, itemRecord: r.itemRecord}})
+		switch r.Status {
+		case "sent":
+			g.SentOK++
+		case "failed":
+			g.SentFail++
+		case "cancelled":
+			g.Cancelled++
+		}
+	}
+	out := make([]DeviceItemGroup, 0, len(order))
+	for _, u := range order {
+		if u != "" {
+			out = append(out, *groups[u])
+		}
+	}
+	if g := groups[""]; g != nil {
+		out = append(out, *g) // 未知设备组放最后
+	}
+	return out, truncated
 }
 
 // ResendPersisted 重连后补报本地已持久化的明细与任务汇总。

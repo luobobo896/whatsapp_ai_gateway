@@ -100,6 +100,20 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		})
 	})
 
+	// /api/items 按设备分组的发送明细（跨任务视图；升级前缺设备上下文的历史记录尽力归因）。
+	mux.HandleFunc("/api/items", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		groups, truncated := g.Exec.DeviceItems(r.URL.Query().Get("udid"), limit)
+		if groups == nil {
+			groups = []DeviceItemGroup{}
+		}
+		writeJSON(w, map[string]any{"groups": groups, "truncated": truncated})
+	})
+
 	mux.HandleFunc("/api/easytier/status", func(w http.ResponseWriter, r *http.Request) {
 		if g.EasyTier == nil {
 			writeJSON(w, map[string]any{"running": false, "configured": false, "peers": []any{}, "error": "", "node": nil})
