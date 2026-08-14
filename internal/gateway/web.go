@@ -48,7 +48,7 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		writeJSON(w, g.deviceList())
 	})
 
-// /api/llm 当前视觉/LLM 模型配置（平台下发，api_key 不回传明文）。
+	// /api/llm 当前视觉/LLM 模型配置（平台下发，api_key 不回传明文）。
 	mux.HandleFunc("/api/llm", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -56,7 +56,7 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		}
 		c := g.Cfg.LLM
 		writeJSON(w, map[string]any{
-			"enabled": c.BaseURL != "" && c.Model != "",
+			"enabled":  c.BaseURL != "" && c.Model != "",
 			"base_url": c.BaseURL, "model": c.Model, "has_api_key": c.APIKey != "",
 		})
 	})
@@ -166,20 +166,6 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 				return
 			}
 			writeJSON(w, CheckWDA(dev.IP, dev.Port, 3*time.Second))
-		case "set-ip":
-			ip := r.URL.Query().Get("ip")
-			port, _ := strconv.Atoi(r.URL.Query().Get("port"))
-			if port == 0 {
-				port = 8100
-			}
-			dev := g.Cfg.Device(udid)
-			if dev == nil {
-				dev = &Device{UDID: udid, AutoReactivate: true}
-				g.Cfg.Devices = append(g.Cfg.Devices, *dev)
-			}
-			dev.IP, dev.Port = ip, port
-			_ = g.Cfg.Save()
-			writeJSON(w, map[string]any{"udid": udid, "ip": ip, "port": port})
 		case "report":
 			var body struct {
 				SentOK   int     `json:"sent_ok"`
@@ -229,14 +215,17 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 		if !g.WDA.Running(udid) {
 			return map[string]any{"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true}
 		}
-		if dev := g.Cfg.Device(udid); dev != nil && dev.IP != "" {
+		dev := g.Cfg.Device(udid)
+		if dev != nil && dev.IP != "" {
 			h := CheckWDA(dev.IP, port, 3*time.Second)
 			if h.OK {
-				if dev != nil {
-					dev.LastHealth = map[string]any{"ok": true, "ready": true, "ip": h.IP, "ios_version": h.Version, "checked_at": float64(time.Now().Unix()), "starting": false}
-				}
+				dev.LastHealth = map[string]any{"ok": true, "ready": true, "ip": h.IP, "ios_version": h.Version, "checked_at": float64(time.Now().Unix()), "starting": false}
 				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true}
 			}
+		} else {
+			// USB 直连、尚未配 IP：WDA 进程已运行即视为激活成功；
+			// 手机 Wi-Fi IP 由 watchdog 的 LAN 扫描自动发现，无需手动设置。
+			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "usb"}
 		}
 		time.Sleep(3 * time.Second)
 	}
@@ -244,28 +233,54 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 }
 
 func (g *Gateway) deviceList() []map[string]any {
+	// 设备列表实时获取：USB 直连（ioreg/devicectl）与 Wi-Fi 在线（WDA 健康）才算在线；
+	// 离线设备不再出现（不在线就没有数据）。
+	usb := Discover()
+	usbSet := map[string]bool{}
+	usbInfo := map[string]DiscoveredDevice{}
+	for _, d := range usb {
+		usbSet[d.UDID] = true
+		usbInfo[d.UDID] = d
+	}
+
 	out := []map[string]any{}
-	configured := map[string]bool{}
-	for _, d := range g.Cfg.Devices {
-		configured[d.UDID] = true
-		entry := map[string]any{
-			"udid": d.UDID, "name": d.Name, "model": d.Model,
+	emitted := map[string]bool{}
+	for i := range g.Cfg.Devices {
+		d := &g.Cfg.Devices[i]
+		if d.UDID == "" {
+			continue
+		}
+		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
+			continue // 离线：无 USB 且 Wi-Fi 不可达
+		}
+		name, model := d.Name, d.Model
+		if info, ok := usbInfo[d.UDID]; ok {
+			if name == "" {
+				name = info.Name
+			}
+			if model == "" {
+				model = info.Model
+			}
+		}
+		out = append(out, map[string]any{
+			"udid": d.UDID, "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
-			"configured": true, "wda_running": g.WDA.Running(d.UDID),
-			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
-		}
-		out = append(out, entry)
+			"configured": true, "usb": usbSet[d.UDID],
+			"wda_running": g.WDA.Running(d.UDID),
+			"metrics":     g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
+		})
+		emitted[d.UDID] = true
 	}
-	for _, d := range Discover() {
-		if configured[d.UDID] {
+	for _, d := range usb {
+		if emitted[d.UDID] {
 			continue
 		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
-			"wda_running": g.WDA.Running(d.UDID), "metrics": g.Exec.Metrics(d.UDID),
-			"busy": g.Exec.IsBusy(d.UDID),
+			"usb": true, "wda_running": g.WDA.Running(d.UDID),
+			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})
 	}
 	return out

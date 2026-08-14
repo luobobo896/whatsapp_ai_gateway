@@ -55,14 +55,7 @@ func (g *Gateway) watchOnce() {
 		}
 		h := CheckWDA(dev.IP, dev.Port, 3*time.Second)
 		prevOK := healthOK(dev.LastHealth)
-		dev.LastHealth = map[string]any{
-			"ok": h.OK, "ready": h.Ready, "ip": h.IP,
-			"ios_version": h.Version, "checked_at": float64(time.Now().Unix()),
-			"starting": false, "error": h.Error,
-		}
-		if h.Version != "" {
-			dev.IOSVersion = h.Version
-		}
+		applyHealth(dev, h)
 		// 在线时记录 WDA identifierForVendor(uuid)，供网络变化后按 uuid 重新匹配。
 		if h.OK && dev.VendorUUID == "" {
 			if uuid := g.vendorUUID(dev.IP, dev.Port); uuid != "" {
@@ -71,7 +64,10 @@ func (g *Gateway) watchOnce() {
 				slog.Info("device recorded vendor_uuid", "udid", dev.UDID[:8], "uuid", uuid)
 			}
 		}
-		if prevOK != h.OK && !g.Exec.IsBusy(dev.UDID) {
+		if g.Exec.IsBusy(dev.UDID) {
+			// 任务执行中周期性刷新 busy，避免平台 10 分钟 busyTTL 把忙碌设备误判为离线。
+			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "busy", Error: ""})
+		} else if prevOK != h.OK {
 			st := "online"
 			if !h.OK {
 				st = "offline"
@@ -98,6 +94,7 @@ func (g *Gateway) watchOnce() {
 	}
 	_ = g.autoAssignIP()
 	_ = g.followNetworkChange()
+	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
 func (g *Gateway) vendorUUID(ip string, port int) string {
@@ -203,11 +200,28 @@ func (g *Gateway) followNetworkChange() error {
 		if hit.UUID != "" {
 			dev.VendorUUID = hit.UUID
 		}
+		// 换 IP 后先对新 IP 做一次真实探活，就绪才报 online；未就绪交给下一轮 watchOnce 修正。
+		h := CheckWDA(dev.IP, dev.Port, 3*time.Second)
+		applyHealth(dev, h)
 		_ = cfg.Save()
-		slog.Info("device followed network change", "udid", dev.UDID[:8], "old", old, "new", hit.IP)
-		g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + hit.IP})
+		slog.Info("device followed network change", "udid", dev.UDID[:8], "old", old, "new", hit.IP, "ok", h.OK)
+		if h.OK {
+			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + hit.IP})
+		}
 	}
 	return nil
+}
+
+// applyHealth 把一次 WDA 探活结果写入设备内存态（LastHealth + iOS 版本）。
+func applyHealth(dev *Device, h WDAHealth) {
+	dev.LastHealth = map[string]any{
+		"ok": h.OK, "ready": h.Ready, "ip": h.IP,
+		"ios_version": h.Version, "checked_at": float64(time.Now().Unix()),
+		"starting": false, "error": h.Error,
+	}
+	if h.Version != "" {
+		dev.IOSVersion = h.Version
+	}
 }
 
 func healthOK(h map[string]any) bool {

@@ -296,12 +296,21 @@ func pump[T any](ctx context.Context, conn *websocket.Conn, q <-chan T, typ stri
 }
 
 func (g *Gateway) deviceListReport() []map[string]any {
+	// 与 Web 设备列表一致：只上报在线设备（USB 直连或 Wi-Fi 健康），离线设备不出现。
+	usb := Discover()
+	usbSet := map[string]bool{}
+	for _, d := range usb {
+		usbSet[d.UDID] = true
+	}
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
 	for _, d := range g.Cfg.Devices {
-		status := "offline"
-		if h, ok := d.LastHealth["ok"].(bool); ok && h {
-			status = "online"
+		if d.UDID == "" {
+			continue
 		}
+		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
+			continue
+		}
+		status := "online"
 		if g.Exec.IsBusy(d.UDID) {
 			status = "busy"
 		}

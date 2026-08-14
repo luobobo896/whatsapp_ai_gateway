@@ -51,8 +51,8 @@ go build -o gateway ./cmd/gateway
 
 - 网关凭证在平台「组网」页签发，凭证明文仅展示一次，请保存到 `cloud.token`。
 - `llm` 为可选视觉兜底：配置后，发送键选择器找不到时用截图 + 视觉模型定位坐标点击；不配置则保持默认选择器发送。
-- 每台手机一行；IP 是手机 Wi-Fi IP（WDA 默认端口 8100，各机 IP 不同互不冲突）。
-- 未配置 IP 的设备可在 Web 页面点「设IP」，或调 `POST /api/devices/{udid}/set-ip?ip=192.168.x.x`。
+- 设备列表由 USB 与 Wi-Fi 实时发现：USB 直连（ioreg/devicectl）或 Wi-Fi 上 WDA 健康可达才在线，
+  不在线就不出现在列表里；插上 USB 即可直接「激活」，手机 Wi-Fi IP 由网关局域网扫描自动发现，无需手动设置。
 
 ## 云通道协议（三端串联 v6，JSON 文本帧）
 
@@ -91,11 +91,10 @@ go build -o gateway ./cmd/gateway
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET  | /api/cloud | 云通道状态（连接/网关名/执行中任务） |
-| GET  | /api/devices | 设备列表（含 WDA 进程/健康/忙碌状态） |
-| POST | /api/devices/{udid}/activate?port=8100 | 激活该设备 WDA |
+| GET  | /api/devices | 设备列表（USB/Wi-Fi 实时发现，含 WDA 进程/健康/忙碌状态） |
+| POST | /api/devices/{udid}/activate?port=8100 | 激活该设备 WDA（USB 直连即可） |
 | POST | /api/devices/{udid}/stop | 停止该设备 WDA |
-| GET  | /api/devices/{udid}/health | 健康检查（需已配置 IP） |
-| POST | /api/devices/{udid}/set-ip?ip=..&port=8100 | 设置设备 IP/端口 |
+| GET  | /api/devices/{udid}/health | 健康检查（需已发现 IP） |
 | POST | /api/devices/{udid}/report | 本地/调试结果上报（旧协议，兼容保留） |
 | GET  | /api/devices/{udid}/metrics | 本地发送指标 |
 
