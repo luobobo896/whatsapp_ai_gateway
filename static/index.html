@@ -606,7 +606,7 @@ async function loadLlm(){
     const txt = document.getElementById('llmText');
     if(txt){ txt.textContent = on ? c.model : '未配置'; }
     const detail = document.getElementById('llmDetail');
-    if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置')) : '由平台「组网」页下发，用于发送键视觉定位兜底'; }
+    if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置')) : '由平台「模型管理」页下发，用于发送键视觉定位兜底'; }
   }catch(e){}
 }
 async function act(udid){
