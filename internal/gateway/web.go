@@ -10,11 +10,14 @@ import (
 	"time"
 )
 
-// Handler 返回网关 HTTP 路由（REST + 静态页）。
-func (g *Gateway) Handler(staticDir string) http.Handler {
-	mux := http.NewServeMux()
-	auth := NewWebAuth(g.Cfg)
+// Handler 返回网关 HTTP 路由（REST + 静态页）。会话库打不开时返回错误。
+func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
+	auth, err := NewWebAuth(g.Cfg, filepath.Join(g.Cfg.Dir(), "data", "sessions.db"))
+	if err != nil {
+		return nil, err
+	}
 	auth.onToken = g.ApplyCloudToken
+	mux := http.NewServeMux()
 
 	// 登录/登出/会话状态（公开）。
 	mux.HandleFunc("/api/login", auth.HandleLogin)
@@ -277,7 +280,7 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, r)
-	})
+	}), nil
 }
 
 func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map[string]any {

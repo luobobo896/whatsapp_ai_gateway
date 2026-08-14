@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,14 +12,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	_ "modernc.org/sqlite" // 纯 Go SQLite 驱动（无 CGO）
 )
 
 // Web 管理页登录鉴权：网关本地不存任何账号密码，
 // 登录时把邮箱/密码转发到 HK 平台的 /api/auth/login 校验（与平台同一账号体系），
-// 校验通过后签发网关自己的会话 cookie（12 小时有效，内存保存）。
+// 校验通过后签发网关自己的会话 cookie（12 小时有效，SQLite 落盘，重启不丢）。
 //
 // CSRF：签发会话时同步生成一个 CSRF token，前端在 state-changing 请求里带
 // X-CSRF-Token 头，服务端与会话内 token 比对，防止跨站请求伪造。
@@ -29,19 +33,32 @@ const (
 	csrfHeader       = "X-CSRF-Token"
 )
 
-type webSession struct {
-	csrf string
-	exp  time.Time
-}
-
-// webSessions 内存会话表（网关单实例；重启后需重新登录）。
+// webSessions SQLite 会话表（网关单实例进程；重启后会话仍在）。
 type webSessions struct {
-	mu     sync.Mutex
-	tokens map[string]webSession
+	db *sql.DB
 }
 
-func newWebSessions() *webSessions {
-	return &webSessions{tokens: map[string]webSession{}}
+// openWebSessions 打开（必要时创建）会话库并建表。
+func openWebSessions(dbPath string) (*webSessions, error) {
+	if dir := filepath.Dir(dbPath); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+	token      TEXT PRIMARY KEY,
+	csrf       TEXT NOT NULL,
+	expires_at INTEGER NOT NULL
+);`); err != nil {
+	_ = db.Close()
+		return nil, err
+	}
+	return &webSessions{db: db}, nil
 }
 
 func randHex(n int) string {
@@ -50,50 +67,56 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// create 生成会话 token 与 CSRF token（会话 token 发 cookie，CSRF 只回传响应体）。
-func (ws *webSessions) create() (token, csrf string) {
-	token = randHex(24)
-	csrf = randHex(24)
-	ws.mu.Lock()
-	ws.tokens[token] = webSession{csrf: csrf, exp: time.Now().Add(webSessionTTL)}
-	ws.mu.Unlock()
-	return token, csrf
+// create 生成会话 token 与 CSRF token 并落盘（会话 token 发 cookie，CSRF 只回传响应体）；
+// 顺手清理过期会话。落盘失败返回错误，调用方不得向用户签发未持久化的会话。
+func (ws *webSessions) create() (token, csrf string, err error) {
+	token, csrf = randHex(24), randHex(24)
+	if _, err = ws.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, time.Now().Unix()); err != nil {
+		return "", "", err
+	}
+	_, err = ws.db.Exec(`INSERT INTO sessions(token, csrf, expires_at) VALUES(?, ?, ?)`,
+		token, csrf, time.Now().Add(webSessionTTL).Unix())
+	if err != nil {
+		return "", "", err
+	}
+	return token, csrf, nil
+}
+
+// row 读取会话；不存在或已过期返回 !ok（过期行顺手删除）。
+func (ws *webSessions) row(token string) (csrf string, ok bool) {
+	var exp int64
+	err := ws.db.QueryRow(`SELECT csrf, expires_at FROM sessions WHERE token = ?`, token).Scan(&csrf, &exp)
+	if err != nil {
+		return "", false
+	}
+	if time.Now().After(time.Unix(exp, 0)) {
+		_, _ = ws.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+		return "", false
+	}
+	return csrf, true
 }
 
 func (ws *webSessions) valid(token string) bool {
 	if token == "" {
 		return false
 	}
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	s, ok := ws.tokens[token]
-	if !ok {
-		return false
-	}
-	if time.Now().After(s.exp) {
-		delete(ws.tokens, token)
-		return false
-	}
-	return true
+	_, ok := ws.row(token)
+	return ok
 }
 
 func (ws *webSessions) csrfFor(token string) string {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
-	s, ok := ws.tokens[token]
-	if !ok || time.Now().After(s.exp) {
-		if ok {
-			delete(ws.tokens, token)
-		}
+	csrf, ok := ws.row(token)
+	if !ok {
 		return ""
 	}
-	return s.csrf
+	return csrf
 }
 
 func (ws *webSessions) revoke(token string) {
-	ws.mu.Lock()
-	delete(ws.tokens, token)
-	ws.mu.Unlock()
+	if token == "" {
+		return
+	}
+	_, _ = ws.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
 }
 
 // WebAuth 包装管理页 HTTP 鉴权（凭证校验转发给平台）。
@@ -105,18 +128,23 @@ type WebAuth struct {
 	onToken func(token string) error
 }
 
-// NewWebAuth 构造鉴权器。
-func NewWebAuth(cfg *Config) *WebAuth {
+// NewWebAuth 构造鉴权器；会话存 SQLite（dbPath 为库文件路径，目录不存在时自动创建）。
+// 打开失败返回错误——会话持久化是硬要求，不静默退回内存。
+func NewWebAuth(cfg *Config, dbPath string) (*WebAuth, error) {
+	ss, err := openWebSessions(dbPath)
+	if err != nil {
+		return nil, err
+	}
 	return &WebAuth{
 		cfg: cfg,
-		ss:  newWebSessions(),
+		ss:  ss,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse // 不回跟随平台重定向
 			},
 		},
-	}
+	}, nil
 }
 
 // PasswordRequired 是否要求登录：云通道已配置即要求（与平台同一账号体系）。
@@ -250,7 +278,12 @@ func (a *WebAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:
-		token, csrf := a.ss.create()
+		token, csrf, err := a.ss.create()
+		if err != nil {
+			slog.Error("session store create failed", "error", err)
+			writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "会话存储失败，请重试"})
+			return
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name: webSessionCookie, Value: token, Path: "/",
 			HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(webSessionTTL.Seconds()),

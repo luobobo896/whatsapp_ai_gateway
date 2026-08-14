@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,10 @@ func newPlatformServer(t *testing.T, email, password string) *httptest.Server {
 func newAuthTestServer(t *testing.T, cloudWSURL string) (*httptest.Server, *webSessions) {
 	t.Helper()
 	cfg := &Config{Cloud: CloudConfig{WSURL: cloudWSURL, Enabled: cloudWSURL != ""}}
-	auth := NewWebAuth(cfg)
+	auth, err := NewWebAuth(cfg, filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatalf("open session store: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", auth.HandleLogin)
 	mux.HandleFunc("/api/logout", auth.HandleLogout)
@@ -204,18 +208,54 @@ func TestWebAuthOpenMode(t *testing.T) {
 func TestWebSessionExpiry(t *testing.T) {
 	platform := newPlatformServer(t, "a@b.c", "pw")
 	ts, ss := newAuthTestServer(t, platform.URL+"/api/ios-agent/v1/gateway/ws")
-	token, _ := ss.create()
+	token, _, err := ss.create()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// 手动把过期时间拨到过去。
-	ss.mu.Lock()
-	sess := ss.tokens[token]
-	sess.exp = time.Now().Add(-24 * time.Hour)
-	ss.tokens[token] = sess
-	ss.mu.Unlock()
+	if _, err := ss.db.Exec(`UPDATE sessions SET expires_at = ? WHERE token = ?`,
+		time.Now().Add(-24*time.Hour).Unix(), token); err != nil {
+		t.Fatal(err)
+	}
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/cloud", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookie, Value: token})
 	resp, err := ts.Client().Do(req)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expired session status = %v err=%v", resp.StatusCode, err)
+	}
+}
+
+// TestWebSessionPersistsAcrossRestart 会话落盘 SQLite：模拟网关重启（重新打开同一库文件）
+// 后会话与 CSRF 依然有效，登出后失效。
+func TestWebSessionPersistsAcrossRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	auth1, err := NewWebAuth(&Config{}, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, csrf, err := auth1.ss.create()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// “重启”：同一 dbPath 重新打开。
+	auth2, err := NewWebAuth(&Config{}, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth2.ss.valid(token) {
+		t.Fatal("session lost after reopen")
+	}
+	if got := auth2.ss.csrfFor(token); got != csrf {
+		t.Fatalf("csrf after reopen = %q, want %q", got, csrf)
+	}
+	auth2.ss.revoke(token)
+	if auth2.ss.valid(token) {
+		t.Fatal("revoked session still valid")
+	}
+	// 未签发的 token 一律无效。
+	if auth2.ss.valid(randHex(24)) {
+		t.Fatal("unknown token should be invalid")
 	}
 }
 
@@ -245,7 +285,10 @@ func TestWebAuthLoginAutoProvision(t *testing.T) {
 	defer platform.Close()
 
 	cfg := &Config{Cloud: CloudConfig{WSURL: platform.URL + "/api/ios-agent/v1/gateway/ws", GatewayName: "macmini-01", Enabled: true}}
-	auth := NewWebAuth(cfg)
+	auth, err := NewWebAuth(cfg, filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var captured string
 	auth.onToken = func(token string) error { captured = token; return nil }
 

@@ -70,7 +70,12 @@ func main() {
 	go gw.WatchdogLoop(ctx)
 	go gw.CloudLoop(ctx)
 
-	srv := &http.Server{Addr: *listen, Handler: gw.Handler(static), ReadHeaderTimeout: 10 * time.Second}
+	h, err := gw.Handler(static)
+	if err != nil {
+		slog.Error("init web handler (session store)", "error", err)
+		os.Exit(1)
+	}
+	srv := &http.Server{Addr: *listen, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	slog.Info("gateway listening", "addr", *listen, "project", *projectRoot)

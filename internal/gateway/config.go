@@ -102,6 +102,11 @@ func (c *Config) Save() error {
 	return os.WriteFile(c.path, b, 0o600)
 }
 
+// Dir 返回配置文件所在目录（网关数据根目录，data/ 位于其下）。
+func (c *Config) Dir() string {
+	return filepath.Dir(c.path)
+}
+
 // Device 按 UDID 查找设备。
 func (c *Config) Device(udid string) *Device {
 	for i := range c.Devices {
