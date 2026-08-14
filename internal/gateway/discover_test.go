@@ -33,3 +33,20 @@ func TestIOSMajor(t *testing.T) {
 		}
 	}
 }
+
+func TestValidSerial(t *testing.T) {
+	cases := map[string]bool{
+		"C38SG3S0HG00": true,                        // 经典 12 位
+		"QP7X22L3JH":   true,                        // 旧款 11 位
+		"000081100001A1B2C3D4E5F6": true,            // 新式 24 位
+		"short1": false,                             // 过短
+		"": false,
+		"ERROR: Unable to connect": false,           // ideviceinfo 错误文本
+		"含中文AAA111": false, // 非字母数字
+	}
+	for s, want := range cases {
+		if got := validSerial(s); got != want {
+			t.Errorf("validSerial(%q) = %v, want %v", s, got, want)
+		}
+	}
+}

@@ -48,6 +48,7 @@ func (g *Gateway) WatchdogLoop(ctx context.Context) {
 
 func (g *Gateway) watchOnce() {
 	cfg := g.Cfg
+	g.refreshSerials() // USB 在线设备补取硬件序列号（缓存过就秒回）
 	for i := range cfg.Devices {
 		dev := &cfg.Devices[i]
 		if dev.UDID == "" || dev.IP == "" {
@@ -56,12 +57,21 @@ func (g *Gateway) watchOnce() {
 		h := CheckWDA(dev.IP, dev.Port, 3*time.Second)
 		prevOK := healthOK(dev.LastHealth)
 		applyHealth(dev, h)
-		// 在线时记录 WDA identifierForVendor(uuid)，供网络变化后按 uuid 重新匹配。
-		if h.OK && dev.VendorUUID == "" {
-			if uuid := g.vendorUUID(dev.IP, dev.Port); uuid != "" {
+		// 在线时记录 WDA identifierForVendor(uuid) 与设备名（如 iPhone Plus-2），供识别与网络变化后按 uuid 重新匹配。
+		if h.OK && (dev.VendorUUID == "" || dev.Name == "") {
+			uuid, name := g.deviceIdentity(dev.IP, dev.Port)
+			dirty := false
+			if dev.VendorUUID == "" && uuid != "" {
 				dev.VendorUUID = uuid
-				_ = cfg.Save()
+				dirty = true
 				slog.Info("device recorded vendor_uuid", "udid", dev.UDID[:8], "uuid", uuid)
+			}
+			if dev.Name == "" && name != "" {
+				dev.Name = name
+				dirty = true
+			}
+			if dirty {
+				_ = cfg.Save()
 			}
 		}
 		if g.Exec.IsBusy(dev.UDID) {
@@ -97,18 +107,19 @@ func (g *Gateway) watchOnce() {
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
-func (g *Gateway) vendorUUID(ip string, port int) string {
+// deviceIdentity 读取 WDA identifierForVendor(uuid) 与设备名（健康探活通过后调用）。
+func (g *Gateway) deviceIdentity(ip string, port int) (uuid, name string) {
 	if port == 0 {
 		port = 8100
 	}
 	client := wda.NewClient(fmt.Sprintf("http://%s:%d", ip, port), 3*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	uuid, _, _, err := client.DeviceInfo(ctx)
+	uuid, name, _, err := client.DeviceInfo(ctx)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return uuid
+	return uuid, name
 }
 
 // autoAssignIP 对「已激活但未配置 IP」的设备自动探测局域网 WDA。
@@ -153,10 +164,12 @@ func (g *Gateway) autoAssignIP() error {
 func (g *Gateway) followNetworkChange() error {
 	cfg := g.Cfg
 	var stale []*Device
+	staleSet := map[string]bool{}
 	for i := range cfg.Devices {
 		d := &cfg.Devices[i]
 		if d.UDID != "" && d.IP != "" && !healthOK(d.LastHealth) {
 			stale = append(stale, d)
+			staleSet[d.UDID] = true
 		}
 	}
 	if len(stale) == 0 {
@@ -166,9 +179,26 @@ func (g *Gateway) followNetworkChange() error {
 	if len(found) == 0 {
 		return nil
 	}
+	// IP 归属守卫：iOS 版本+型号兜底匹配区分不了同型号同版本的机器，
+	// 认错手机会让消息从错误的设备发出。已被其它设备配置的 IP 不允许被弱匹配抢占；
+	// uuid 强匹配也只允许落在无主、或属主同样失联（真·换网互换）的 IP 上。
+	owner := map[string]string{}
+	for _, d := range cfg.Devices {
+		if d.UDID != "" && d.IP != "" {
+			owner[d.IP] = d.UDID
+		}
+	}
+	weakFree := func(ip, udid string) bool {
+		o, ok := owner[ip]
+		return !ok || o == udid
+	}
+	uuidFree := func(ip, udid string) bool {
+		o, ok := owner[ip]
+		return !ok || o == udid || staleSet[o]
+	}
 	byUUID := map[string]FoundWDA{}
 	for _, f := range found {
-		if f.UUID != "" {
+		if f.UUID != "" && uuidFree(f.IP, "") {
 			byUUID[f.UUID] = f
 		}
 	}
@@ -178,6 +208,9 @@ func (g *Gateway) followNetworkChange() error {
 		if !ok {
 			var cands []FoundWDA
 			for _, f := range found {
+				if !weakFree(f.IP, dev.UDID) {
+					continue
+				}
 				if f.IOSVersion != dev.IOSVersion {
 					continue
 				}
@@ -197,9 +230,11 @@ func (g *Gateway) followNetworkChange() error {
 			continue
 		}
 		dev.IP = hit.IP
-		if hit.UUID != "" {
+		if hit.UUID != "" && dev.VendorUUID == "" {
+			// 只在无 uuid 时记录；避免把别的手机的 uuid 覆盖进来污染设备身份
 			dev.VendorUUID = hit.UUID
 		}
+		owner[hit.IP] = dev.UDID // 本轮内占用，后续设备不会再匹配到同一 IP
 		// 换 IP 后先对新 IP 做一次真实探活，就绪才报 online；未就绪交给下一轮 watchOnce 修正。
 		h := CheckWDA(dev.IP, dev.Port, 3*time.Second)
 		applyHealth(dev, h)

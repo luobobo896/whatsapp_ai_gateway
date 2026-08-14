@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -34,6 +35,45 @@ func USBUDIDs() []string {
 		}
 	}
 	return res
+}
+
+// validSerial 校验 ideviceinfo 返回内容像硬件序列号（C38SG3S0HG00 / 新式 24 位），
+// 排除 "ERROR: ..." 之类的错误文本。
+func validSerial(s string) bool {
+	if len(s) < 8 || len(s) > 24 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+// ideviceSerial 经 libimobiledevice 的 ideviceinfo 查询硬件序列号。
+// 序列号只有 lockdownd 协议提供（ioreg/devicectl/WDA 都只有 UDID），需要设备 USB 在线且已配对。
+func ideviceSerial(udid string) string {
+	bin := "ideviceinfo"
+	if _, err := exec.LookPath("ideviceinfo"); err != nil {
+		for _, p := range []string{"/opt/homebrew/bin/ideviceinfo", "/usr/local/bin/ideviceinfo"} {
+			if _, err := os.Stat(p); err == nil {
+				bin = p
+				break
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "-u", udid, "-k", "SerialNumber").Output()
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(out))
+	if !validSerial(s) {
+		return ""
+	}
+	return s
 }
 
 // DiscoveredDevice 是发现到的设备（USB/CoreDevice）。

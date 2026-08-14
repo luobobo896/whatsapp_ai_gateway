@@ -126,6 +126,46 @@ func TestWebAuthLoginFlow(t *testing.T) {
 	}
 }
 
+// TestWebAuthSessionReturnsCSRF 登录后 /api/session 必须回传 CSRF token：
+// 前端只把 token 存在 JS 变量里，页面刷新即丢，不回传会导致刷新后所有 POST 403。
+func TestWebAuthSessionReturnsCSRF(t *testing.T) {
+	platform := newPlatformServer(t, "admin@whatsapp-ai.local", "secret-pass")
+	ts, _ := newAuthTestServer(t, platform.URL+"/api/ios-agent/v1/gateway/ws")
+	client := authTestClient(ts)
+
+	resp, err := client.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"email":"admin@whatsapp-ai.local","password":"secret-pass"}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %v err=%v", resp.StatusCode, err)
+	}
+	var loginResp struct {
+		CsrfToken string `json:"csrfToken"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&loginResp)
+	if loginResp.CsrfToken == "" {
+		t.Fatal("login must return csrf token")
+	}
+
+	// 模拟页面刷新：只剩 cookie，从 /api/session 找回 CSRF 后 POST 必须通过。
+	sr, err := client.Get(ts.URL + "/api/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Authenticated bool   `json:"authenticated"`
+		CsrfToken     string `json:"csrfToken"`
+	}
+	_ = json.NewDecoder(sr.Body).Decode(&s)
+	if !s.Authenticated || s.CsrfToken != loginResp.CsrfToken {
+		t.Fatalf("session = %+v, want authenticated with same csrf token", s)
+	}
+	postReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/logout", nil)
+	postReq.Header.Set("X-CSRF-Token", s.CsrfToken)
+	if resp, err = client.Do(postReq); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("post with session csrf status = %v err=%v", resp.StatusCode, err)
+	}
+}
+
 // TestWebAuthPlatformUnreachable 平台不可达时登录返回 503，不签发会话。
 func TestWebAuthPlatformUnreachable(t *testing.T) {
 	platform := newPlatformServer(t, "a@b.c", "pw")

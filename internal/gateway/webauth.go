@@ -226,9 +226,17 @@ func (a *WebAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleSession GET /api/session → 会话状态（前端 401 跳登录用）。
+// 已登录会话同步回传 CSRF token：前端只把它存在 JS 变量里，页面刷新即丢失，
+// 不回传的话刷新后所有 POST（激活/停止）都会 403。
 func (a *WebAuth) HandleSession(w http.ResponseWriter, r *http.Request) {
 	valid := a.Authenticated(r)
-	writeJSON(w, map[string]any{"authenticated": valid, "passwordRequired": a.PasswordRequired()})
+	resp := map[string]any{"authenticated": valid, "passwordRequired": a.PasswordRequired()}
+	if valid {
+		if csrf := a.ss.csrfFor(a.cookieToken(r)); csrf != "" {
+			resp["csrfToken"] = csrf
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // splitBearer 兼容网关凭证头解析（保持与 cloud 一致的小工具）。

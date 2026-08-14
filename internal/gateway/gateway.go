@@ -24,11 +24,61 @@ type Gateway struct {
 	tenantName string
 	userEmail  string
 	userName   string
+
+	serialMu    sync.Mutex
+	serials     map[string]string    // udid -> 硬件序列号（含未配置进 devices.json 的 USB 设备）
+	serialTried map[string]time.Time // 上次尝试取号时间（失败的至少间隔 10 分钟再试）
 }
 
 // New 构造网关。
 func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *EasyTierManager) *Gateway {
-	return &Gateway{Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et}
+	return &Gateway{
+		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
+		serials: map[string]string{}, serialTried: map[string]time.Time{},
+	}
+}
+
+// refreshSerials 为 USB 在线设备补取硬件序列号（ideviceinfo）。
+// 成功即写入 devices.json 永久缓存；失败（未插 USB/未配对）至少 10 分钟后才重试。
+func (g *Gateway) refreshSerials() {
+	for _, udid := range USBUDIDs() {
+		if dev := g.Cfg.Device(udid); dev != nil && dev.Serial != "" {
+			g.rememberSerial(udid, dev.Serial)
+			continue
+		}
+		g.serialMu.Lock()
+		if g.serials[udid] != "" || time.Since(g.serialTried[udid]) < 10*time.Minute {
+			g.serialMu.Unlock()
+			continue
+		}
+		g.serialTried[udid] = time.Now()
+		g.serialMu.Unlock()
+		s := ideviceSerial(udid)
+		if s == "" {
+			continue
+		}
+		g.rememberSerial(udid, s)
+		if dev := g.Cfg.Device(udid); dev != nil && dev.Serial == "" {
+			dev.Serial = s
+			_ = g.Cfg.Save()
+		}
+	}
+}
+
+func (g *Gateway) rememberSerial(udid, serial string) {
+	g.serialMu.Lock()
+	g.serials[udid] = serial
+	g.serialMu.Unlock()
+}
+
+// SerialOf 返回设备序列号（devices.json 缓存优先，内存缓存兜底）。
+func (g *Gateway) SerialOf(udid string) string {
+	if dev := g.Cfg.Device(udid); dev != nil && dev.Serial != "" {
+		return dev.Serial
+	}
+	g.serialMu.Lock()
+	defer g.serialMu.Unlock()
+	return g.serials[udid]
 }
 
 // SetConnected 更新云通道连接状态。

@@ -350,6 +350,7 @@ function toast(msg){
   t._h = setTimeout(() => t.classList.remove('show'), 2200);
 }
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function apiErr(d, status){ return d?.detail || (typeof d?.error === 'string' ? d.error : d?.error?.message) || ('HTTP ' + status); }
 
 /* ---------- 视图切换 ---------- */
 function showView(v){
@@ -367,6 +368,13 @@ async function api(path, opts = {}){
     opts.headers = Object.assign({}, opts.headers, { 'X-CSRF-Token': csrfToken });
   }
   const r = await fetch(path, opts);
+  if (r.status === 403 && opts.method && opts.method !== 'GET') {
+    // CSRF token 失效（如页面刷新后丢失）：向 /api/session 重新取一次并重试，避免操作无声失败
+    try {
+      const s = await (await fetch('/api/session')).json();
+      if (s.csrfToken) { csrfToken = s.csrfToken; return await fetch(path, opts); }
+    } catch(e) {}
+  }
   if(r.status === 401){ showLogin(); throw new Error('unauthorized'); }
   return r;
 }
@@ -409,6 +417,7 @@ async function checkSession(){
     if(s.passwordRequired){
       $('logoutBtn').style.display = s.authenticated ? '' : 'none';
       if(!s.authenticated){ showLogin(); return; }
+      if(s.csrfToken) csrfToken = s.csrfToken; // 页面刷新后找回 CSRF token
     } else {
       $('logoutBtn').style.display = 'none';
     }
@@ -464,7 +473,8 @@ function deviceCard(d){
   const starting = !!h.starting; // 进程刚启动、健康未就绪（宽限期内）-> 启动中，不是异常
   // 健康数据新鲜度：watchdog 探活间隔 30s，超过 50s 未更新说明刚激活/进程刚起、还没轮到探活
   const healthFresh = !!h.checked_at && (Date.now()/1000 - h.checked_at) < 50;
-  const name = esc(d.name || d.model || '未命名设备');
+  const serial = esc(d.serial || '');
+  const name = serial || esc(d.name || d.model || '未命名设备');
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
@@ -490,12 +500,15 @@ function deviceCard(d){
   else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
-  // 按钮：未激活 -> 激活；运行/忙碌 -> 停止（无需手动设置 IP）
+  // 按钮：未激活 -> 激活；运行/忙碌 -> 停止（无需手动设置 IP）；已配置设备可删除
   let actions = '';
   if (!running && !d.busy) {
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
   } else if (running || d.busy) {
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
+  }
+  if (d.configured && !d.busy) {
+    actions += ` <button class="btn sm ghost danger" onclick="delDevice('${d.udid}')">删除</button>`;
   }
   return `
     <div class="device-row">
@@ -506,12 +519,14 @@ function deviceCard(d){
         <div class="device-info">
           <div class="device-title">
             <span class="device-name">${name}</span>
+            ${serial && d.name ? `<span class="tag">${esc(d.name)}</span>` : ''}
             <span class="tag">${model}</span>
             ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
             ${wdaBadge}
           </div>
           <div class="device-meta">
             <span>${udid}</span><span class="sep">·</span>
+            ${serial ? '' : '<span style="color:var(--orange)">序列号待识别（插 USB 自动获取）</span><span class="sep">·</span>'}
             <span>${addr}</span><span class="sep">·</span>
             <span style="${healthCls}">${healthTxt}</span>
           </div>
@@ -601,7 +616,7 @@ async function act(udid){
     try{ d = await r.json(); }catch(e){}
     if (!r.ok){
       settled = true;
-      toast('激活失败：' + (d.detail || d.error?.message || r.status));
+      toast('激活失败：' + apiErr(d, r.status));
     } else if (d.status === 'activated' && d.ready){
       settled = true;
       toast(d.via === 'usb' ? '激活成功（USB 直连，IP 自动发现中）' : '激活成功，WDA 已就绪');
@@ -630,9 +645,24 @@ async function stop(udid){
   renderDevices(devicesCache);
   try{
     const r = await api('/api/devices/' + encodeURIComponent(udid) + '/stop', {method:'POST'});
-    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('停止失败：' + (d.detail || r.status)); }
+    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('停止失败：' + apiErr(d, r.status)); }
     else toast('已停止 WDA（不再自动拉起）');
   }catch(e){ toast('停止失败'); }
+  refreshDevices();
+}
+async function delDevice(udid){
+  const d = devicesCache.find(x => x.udid === udid) || {};
+  const label = d.serial || d.name || udid.slice(0, 8);
+  const msg = d.usb
+    ? `确定删除设备「${label}」？\n\n设备仍通过 USB 连接：删除后配置（IP/身份）会被清除，但设备会作为「未激活」的新设备重新出现在列表中。`
+    : `确定删除设备「${label}」？\n\n设备当前未通过 USB 连接：删除后将从此列表移除，重新插线激活才会再次出现。`;
+  if (!confirm(msg)) return;
+  try{
+    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/delete', {method:'POST'});
+    let dd = {}; try{ dd = await r.json(); }catch(e){}
+    if(!r.ok){ toast('删除失败：' + apiErr(dd, r.status)); return; }
+    toast(dd.usb_reappears ? '已删除配置；设备仍连着 USB，稍后自动重新出现' : '已删除设备');
+  }catch(e){ toast('删除失败'); }
   refreshDevices();
 }
 /* ---------- easytier ---------- */
@@ -696,7 +726,7 @@ async function etAction(action){
     let d = {};
     try{ d = await r.json(); }catch(e){}
     if(!r.ok){
-      const detail = d.detail || d.error?.message || ('操作失败（HTTP ' + r.status + '）');
+      const detail = apiErr(d, r.status);
       toast(detail);
       if(String(detail).includes('授权')) toast('请在弹出的系统授权框中输入密码（仅首次）');
       return;

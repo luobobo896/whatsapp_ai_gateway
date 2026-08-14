@@ -38,6 +38,7 @@ type CloudConfig struct {
 // Device 单台手机。
 type Device struct {
 	UDID             string         `json:"udid"`
+	Serial           string         `json:"serial,omitempty"` // 硬件序列号（USB 时经 ideviceinfo 取得，插一次即永久缓存）
 	IP               string         `json:"ip"`
 	Port             int            `json:"port"`
 	AutoReactivate   bool           `json:"auto_reactivate"`
@@ -109,6 +110,19 @@ func (c *Config) Device(udid string) *Device {
 		}
 	}
 	return nil
+}
+
+// RemoveDevice 从配置移除设备并落盘；返回设备是否原本存在。
+// USB 仍连接的设备删除后会以「未配置」身份重新出现在列表（发现层自动恢复，防误删）。
+func (c *Config) RemoveDevice(udid string) bool {
+	for i := range c.Devices {
+		if c.Devices[i].UDID == udid {
+			c.Devices = append(c.Devices[:i], c.Devices[i+1:]...)
+			_ = c.Save()
+			return true
+		}
+	}
+	return false
 }
 
 // SetLLM 原子更新视觉/LLM 配置并落盘（供平台下发 model:config 调用）。

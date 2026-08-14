@@ -144,12 +144,21 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 				dev.AutoReactivate = true
 				_ = g.Cfg.Save()
 			}
+			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
+			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
+			if dev.IP != "" {
+				if h := CheckWDA(dev.IP, port, 3*time.Second); h.OK {
+					applyHealth(dev, h)
+					writeJSON(w, map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "already-running"})
+					return
+				}
+			}
 			if err := g.WDA.Activate(udid, port, udid); err != nil {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
 				return
 			}
-			// 等待就绪（最多 180s）
-			res := g.waitWDAReady(udid, port, 180*time.Second)
+			// 等待就绪（最多 60s；未就绪返回 starting，由前端轮询/看护循环继续跟进）
+			res := g.waitWDAReady(udid, port, 60*time.Second)
 			writeJSON(w, res)
 		case "stop":
 			dev := g.Cfg.Device(udid)
@@ -159,6 +168,24 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			}
 			stopped := g.WDA.Stop(udid)
 			writeJSON(w, map[string]any{"udid": udid, "status": "stopped", "auto_reactivate": false, "stopped": stopped})
+		case "delete":
+			// 删除 = 移除配置（IP/身份/自动拉起）并停掉网关托管的 WDA 进程。
+			// USB 仍连接的设备会以「未配置」身份重新出现在列表（发现层自动恢复，防误删）；
+			// 未插 USB 的设备删除后即从列表消失。
+			if g.Exec.IsBusy(udid) {
+				writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "设备正在执行任务，不能删除"})
+				return
+			}
+			stopped := g.WDA.Stop(udid)
+			removed := g.Cfg.RemoveDevice(udid)
+			if !removed {
+				writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "设备不在配置中（USB 设备无需删除，拔线即消失）"})
+				return
+			}
+			writeJSON(w, map[string]any{
+				"udid": udid, "status": "deleted", "removed": true, "stopped": stopped,
+				"usb_reappears": usbConnected(udid),
+			})
 		case "health":
 			dev := g.Cfg.Device(udid)
 			if dev == nil || dev.IP == "" {
@@ -263,7 +290,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			}
 		}
 		out = append(out, map[string]any{
-			"udid": d.UDID, "name": name, "model": model,
+			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
 			"configured": true, "usb": usbSet[d.UDID],
@@ -277,7 +304,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			continue
 		}
 		out = append(out, map[string]any{
-			"udid": d.UDID, "name": d.Name, "model": d.Model,
+			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
 			"usb": true, "wda_running": g.WDA.Running(d.UDID),
 			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
