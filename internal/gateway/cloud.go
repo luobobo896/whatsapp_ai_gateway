@@ -312,7 +312,7 @@ func (g *Gateway) deviceListReport() []map[string]any {
 			continue
 		}
 		out = append(out, map[string]any{
-			"udid": d.UDID, "name": d.Name, "model": d.Model,
+			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
 			"wda_status": g.deviceCloudStatus(d, usbSet[d.UDID]), "whatsapp_version": "",
 		})

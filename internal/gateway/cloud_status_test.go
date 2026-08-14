@@ -59,7 +59,7 @@ func TestDeviceCloudStatus(t *testing.T) {
 func TestDeviceListReportUsesRunningState(t *testing.T) {
 	g, wdaMgr, _ := newStatusTestGateway(t)
 	g.Cfg.Devices = []Device{
-		{UDID: "u-online", IP: "192.168.20.1", LastHealth: map[string]any{"ok": true}},
+		{UDID: "u-online", Serial: "C39ST1KEHG00", IP: "192.168.20.1", LastHealth: map[string]any{"ok": true}},
 		{UDID: "u-stale", IP: "192.168.20.2", LastHealth: map[string]any{"ok": true}},
 	}
 	setWDA(t, wdaMgr, "u-online", true)
@@ -72,6 +72,9 @@ func TestDeviceListReportUsesRunningState(t *testing.T) {
 	}
 	if status["u-online"] != "online" {
 		t.Fatalf("u-online status = %q, want online", status["u-online"])
+	}
+	if got[0]["serial"] != "C39ST1KEHG00" {
+		t.Fatalf("u-online serial = %v, want C39ST1KEHG00", got[0]["serial"])
 	}
 	if status["u-stale"] != "offline" {
 		t.Fatalf("u-stale status = %q, want offline (WDA 进程未运行，即使健康探活 ok 也不上报 online)", status["u-stale"])
