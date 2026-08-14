@@ -192,14 +192,19 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		}
 	})
 
-	// 除 login/logout/session 外的 /api/* 需要会话（未配置密码时开放）。
+	// /api/login 与 /api/session 公开；其余 /api/* 需会话；state-changing 方法另需 CSRF。
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") &&
-			r.URL.Path != "/api/login" && r.URL.Path != "/api/logout" && r.URL.Path != "/api/session" {
-			if !(auth.PasswordRequired() == false) && !auth.ss.valid(auth.cookieToken(r)) {
-				writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/login" || r.URL.Path == "/api/session" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		if !auth.Authenticated(r) {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !auth.CSRFValid(r) {
+			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid csrf token"})
+			return
 		}
 		mux.ServeHTTP(w, r)
 	})

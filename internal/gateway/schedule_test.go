@@ -36,20 +36,20 @@ func TestWithinWindow(t *testing.T) {
 	now := time.Now()
 	cur := now.Format("15:04")
 	// 包含当前时间的窗口。
-	if !withinWindow("00:00", "23:59") {
+	if !withinWindow("00:00", "23:59", time.Local) {
 		t.Fatal("00:00-23:59 should be within window")
 	}
 	_ = cur
 	// 空窗口 = 不限制。
-	if !withinWindow("", "") {
+	if !withinWindow("", "", time.Local) {
 		t.Fatal("empty window should always allow")
 	}
 	// 仅 start：当前时间 >= start 才允许。用过去时间点应通过。
-	if !withinWindow("00:00", "") {
+	if !withinWindow("00:00", "", time.Local) {
 		t.Fatal("00:00 start should allow")
 	}
 	// 仅 end：当前时间 < end 才允许。
-	if withinWindow("", "00:00") {
+	if withinWindow("", "00:00", time.Local) {
 		t.Fatal("end=00:00 should deny (unless midnight)")
 	}
 }

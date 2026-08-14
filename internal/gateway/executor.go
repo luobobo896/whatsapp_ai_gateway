@@ -353,6 +353,23 @@ func newSessionRatioExceeded(todayNew, todayTotal, ratioPct int) bool {
 	return (todayNew+1)*100 > ratioPct*(todayTotal+1)
 }
 
+// report 非阻塞上报单条结果：结果已先落盘，队列满时丢弃（重连后补报），避免断线时阻塞执行器。
+func (e *Executor) report(r ItemResult) {
+	select {
+	case e.ReportQ <- r:
+	default:
+		slog.Warn("report queue full, dropped (persisted, will re-report)", "task", r.TaskID, "item", r.ItemID)
+	}
+}
+
+// status 非阻塞上报设备状态（best-effort，队列满时丢弃）。
+func (e *Executor) status(s DeviceStatus) {
+	select {
+	case e.StatusQ <- s:
+	default:
+	}
+}
+
 func (e *Executor) recordMetric(udid, taskID, status string, newSession bool) {
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
@@ -418,7 +435,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	if ip == "" {
 		for _, it := range t.Items {
 			e.persist(t.TaskID, it.ItemID, it.Phone, "failed", "device ip not configured", 0)
-			e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "failed", Error: "device ip not configured"}
+			e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "failed", Error: "device ip not configured"})
 		}
 		return
 	}
@@ -426,13 +443,13 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	e.busy[udid] = true
 	cancelCh := e.cancel[t.TaskID]
 	e.mu.Unlock()
-	e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "busy"}
+	e.status(DeviceStatus{UDID: udid, WDAStatus: "busy"})
 	defer func() {
 		e.mu.Lock()
 		delete(e.busy, udid)
 		delete(e.cancel, t.TaskID)
 		e.mu.Unlock()
-		e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online"}
+		e.status(DeviceStatus{UDID: udid, WDAStatus: "online"})
 	}()
 
 	sched := t.Schedule
@@ -453,9 +470,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		if e.persisted(t.TaskID, it.ItemID) {
 			continue
 		}
-		// 发送时间窗：窗口外等待到窗口开始（可被取消中断）。
-		if !withinWindow(sched.WindowStart, sched.WindowEnd) {
-			if waitUntilWindow(cancelCh, sched.WindowStart) {
+		// 发送时间窗：窗口外等待到窗口开始（可被取消中断）。时区由配置 send_timezone 决定。
+		loc := e.timeLocation()
+		if !withinWindow(sched.WindowStart, sched.WindowEnd, loc) {
+			if waitUntilWindow(cancelCh, sched.WindowStart, loc) {
 				e.markCancelled(t, it)
 				continue
 			}
@@ -467,7 +485,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			if m := e.todayMetrics(udid); m.SentOK >= cap {
 				reason := fmt.Sprintf("预热控制：第 %d 天日上限 %d 条已用完，剩余明细未发送（请明日继续）", days, cap)
 				e.cancelRemainingReason(t, t.Items[idx:], reason)
-				e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason}
+				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason})
 				slog.Warn("warm-up cap reached", "task", t.TaskID, "udid", udid, "day", days, "cap", cap)
 				return
 			}
@@ -508,7 +526,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		}
 		dur := time.Since(t0).Milliseconds()
 		e.persist(t.TaskID, it.ItemID, it.Phone, status, errMsg, dur)
-		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur}
+		e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur})
 		e.recordMetric(udid, t.TaskID, status, isNew && status == "sent")
 		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status, "new_session", isNew, "duration_ms", dur)
 
@@ -524,7 +542,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			consecFails++
 			if consecFails >= maxFails {
 				e.cancelRemainingReason(t, t.Items[idx+1:], "熔断:连续失败 "+strconv.Itoa(consecFails)+" 条")
-				e.StatusQ <- DeviceStatus{UDID: udid, WDAStatus: "online", Error: fmt.Sprintf("熔断：连续失败 %d 条", consecFails)}
+				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: fmt.Sprintf("熔断：连续失败 %d 条", consecFails)})
 				slog.Warn("circuit breaker triggered", "task", t.TaskID, "udid", udid, "consecutive_fails", consecFails)
 				return
 			}
@@ -557,13 +575,13 @@ func itemContent(t TaskDispatch, it TaskItem) string {
 
 func (e *Executor) markCancelled(t TaskDispatch, it TaskItem) {
 	e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by platform", 0)
-	e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"}
+	e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"})
 }
 
 func (e *Executor) cancelRemainingReason(t TaskDispatch, rest []TaskItem, reason string) {
 	for _, it := range rest {
 		e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", reason, 0)
-		e.ReportQ <- ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: reason}
+		e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: reason})
 	}
 }
 
@@ -591,12 +609,27 @@ func nextInterval(s GatewaySchedule, base int) time.Duration {
 	return time.Duration(base) * time.Second
 }
 
-// withinWindow 判断当前本地时间是否在发送窗口内（HH:MM；空=不限制）。
-func withinWindow(start, end string) bool {
+// timeLocation 返回发送时间窗使用的时区（配置 send_timezone；空=本机时区）。
+func (e *Executor) timeLocation() *time.Location {
+	if e.cfg != nil && e.cfg.Web.SendTimezone != "" {
+		if loc, err := time.LoadLocation(e.cfg.Web.SendTimezone); err == nil {
+			return loc
+		}
+		slog.Warn("send_timezone invalid, fallback to local", "tz", e.cfg.Web.SendTimezone)
+	}
+	return time.Local
+}
+
+// withinWindow 判断指定时区当前时间是否在发送窗口内（HH:MM；空=不限制）。
+func withinWindow(start, end string, loc *time.Location) bool {
 	if start == "" && end == "" {
 		return true
 	}
-	hm := time.Now().Hour()*60 + time.Now().Minute()
+	if loc == nil {
+		loc = time.Local
+	}
+	now := time.Now().In(loc)
+	hm := now.Hour()*60 + now.Minute()
 	if start != "" && end != "" {
 		s, en := parseHM(start), parseHM(end)
 		if s < en {
@@ -611,13 +644,16 @@ func withinWindow(start, end string) bool {
 }
 
 // waitUntilWindow 等待到下一个窗口开始；期间被取消返回 true。
-func waitUntilWindow(cancelCh <-chan struct{}, start string) bool {
+func waitUntilWindow(cancelCh <-chan struct{}, start string, loc *time.Location) bool {
 	if start == "" {
 		return false
 	}
+	if loc == nil {
+		loc = time.Local
+	}
 	m := parseHM(start)
-	now := time.Now()
-	next := time.Date(now.Year(), now.Month(), now.Day(), m/60, m%60, 0, 0, now.Location())
+	now := time.Now().In(loc)
+	next := time.Date(now.Year(), now.Month(), now.Day(), m/60, m%60, 0, 0, loc)
 	if !next.After(now) {
 		next = next.Add(24 * time.Hour)
 	}
@@ -685,13 +721,13 @@ func (e *Executor) ResendPersisted() {
 		}
 		taskID := ent.Name()[:len(ent.Name())-5]
 		for itemID, r := range m {
-			e.ReportQ <- ItemResult{
+			e.report(ItemResult{
 				TaskID: taskID, ItemID: itemID,
 				Phone:      str(r["phone"]),
 				Status:     str(r["status"]),
 				Error:      str(r["error"]),
 				DurationMs: int64(num(r["duration_ms"])),
-			}
+			})
 		}
 	}
 }

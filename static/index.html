@@ -394,7 +394,12 @@ function showView(v){
 
 /* ---------- 云通道 ---------- */
 /* ---------- 登录鉴权 ---------- */
+let csrfToken = '';
 async function api(path, opts = {}){
+  opts = opts || {};
+  if (opts.method && opts.method !== 'GET') {
+    opts.headers = Object.assign({}, opts.headers, { 'X-CSRF-Token': csrfToken });
+  }
   const r = await fetch(path, opts);
   if(r.status === 401){ showLogin(); throw new Error('unauthorized'); }
   return r;
@@ -420,13 +425,15 @@ async function login(){
       $('loginErr').style.display = 'block';
       return;
     }
+    let d = {}; try{ d = await r.json(); }catch(e){}
+    csrfToken = d.csrfToken || '';
     hideLogin();
     $('logoutBtn').style.display = '';
     refreshAll();
   }catch(e){ $('loginErr').textContent = '登录失败，请检查网络后重试'; $('loginErr').style.display = 'block'; }
 }
 async function logout(){
-  try{ await fetch('/api/logout', {method:'POST'}); }catch(e){}
+  try{ await fetch('/api/logout', {method:'POST', headers:{'X-CSRF-Token': csrfToken}}); }catch(e){}
   $('logoutBtn').style.display = 'none';
   showLogin();
 }
@@ -573,7 +580,8 @@ function renderDevices(list){
     }
     return d;
   });
-  const on = view.filter(d => d.last_health?.ok && !d.busy).length;
+  // 在线 = 已配置IP + WDA 运行中 + 健康探活 ok + 非忙碌（与 deviceCard 的「在线」口径一致）
+  const on = view.filter(d => d.configured && d.ip && d.wda_running && d.last_health?.ok && !d.busy).length;
   const busy = view.filter(d => d.busy).length;
   $('stOnline').textContent = on;
   $('stBusy').textContent = busy;

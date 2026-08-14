@@ -6,3 +6,6 @@ data/
 tools/easytier/easytier-core
 tools/easytier/easytier-cli
 /gateway
+
+# 本地运行时配置（含网关凭证 token，禁止提交）
+devices.json

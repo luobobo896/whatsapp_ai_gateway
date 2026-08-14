@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newPlatformServer 模拟 HK 平台 /api/auth/login：邮箱+密码匹配返回 200，否则 401。
@@ -47,12 +48,17 @@ func newAuthTestServer(t *testing.T, cloudWSURL string) (*httptest.Server, *webS
 		writeJSON(w, map[string]any{"connected": true})
 	})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") &&
-			r.URL.Path != "/api/login" && r.URL.Path != "/api/logout" && r.URL.Path != "/api/session" {
-			if auth.PasswordRequired() && !auth.ss.valid(auth.cookieToken(r)) {
-				writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/login" || r.URL.Path == "/api/session" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		if !auth.Authenticated(r) {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !auth.CSRFValid(r) {
+			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid csrf token"})
+			return
 		}
 		mux.ServeHTTP(w, r)
 	}))
@@ -85,7 +91,7 @@ func TestWebAuthLoginFlow(t *testing.T) {
 		t.Fatalf("bad password status = %v err=%v", resp.StatusCode, err)
 	}
 
-	// 正确账号密码：200 + 网关会话 cookie。
+	// 正确账号密码：200 + 网关会话 cookie + CSRF token。
 	resp, err = client.Post(ts.URL+"/api/login", "application/json",
 		strings.NewReader(`{"email":"admin@whatsapp-ai.local","password":"secret-pass"}`))
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -94,6 +100,13 @@ func TestWebAuthLoginFlow(t *testing.T) {
 	if len(resp.Cookies()) == 0 {
 		t.Fatal("login must set session cookie")
 	}
+	var loginResp struct {
+		CsrfToken string `json:"csrfToken"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&loginResp)
+	if loginResp.CsrfToken == "" {
+		t.Fatal("login must return csrf token")
+	}
 
 	// 带 cookie：200。
 	resp, err = client.Get(ts.URL + "/api/cloud")
@@ -101,8 +114,10 @@ func TestWebAuthLoginFlow(t *testing.T) {
 		t.Fatalf("auth status = %v err=%v", resp.StatusCode, err)
 	}
 
-	// 登出后：401。
-	if _, err = client.Post(ts.URL+"/api/logout", "application/json", nil); err != nil {
+	// 登出（带 CSRF）后：401。
+	loReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/logout", nil)
+	loReq.Header.Set("X-CSRF-Token", loginResp.CsrfToken)
+	if _, err = client.Do(loReq); err != nil {
 		t.Fatal(err)
 	}
 	resp, err = client.Get(ts.URL + "/api/cloud")
@@ -149,10 +164,12 @@ func TestWebAuthOpenMode(t *testing.T) {
 func TestWebSessionExpiry(t *testing.T) {
 	platform := newPlatformServer(t, "a@b.c", "pw")
 	ts, ss := newAuthTestServer(t, platform.URL+"/api/ios-agent/v1/gateway/ws")
-	token := ss.create()
+	token, _ := ss.create()
 	// 手动把过期时间拨到过去。
 	ss.mu.Lock()
-	ss.tokens[token] = ss.tokens[token].Add(-24 * 3600e9)
+	sess := ss.tokens[token]
+	sess.exp = time.Now().Add(-24 * time.Hour)
+	ss.tokens[token] = sess
 	ss.mu.Unlock()
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/cloud", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookie, Value: token})

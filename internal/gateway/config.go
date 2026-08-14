@@ -15,6 +15,15 @@ type Config struct {
 	Devices        []Device    `json:"devices"`
 	HealthInterval float64     `json:"health_interval"`
 	LLM            LLMConfig   `json:"llm,omitempty"`
+	Web            WebConfig   `json:"web,omitempty"`
+}
+
+// WebConfig 管理页与发送行为配置。
+type WebConfig struct {
+	// CookieSecure 会话 cookie 是否加 Secure（经 HTTPS 反代暴露时打开；本地 HTTP 默认关闭）。
+	CookieSecure bool `json:"cookie_secure,omitempty"`
+	// SendTimezone 发送时间窗使用的 IANA 时区名（如 Asia/Shanghai）；空=网关本机时区。
+	SendTimezone string `json:"send_timezone,omitempty"`
 }
 
 // CloudConfig 云通道（平台网关 WSS）。

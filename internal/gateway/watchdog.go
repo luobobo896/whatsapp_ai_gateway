@@ -76,7 +76,7 @@ func (g *Gateway) watchOnce() {
 			if !h.OK {
 				st = "offline"
 			}
-			g.Exec.StatusQ <- DeviceStatus{UDID: dev.UDID, WDAStatus: st, Error: errText(h.Error)}
+			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: st, Error: errText(h.Error)})
 		}
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
 			if !usbConnected(dev.UDID) {
@@ -205,7 +205,7 @@ func (g *Gateway) followNetworkChange() error {
 		}
 		_ = cfg.Save()
 		slog.Info("device followed network change", "udid", dev.UDID[:8], "old", old, "new", hit.IP)
-		g.Exec.StatusQ <- DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + hit.IP}
+		g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + hit.IP})
 	}
 	return nil
 }
