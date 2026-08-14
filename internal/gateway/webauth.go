@@ -1,18 +1,21 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Web 管理页登录鉴权（会话 cookie）。
-// 密码为空 = 开放模式（不要求登录）；设置后 /api/* 需有效会话，登录签发 12 小时会话。
+// Web 管理页登录鉴权：网关本地不存任何账号密码，
+// 登录时把邮箱/密码转发到 HK 平台的 /api/auth/login 校验（与平台同一账号体系），
+// 校验通过后签发网关自己的会话 cookie（12 小时有效，内存保存）。
 
 const (
 	webSessionCookie = "wda_gateway_session"
@@ -62,23 +65,49 @@ func (ws *webSessions) revoke(token string) {
 	ws.mu.Unlock()
 }
 
-// WebAuth 包装管理页 HTTP 鉴权。
+// WebAuth 包装管理页 HTTP 鉴权（凭证校验转发给平台）。
 type WebAuth struct {
-	cfg *Config
-	ss  *webSessions
+	cfg    *Config
+	ss     *webSessions
+	client *http.Client
 }
 
 // NewWebAuth 构造鉴权器。
 func NewWebAuth(cfg *Config) *WebAuth {
-	return &WebAuth{cfg: cfg, ss: newWebSessions()}
+	return &WebAuth{
+		cfg: cfg,
+		ss:  newWebSessions(),
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse // 不回跟随平台重定向
+			},
+		},
+	}
 }
 
-// PasswordRequired 是否要求登录。
+// PasswordRequired 是否要求登录：云通道已配置即要求（与平台同一账号体系）。
 func (a *WebAuth) PasswordRequired() bool {
-	return a.cfg != nil && a.cfg.Web.Password != ""
+	return a.cfg != nil && a.cfg.Cloud.Enabled && a.cfg.Cloud.WSURL != ""
 }
 
-// wrap 给 /api/* 处理器套鉴权（未启用密码时透传）。
+// platformLoginURL 由云通道 ws_url 推导平台登录接口（wss://host/... → https://host/api/auth/login）。
+func (a *WebAuth) platformLoginURL() string {
+	u, err := url.Parse(a.cfg.Cloud.WSURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := "https"
+	switch u.Scheme {
+	case "http", "ws":
+		scheme = "http"
+	case "https", "wss":
+		scheme = "https"
+	}
+	return scheme + "://" + u.Host + "/api/auth/login"
+}
+
+// wrap 给 /api/* 处理器套鉴权（未配置云通道时透传）。
 func (a *WebAuth) wrap(next http.HandlerFunc) http.HandlerFunc {
 	if !a.PasswordRequired() {
 		return next
@@ -100,33 +129,64 @@ func (a *WebAuth) cookieToken(r *http.Request) string {
 	return c.Value
 }
 
-// HandleLogin POST /api/login {username, password} → 签发会话 cookie。
-// 账号与 HK 平台保持一致（默认 admin@whatsapp-ai.local），只是登录入口不同。
+// HandleLogin POST /api/login {email, password} → 转发平台校验 → 签发网关会话 cookie。
+// 网关不保存、不记录任何凭证。
 func (a *WebAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if !a.PasswordRequired() {
 		writeJSON(w, map[string]any{"ok": true, "passwordRequired": false})
 		return
 	}
-	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(a.cfg.Web.Username)) == 1
-	passOK := subtle.ConstantTimeCompare([]byte(body.Password), []byte(a.cfg.Web.Password)) == 1
-	if !userOK || !passOK {
-		writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
+	loginURL := a.platformLoginURL()
+	if loginURL == "" {
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "云通道 ws_url 无效，无法定位平台登录服务"})
 		return
 	}
-	token := a.ss.create()
-	http.SetCookie(w, &http.Cookie{
-		Name: webSessionCookie, Value: token, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(webSessionTTL.Seconds()),
-	})
-	writeJSON(w, map[string]any{"ok": true, "passwordRequired": true})
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "请求体无效"})
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, loginURL, bytes.NewReader(body))
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "构造登录请求失败"})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "平台登录服务不可达，请稍后重试"})
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	switch {
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent:
+		// 平台登录成功（200 或 204），签发网关自己的会话。
+		token := a.ss.create()
+		http.SetCookie(w, &http.Cookie{
+			Name: webSessionCookie, Value: token, Path: "/",
+			HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(webSessionTTL.Seconds()),
+		})
+		writeJSON(w, map[string]any{"ok": true, "passwordRequired": true})
+	case resp.StatusCode == http.StatusUnauthorized:
+		// 透传平台的错误文案（邮箱或密码不正确 / 触发限流等）。
+		msg := "邮箱或密码不正确"
+		var pe struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &pe) == nil && pe.Error.Message != "" {
+			msg = pe.Error.Message
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": msg})
+	default:
+		writeJSONStatus(w, http.StatusServiceUnavailable,
+			map[string]string{"error": "平台登录服务异常（HTTP " + strings.TrimSpace(http.StatusText(resp.StatusCode)) + "），请稍后重试"})
+	}
 }
 
-// HandleLogout POST /api/logout → 撤销会话。
+// HandleLogout POST /api/logout → 撤销网关会话。
 func (a *WebAuth) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	a.ss.revoke(a.cookieToken(r))
 	http.SetCookie(w, &http.Cookie{Name: webSessionCookie, Value: "", Path: "/", MaxAge: -1})

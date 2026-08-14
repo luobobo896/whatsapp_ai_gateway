@@ -9,11 +9,36 @@ import (
 	"testing"
 )
 
-func newAuthTestServer(t *testing.T, password string) (*httptest.Server, *webSessions, *Config) {
+// newPlatformServer 模拟 HK 平台 /api/auth/login：邮箱+密码匹配返回 200，否则 401。
+func newPlatformServer(t *testing.T, email, password string) *httptest.Server {
 	t.Helper()
-	cfg := &Config{Web: WebConfig{Password: password}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/auth/login" {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Email == email && body.Password == password {
+			w.WriteHeader(http.StatusNoContent) // 与真实平台一致：成功返回 204
+			return
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]string{"code": "AUTH_INVALID", "message": "邮箱或密码不正确。"},
+		})
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// newAuthTestServer 网关鉴权测试服务器；cloudWSURL 为空 = 开放模式。
+func newAuthTestServer(t *testing.T, cloudWSURL string) (*httptest.Server, *webSessions) {
+	t.Helper()
+	cfg := &Config{Cloud: CloudConfig{WSURL: cloudWSURL, Enabled: cloudWSURL != ""}}
 	auth := NewWebAuth(cfg)
-	_ = auth
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", auth.HandleLogin)
 	mux.HandleFunc("/api/logout", auth.HandleLogout)
@@ -32,7 +57,7 @@ func newAuthTestServer(t *testing.T, password string) (*httptest.Server, *webSes
 		mux.ServeHTTP(w, r)
 	}))
 	t.Cleanup(ts.Close)
-	return ts, auth.ss, cfg
+	return ts, auth.ss
 }
 
 // authTestClient 返回带 cookie jar 的客户端（httptest Server.Client 在部分 Go 版本不带 jar）。
@@ -41,9 +66,10 @@ func authTestClient(ts *httptest.Server) *http.Client {
 	return &http.Client{Jar: jar, Transport: ts.Client().Transport}
 }
 
-// TestWebAuthLoginFlow 未登录 401 → 登录拿 cookie → 通过 → 登出后 401。
+// TestWebAuthLoginFlow 未登录 401 → 平台校验不过 401 → 正确账号密码 200+会话 → 通过 → 登出后 401。
 func TestWebAuthLoginFlow(t *testing.T) {
-	ts, _, _ := newAuthTestServer(t, "secret-pass")
+	platform := newPlatformServer(t, "admin@whatsapp-ai.local", "secret-pass")
+	ts, _ := newAuthTestServer(t, platform.URL+"/api/ios-agent/v1/gateway/ws")
 	client := authTestClient(ts)
 
 	// 未登录：401。
@@ -52,14 +78,16 @@ func TestWebAuthLoginFlow(t *testing.T) {
 		t.Fatalf("unauth status = %v err=%v, want 401", resp.StatusCode, err)
 	}
 
-	// 错误密码：401。
-	resp, err = client.Post(ts.URL+"/api/login", "application/json", strings.NewReader(`{"password":"wrong"}`))
+	// 错误密码：网关转发平台校验，401。
+	resp, err = client.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"email":"admin@whatsapp-ai.local","password":"wrong"}`))
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("bad password status = %v err=%v", resp.StatusCode, err)
 	}
 
-	// 正确密码：200 + cookie。
-	resp, err = client.Post(ts.URL+"/api/login", "application/json", strings.NewReader(`{"password":"secret-pass"}`))
+	// 正确账号密码：200 + 网关会话 cookie。
+	resp, err = client.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"email":"admin@whatsapp-ai.local","password":"secret-pass"}`))
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("login status = %v err=%v", resp.StatusCode, err)
 	}
@@ -83,9 +111,24 @@ func TestWebAuthLoginFlow(t *testing.T) {
 	}
 }
 
-// TestWebAuthOpenMode 未配置密码时开放访问，session 返回 passwordRequired=false。
+// TestWebAuthPlatformUnreachable 平台不可达时登录返回 503，不签发会话。
+func TestWebAuthPlatformUnreachable(t *testing.T) {
+	platform := newPlatformServer(t, "a@b.c", "pw")
+	platformURL := platform.URL
+	platform.Close() // 立即关闭，模拟平台不可达
+	ts, _ := newAuthTestServer(t, platformURL+"/api/ios-agent/v1/gateway/ws")
+	client := authTestClient(ts)
+
+	resp, err := client.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"email":"a@b.c","password":"pw"}`))
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unreachable status = %v err=%v, want 503", resp.StatusCode, err)
+	}
+}
+
+// TestWebAuthOpenMode 未配置云通道时开放访问，session 返回 passwordRequired=false。
 func TestWebAuthOpenMode(t *testing.T) {
-	ts, _, _ := newAuthTestServer(t, "")
+	ts, _ := newAuthTestServer(t, "")
 	client := authTestClient(ts)
 	resp, err := client.Get(ts.URL + "/api/cloud")
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -104,7 +147,8 @@ func TestWebAuthOpenMode(t *testing.T) {
 
 // TestWebSessionExpiry 会话过期失效。
 func TestWebSessionExpiry(t *testing.T) {
-	ts, ss, _ := newAuthTestServer(t, "pw")
+	platform := newPlatformServer(t, "a@b.c", "pw")
+	ts, ss := newAuthTestServer(t, platform.URL+"/api/ios-agent/v1/gateway/ws")
 	token := ss.create()
 	// 手动把过期时间拨到过去。
 	ss.mu.Lock()

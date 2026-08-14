@@ -15,16 +15,6 @@ type Config struct {
 	Devices        []Device    `json:"devices"`
 	HealthInterval float64     `json:"health_interval"`
 	LLM            LLMConfig   `json:"llm,omitempty"`
-	Web            WebConfig   `json:"web,omitempty"`
-}
-
-// WebConfig Web 管理页配置（登录鉴权）。
-type WebConfig struct {
-	// Username 管理页登录用户名（与平台账号一致，默认 admin@whatsapp-ai.local）。
-	Username string `json:"username,omitempty"`
-	// Password 管理页登录密码。为空表示不要求登录（局域网开放模式，UI 会提示风险）。
-	// 设置后所有 /api/* 需 session cookie（登录后签发，12 小时有效）。
-	Password string `json:"password"`
 }
 
 // CloudConfig 云通道（平台网关 WSS）。
@@ -73,10 +63,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.HealthInterval <= 0 {
 		c.HealthInterval = 30
-	}
-	// 与平台账号保持一致：设置了密码但没写用户名时，默认用平台管理员账号。
-	if c.Web.Password != "" && c.Web.Username == "" {
-		c.Web.Username = "admin@whatsapp-ai.local"
 	}
 	for i := range c.Devices {
 		if c.Devices[i].Port == 0 {
