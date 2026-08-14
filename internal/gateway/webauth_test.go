@@ -218,3 +218,47 @@ func TestWebSessionExpiry(t *testing.T) {
 		t.Fatalf("expired session status = %v err=%v", resp.StatusCode, err)
 	}
 }
+
+// TestWebAuthLoginAutoProvision 登录成功后自动调用平台签发网关凭证并回传 token。
+func TestWebAuthLoginAutoProvision(t *testing.T) {
+	var platform *httptest.Server
+	platform = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/login":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/ios-agent/v1/gateway/register":
+			var body struct {
+				Email    string `json:"email"`
+				Password string `json:"password"`
+				Name     string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Email != "admin@whatsapp-ai.local" || body.Password != "secret-pass" || body.Name != "macmini-01" {
+				writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "bad"})
+				return
+			}
+			writeJSON(w, map[string]any{"token": "auto-token-123"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer platform.Close()
+
+	cfg := &Config{Cloud: CloudConfig{WSURL: platform.URL + "/api/ios-agent/v1/gateway/ws", GatewayName: "macmini-01", Enabled: true}}
+	auth := NewWebAuth(cfg)
+	var captured string
+	auth.onToken = func(token string) error { captured = token; return nil }
+
+	ts := httptest.NewServer(http.HandlerFunc(auth.HandleLogin))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/login", "application/json",
+		strings.NewReader(`{"email":"admin@whatsapp-ai.local","password":"secret-pass"}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status=%v err=%v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+	if captured != "auto-token-123" {
+		t.Fatalf("captured token = %q, want auto-token-123", captured)
+	}
+}

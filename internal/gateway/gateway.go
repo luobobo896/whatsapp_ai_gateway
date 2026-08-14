@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Gateway 聚合配置/设备/执行器/LLM/云通道的运行时状态。
@@ -31,6 +33,11 @@ type Gateway struct {
 
 	statusMu   sync.Mutex
 	lastStatus map[string]string // udid -> 上次上报云状态（online/busy/offline）
+
+	cloudMu   sync.Mutex
+	cloudConn *websocket.Conn // 当前云通道连接（RestartCloud 用）
+
+	cloudReconnect chan struct{} // 触发 CloudLoop 立即重连（登录自动签发凭证后）
 }
 
 // New 构造网关。
@@ -38,7 +45,45 @@ func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *Ea
 	return &Gateway{
 		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
 		serials: map[string]string{}, serialTried: map[string]time.Time{},
-		lastStatus: map[string]string{},
+		lastStatus: map[string]string{}, cloudReconnect: make(chan struct{}, 1),
+	}
+}
+
+// setCloudConn / clearCloudConn 记录当前云通道连接；cloudSession 在拨号成功后调用。
+func (g *Gateway) setCloudConn(c *websocket.Conn) {
+	g.cloudMu.Lock()
+	g.cloudConn = c
+	g.cloudMu.Unlock()
+}
+
+func (g *Gateway) clearCloudConn(c *websocket.Conn) {
+	g.cloudMu.Lock()
+	if g.cloudConn == c {
+		g.cloudConn = nil
+	}
+	g.cloudMu.Unlock()
+}
+
+// ApplyCloudToken 保存平台签发的网关云凭证并触发重连（登录自动签发时回调）。
+func (g *Gateway) ApplyCloudToken(token string) error {
+	if err := g.Cfg.SetCloudToken(token); err != nil {
+		return err
+	}
+	g.RestartCloud()
+	return nil
+}
+
+// RestartCloud 关闭当前云通道连接并触发 CloudLoop 以最新配置立即重连（网关登录自动签发凭证后调用）。
+func (g *Gateway) RestartCloud() {
+	g.cloudMu.Lock()
+	c := g.cloudConn
+	g.cloudMu.Unlock()
+	if c != nil {
+		_ = c.Close(websocket.StatusNormalClosure, "credential rotated")
+	}
+	select {
+	case g.cloudReconnect <- struct{}{}:
+	default:
 	}
 }
 

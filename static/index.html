@@ -129,6 +129,7 @@
   .tag-orange{background:var(--orange-weak);color:var(--orange)}
   .tag-red{background:var(--red-weak);color:var(--red)}
   .tag-gray{background:color-mix(in srgb, var(--gray) 16%, transparent);color:var(--gray)}
+  .tag-accent{background:var(--accent-weak);color:var(--accent)}
   .device-meta{font-family:var(--mono);font-size:11px;color:var(--text-3);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
   .device-meta .sep{opacity:.4}
   .device-stats{display:flex;gap:12px;font-size:12px;color:var(--text-2);white-space:nowrap}
@@ -207,6 +208,7 @@
         <span class="dot off" id="etPillDot"></span>组网
         <span id="etPillText">未启用</span>
       </button>
+      <button class="pill" onclick="showView('tasks')" title="平台任务的逐条发送记录">发送明细</button>
       <label class="switch" title="easytier 快捷开关" id="etSwitchLabel">
         <input type="checkbox" id="etToggle" onchange="etToggleChange(this)">
         <span class="slider"></span>
@@ -253,6 +255,38 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M10 4v4M14 4v4"/><rect x="5" y="8" width="14" height="13" rx="2"/><path d="M9 12v3M12 12v3M15 12v3"/></svg>
       <h4>暂无已连接设备</h4>
       <p>将 iPhone 接入 USB 并配置后，设备会出现在这里</p>
+    </div>
+  </div>
+
+  <!-- ================= 发送明细 ================= -->
+  <div id="viewTasks" style="display:none">
+    <div class="back" onclick="showView('devices')">‹ 返回设备总览</div>
+    <div class="hero" style="margin-bottom:20px">
+      <h2>发送明细</h2>
+      <p>平台下发任务的逐条发送记录（本地落盘、断网不丢）：发给了谁、手机号、内容、结果与连接方式</p>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span style="font-size:13px;font-weight:600">任务</span>
+        <button class="btn sm ghost" onclick="loadTasks()">刷新</button>
+      </div>
+      <table id="taskTable" style="display:none">
+        <thead><tr><th>任务</th><th>设备</th><th>连接</th><th>状态</th><th>成功</th><th>失败</th><th>取消</th><th>未发</th><th>开始</th><th>耗时</th><th></th></tr></thead>
+        <tbody id="taskBody"></tbody>
+      </table>
+      <div class="panel-body" id="taskEmpty" style="display:none"><span class="empty-sm">暂无任务记录（收到平台下发后出现）</span></div>
+    </div>
+    <div class="panel" id="taskDetailPanel" style="display:none">
+      <div class="panel-head">
+        <span style="font-size:13px;font-weight:600">逐条明细 · <span class="mono" id="tdTaskId"></span></span>
+        <button class="btn sm ghost" id="tdMore" style="display:none" onclick="loadTaskDetail(currentTaskId, taskOffset + 500)">加载更多</button>
+      </div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>时间</th><th>手机号</th><th>收件人</th><th>发送内容</th><th>结果</th><th>原因 / 错误</th><th>耗时</th><th>连接</th><th>新会话</th></tr></thead>
+        <tbody id="tdBody"></tbody>
+      </table>
+      </div>
     </div>
   </div>
 
@@ -356,7 +390,9 @@ function apiErr(d, status){ return d?.detail || (typeof d?.error === 'string' ? 
 function showView(v){
   $('viewDevices').style.display = v === 'devices' ? 'block' : 'none';
   $('viewNetwork').style.display = v === 'network' ? 'block' : 'none';
+  $('viewTasks').style.display = v === 'tasks' ? 'block' : 'none';
   if(v === 'network') loadEt();
+  if(v === 'tasks') loadTasks();
 }
 
 /* ---------- 云通道 ---------- */
@@ -522,6 +558,7 @@ function deviceCard(d){
             ${serial && d.name ? `<span class="tag">${esc(d.name)}</span>` : ''}
             <span class="tag">${model}</span>
             ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
+            ${d.conn_type ? (d.usb ? '<span class="tag tag-accent">USB</span>' : '<span class="tag">Wi-Fi</span>') : ''}
             ${wdaBadge}
           </div>
           <div class="device-meta">
@@ -665,6 +702,87 @@ async function delDevice(udid){
   }catch(e){ toast('删除失败'); }
   refreshDevices();
 }
+/* ---------- 发送明细（本地落盘 results） ---------- */
+let currentTaskId = '', taskOffset = 0;
+const taskStatusTxt = {
+  completed:'已完成', no_ip:'设备未配置IP', device_unreachable:'设备失联中断',
+  circuit_breaker:'熔断中断', warmup_cap:'预热上限暂停'
+};
+const itemStatusBadge = {
+  sent:'<span class="tag tag-green">成功</span>',
+  failed:'<span class="tag tag-red">失败</span>',
+  cancelled:'<span class="tag tag-gray">取消</span>'
+};
+function fmtDur(ms){
+  if (ms == null) return '—';
+  if (ms < 1000) return ms + 'ms';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm' + (s % 60) + 's';
+}
+function fmtTime(ts){
+  return ts ? String(ts).replace('T', ' ').slice(0, 19) : '—';
+}
+function connTag(c){
+  if (c === 'usb') return '<span class="tag tag-accent">USB</span>';
+  if (c === 'wifi') return '<span class="tag">Wi-Fi</span>';
+  return '<span class="muted">—</span>';
+}
+async function loadTasks(){
+  let list = [];
+  try{ list = (await (await api('/api/tasks')).json()).tasks || []; }
+  catch(e){ return; }
+  const rows = list.map(t => {
+    const s = t.summary || {};
+    const dev = s.serial || s.device_name || (s.udid ? s.udid.slice(0, 8) : '—');
+    const stTxt = s.status ? (taskStatusTxt[s.status] || s.status) : '进行中';
+    const stTag = s.status === 'completed'
+      ? '<span class="tag tag-green">' + stTxt + '</span>'
+      : (s.status ? '<span class="tag tag-orange">' + stTxt + '</span>' : '<span class="tag tag-gray">进行中</span>');
+    const pending = (s.pending != null) ? s.pending : Math.max(0, (t.items || 0) - (t.sent_ok + t.sent_fail + t.cancelled));
+    return `<tr>
+      <td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.task_id)}">${esc(t.task_id)}</td>
+      <td>${esc(dev)}</td>
+      <td>${connTag(s.conn_type)}</td>
+      <td>${stTag}</td>
+      <td style="color:var(--green);font-weight:600">${t.sent_ok || 0}</td>
+      <td style="color:var(--red);font-weight:600">${t.sent_fail || 0}</td>
+      <td>${t.cancelled || 0}</td>
+      <td>${pending || 0}</td>
+      <td class="mono">${fmtTime(s.start_at)}</td>
+      <td>${fmtDur(s.duration_ms)}</td>
+      <td><button class="btn sm ghost" onclick="loadTaskDetail('${esc(t.task_id)}', 0)">明细</button></td>
+    </tr>`;
+  }).join('');
+  $('taskBody').innerHTML = rows;
+  $('taskTable').style.display = list.length ? 'table' : 'none';
+  $('taskEmpty').style.display = list.length ? 'none' : 'block';
+}
+async function loadTaskDetail(id, offset){
+  let d = {};
+  try{ d = await (await api('/api/tasks/' + encodeURIComponent(id) + '?offset=' + offset + '&limit=500')).json(); }
+  catch(e){ toast('明细读取失败'); return; }
+  currentTaskId = id;
+  taskOffset = offset;
+  const items = d.items || [];
+  if (offset === 0) $('tdBody').innerHTML = '';
+  $('tdBody').insertAdjacentHTML('beforeend', items.map(r => `<tr>
+      <td class="mono">${fmtTime(r.sent_at)}</td>
+      <td class="mono">${esc(r.phone || '—')}</td>
+      <td>${r.contact_name ? esc(r.contact_name) : '<span class="muted">—</span>'}</td>
+      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.content || '')}">${esc(r.content || '—')}</td>
+      <td>${itemStatusBadge[r.status] || esc(r.status)}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.error || '')}">${r.error ? '<span style="color:var(--red)">' + esc(r.error) + '</span>' : '—'}</td>
+      <td>${fmtDur(r.duration_ms)}</td>
+      <td>${connTag(r.conn_type)}</td>
+      <td>${r.new_session ? '是' : '—'}</td>
+    </tr>`).join(''));
+  $('taskDetailPanel').style.display = 'block';
+  $('taskDetailPanel').scrollIntoView({behavior:'smooth', block:'start'});
+  $('tdTaskId').textContent = id + '（共 ' + (d.total || 0) + ' 条）';
+  $('tdMore').style.display = (offset + items.length) < (d.total || 0) ? '' : 'none';
+}
+
 /* ---------- easytier ---------- */
 async function loadEt(){
   let running = false, configured = false, ip = '—', peers = [], err = null;

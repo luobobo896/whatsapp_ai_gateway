@@ -83,20 +83,20 @@ func describeCloudError(err error) string {
 
 // CloudLoop 云通道：凭证登录 -> hello -> 补报 -> device_list -> 心跳/报告泵 -> 收任务；断线退避重连。
 func (g *Gateway) CloudLoop(ctx context.Context) {
-	cfg := g.Cfg
-	url := cfg.Cloud.WSURL
-	token := cfg.Cloud.Token
-	name := cfg.Cloud.GatewayName
-	if name == "" {
-		name, _ = os.Hostname()
-	}
-	if !cfg.Cloud.Enabled || url == "" {
+	if !g.Cfg.Cloud.Enabled || g.Cfg.Cloud.WSURL == "" {
 		slog.Info("云通道未启用（enabled=false 或 ws_url 未配置），跳过云连接")
 		return
 	}
 	backoff := time.Second
 	revoked := false
 	for ctx.Err() == nil {
+		// 每次会话重连都读取最新配置，登录自动签发凭证后无需重启进程即可生效。
+		url := g.Cfg.Cloud.WSURL
+		token := g.Cfg.Cloud.Token
+		name := g.Cfg.Cloud.GatewayName
+		if name == "" {
+			name, _ = os.Hostname()
+		}
 		start := time.Now()
 		err := g.cloudSession(ctx, url, token, name)
 		g.SetConnected(false)
@@ -138,6 +138,8 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-g.cloudReconnect:
+			backoff = time.Second // 凭证轮换等主动触发：立即重连
 		case <-time.After(backoff):
 		}
 	}
@@ -152,7 +154,11 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	if err != nil {
 		return err
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	g.setCloudConn(conn)
+	defer func() {
+		g.clearCloudConn(conn)
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}()
 	g.SetConnected(true)
 	g.SetLastError("", false) // 连接成功即清掉上一次的旧错误，避免 UI 一直展示历史告警
 	slog.Info("cloud connected", "url", url, "gateway", name)
@@ -184,12 +190,14 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 		hb = 20 * time.Second
 	}
 
-	// 报告/状态泵 + 心跳
+	// 报告/状态/任务汇总泵 + 心跳
 	reportDone := make(chan struct{})
 	statusDone := make(chan struct{})
+	summaryDone := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() { defer close(reportDone); pump(sessCtx, conn, g.Exec.ReportQ, "item:result", write) }()
 	go func() { defer close(statusDone); pump(sessCtx, conn, g.Exec.StatusQ, "device:status", write) }()
+	go func() { defer close(summaryDone); pump(sessCtx, conn, g.Exec.SummaryQ, "task:summary", write) }()
 	go func() {
 		defer close(hbDone)
 		t := time.NewTicker(hb)
@@ -278,6 +286,7 @@ readLoop:
 	cancel()
 	<-reportDone
 	<-statusDone
+	<-summaryDone
 	<-hbDone
 	return readErr
 }
@@ -311,10 +320,14 @@ func (g *Gateway) deviceListReport() []map[string]any {
 		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
 			continue
 		}
+		conn := "wifi"
+		if usbSet[d.UDID] {
+			conn = "usb"
+		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
-			"wda_status": g.deviceCloudStatus(d, usbSet[d.UDID]), "whatsapp_version": "",
+			"conn_type": conn, "wda_status": g.deviceCloudStatus(d, usbSet[d.UDID]), "whatsapp_version": "",
 		})
 	}
 	return out
@@ -342,6 +355,10 @@ func (g *Gateway) rememberCloudStatus(udid, status string) {
 // reportCloudStatusIfChanged 非忙碌设备云状态变化时上报 device:status。
 func (g *Gateway) reportCloudStatusIfChanged(d *Device, usb bool, errMsg string) {
 	status := g.deviceCloudStatus(d, usb)
+	conn := "wifi"
+	if usb {
+		conn = "usb"
+	}
 	g.statusMu.Lock()
 	prev := g.lastStatus[d.UDID]
 	changed := prev != status
@@ -350,6 +367,6 @@ func (g *Gateway) reportCloudStatusIfChanged(d *Device, usb bool, errMsg string)
 	}
 	g.statusMu.Unlock()
 	if changed {
-		g.Exec.status(DeviceStatus{UDID: d.UDID, WDAStatus: status, Error: errMsg})
+		g.Exec.status(DeviceStatus{UDID: d.UDID, WDAStatus: status, Error: errMsg, ConnType: conn})
 	}
 }

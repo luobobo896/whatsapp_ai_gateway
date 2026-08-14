@@ -55,6 +55,7 @@ type GatewaySchedule struct {
 }
 
 // ItemResult 单条发送结果（item:result 上行）。
+// 新增字段均 omitempty：平台旧版解析时忽略未知字段，向后兼容。
 type ItemResult struct {
 	TaskID     string `json:"task_id"`
 	ItemID     string `json:"item_id"`
@@ -62,13 +63,59 @@ type ItemResult struct {
 	Status     string `json:"status"`
 	Error      string `json:"error"`
 	DurationMs int64  `json:"duration_ms"`
+	// 设备与内容上下文（数据收集增强）。
+	Udid        string `json:"udid,omitempty"`         // 发送设备 UDID
+	Serial      string `json:"serial,omitempty"`       // 设备硬件序列号
+	DeviceName  string `json:"device_name,omitempty"`  // 设备名称
+	ConnType    string `json:"conn_type,omitempty"`    // 连接方式 usb | wifi
+	Content     string `json:"content,omitempty"`      // 实际发送内容（逐条渲染后）
+	ContactName string `json:"contact_name,omitempty"` // 收件人姓名（best-effort，读不到为空）
+	SentAt      string `json:"sent_at,omitempty"`      // 完成时刻 RFC3339（本地时区）
+	NewSession  bool   `json:"new_session,omitempty"`  // 该条经「新聊天→搜索」新建会话发送
 }
+
+// taskEnv 单次任务执行的设备上下文（随明细/汇总落盘与上行）。
+type taskEnv struct {
+	Udid       string
+	Serial     string
+	DeviceName string
+	ConnType   string // usb | wifi
+}
+
+// TaskSummary 任务级汇总（task:summary 上行 + <task_id>.meta.json 落盘）。
+type TaskSummary struct {
+	TaskID     string `json:"task_id"`
+	Udid       string `json:"udid"`
+	Serial     string `json:"serial,omitempty"`
+	DeviceName string `json:"device_name,omitempty"`
+	ConnType   string `json:"conn_type,omitempty"`
+	Status     string `json:"status"` // 见 taskDone/taskStop* 常量
+	Total      int    `json:"total"`  // 下发明细总数
+	SentOK     int    `json:"sent_ok"`
+	SentFail   int    `json:"sent_fail"`
+	Cancelled  int    `json:"cancelled"`
+	Pending    int    `json:"pending"` // 未执行条数（含待续发）
+	StartAt    string `json:"start_at"`
+	EndAt      string `json:"end_at"`
+	DurationMs int64  `json:"duration_ms"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// 任务结束原因（TaskSummary.Status）。
+const (
+	taskDone        = "completed"
+	taskStopNoIP    = "no_ip"              // 设备未配置 IP（无法建立 WDA 通道）
+	taskStopUnreach = "device_unreachable" // 设备失联，剩余明细待续发
+	taskStopBreaker = "circuit_breaker"    // 连续失败熔断
+	taskStopWarmup  = "warmup_cap"         // 预热日上限，剩余明细待次日
+)
 
 // DeviceStatus device:status 上行。
 type DeviceStatus struct {
 	UDID      string `json:"udid"`
 	WDAStatus string `json:"wda_status"`
 	Error     string `json:"error"`
+	ConnType  string `json:"conn_type,omitempty"` // usb | wifi
 }
 
 // Executor 按 UDID 串行执行群发任务，先本地持久化结果再上报（at-least-once）。
@@ -85,8 +132,9 @@ type Executor struct {
 	cancel  map[string]chan struct{}
 	busy    map[string]bool
 
-	ReportQ chan ItemResult
-	StatusQ chan DeviceStatus
+	ReportQ  chan ItemResult
+	StatusQ  chan DeviceStatus
+	SummaryQ chan TaskSummary
 
 	metricsMu sync.Mutex
 	metrics   map[string]Metrics
@@ -140,6 +188,7 @@ func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir str
 		busy:           map[string]bool{},
 		ReportQ:        make(chan ItemResult, 256),
 		StatusQ:        make(chan DeviceStatus, 256),
+		SummaryQ:       make(chan TaskSummary, 64),
 		metrics:        map[string]Metrics{},
 		metricsHistory: map[string]Metrics{},
 		now:            time.Now,
@@ -439,7 +488,16 @@ func (e *Executor) runUDID(udid string) {
 }
 
 func (e *Executor) processTask(udid string, t TaskDispatch) {
+	start := e.now()
 	dev := e.cfg.Device(udid)
+	env := taskEnv{Udid: udid, ConnType: connTypeOf(udid)}
+	if dev != nil {
+		env.Serial, env.DeviceName = dev.Serial, dev.Name
+	}
+	// 任务收口：无论正常结束/熔断/失联/预热截止，统一统计并上行 task:summary。
+	stopStatus, stopReason := taskDone, ""
+	defer func() { e.finishTask(env, t, start, stopStatus, stopReason) }()
+
 	ip := ""
 	port := 8100
 	if dev != nil {
@@ -448,22 +506,22 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	}
 	if ip == "" {
 		for _, it := range t.Items {
-			e.persist(t.TaskID, it.ItemID, it.Phone, "failed", "device ip not configured", 0)
-			e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "failed", Error: "device ip not configured"})
+			e.finishItem(e.cancelledEnv(env, t, it, "failed", "device ip not configured"))
 		}
+		stopStatus, stopReason = taskStopNoIP, "device ip not configured"
 		return
 	}
 	e.mu.Lock()
 	e.busy[udid] = true
 	cancelCh := e.cancel[t.TaskID]
 	e.mu.Unlock()
-	e.status(DeviceStatus{UDID: udid, WDAStatus: "busy"})
+	e.status(DeviceStatus{UDID: udid, WDAStatus: "busy", ConnType: env.ConnType})
 	defer func() {
 		e.mu.Lock()
 		delete(e.busy, udid)
 		delete(e.cancel, t.TaskID)
 		e.mu.Unlock()
-		e.status(DeviceStatus{UDID: udid, WDAStatus: "online"})
+		e.status(DeviceStatus{UDID: udid, WDAStatus: "online", ConnType: env.ConnType})
 	}()
 
 	sched := t.Schedule
@@ -477,7 +535,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	for idx, it := range t.Items {
 		select {
 		case <-cancelCh:
-			e.markCancelled(t, it)
+			e.markCancelled(env, t, it)
 			continue
 		default:
 		}
@@ -488,7 +546,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		loc := e.timeLocation()
 		if !withinWindow(sched.WindowStart, sched.WindowEnd, loc) {
 			if waitUntilWindow(cancelCh, sched.WindowStart, loc) {
-				e.markCancelled(t, it)
+				e.markCancelled(env, t, it)
 				continue
 			}
 		}
@@ -498,14 +556,16 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			cap := warmupDailyCap(sched, days)
 			if m := e.todayMetrics(udid); m.SentOK >= cap {
 				reason := fmt.Sprintf("预热控制：第 %d 天日上限 %d 条已用完，剩余明细未发送（请明日继续）", days, cap)
-				e.cancelRemainingReason(t, t.Items[idx:], reason)
-				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason})
+				e.cancelRemainingReason(env, t, t.Items[idx:], reason)
+				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason, ConnType: env.ConnType})
 				slog.Warn("warm-up cap reached", "task", t.TaskID, "udid", udid, "day", days, "cap", cap)
+				stopStatus, stopReason = taskStopWarmup, reason
 				return
 			}
 		}
 		t0 := time.Now()
 		status, errMsg := "sent", ""
+		contactName := ""
 		assist := e.llmClient()
 		if assist != nil && assist.Model == "" {
 			assist = nil
@@ -517,13 +577,17 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		sid, isNew, oerr := wda.OpenChatForSend(context.Background(), client, it.Phone)
 		if oerr != nil {
 			status, errMsg = "failed", oerr.Error()
-		} else if isNew && sched.MaxNewSessionRatio > 0 {
-			m := e.todayMetrics(udid)
-			if newSessionRatioExceeded(m.NewSessions, m.Total, sched.MaxNewSessionRatio) {
-				status, errMsg = "failed",
-					fmt.Sprintf("新会话占比控制:今日新会话占比已达上限 %d%%，该号码请明日再发", sched.MaxNewSessionRatio)
-				_ = client.DeleteSession(context.Background(), sid)
-				sid = ""
+		} else {
+			// 收件人姓名：聊天页已打开，尽力读标题（联系人名/号码），失败为空不影响发送。
+			contactName = wda.ChatTitle(context.Background(), client, sid)
+			if isNew && sched.MaxNewSessionRatio > 0 {
+				m := e.todayMetrics(udid)
+				if newSessionRatioExceeded(m.NewSessions, m.Total, sched.MaxNewSessionRatio) {
+					status, errMsg = "failed",
+						fmt.Sprintf("新会话占比控制:今日新会话占比已达上限 %d%%，该号码请明日再发", sched.MaxNewSessionRatio)
+					_ = client.DeleteSession(context.Background(), sid)
+					sid = ""
+				}
 			}
 		}
 		if sid != "" {
@@ -539,10 +603,14 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			}
 		}
 		dur := time.Since(t0).Milliseconds()
-		e.persist(t.TaskID, it.ItemID, it.Phone, status, errMsg, dur)
-		e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur})
+		e.finishItem(ItemResult{
+			TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+			Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+			Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339), NewSession: isNew,
+		})
 		e.recordMetric(udid, t.TaskID, status, isNew && status == "sent")
-		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status, "new_session", isNew, "duration_ms", dur)
+		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
+			"new_session", isNew, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
 
 		if status == "failed" {
 			// 占比控制的失败不计入连续失败熔断（非设备异常）。
@@ -551,13 +619,16 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			}
 			if containsAny(errMsg, "not reachable", "connection", "timed out") {
 				slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
+				stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
 				return
 			}
 			consecFails++
 			if consecFails >= maxFails {
-				e.cancelRemainingReason(t, t.Items[idx+1:], "熔断:连续失败 "+strconv.Itoa(consecFails)+" 条")
-				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: fmt.Sprintf("熔断：连续失败 %d 条", consecFails)})
+				reason := "熔断:连续失败 " + strconv.Itoa(consecFails) + " 条"
+				e.cancelRemainingReason(env, t, t.Items[idx+1:], reason)
+				e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason, ConnType: env.ConnType})
 				slog.Warn("circuit breaker triggered", "task", t.TaskID, "udid", udid, "consecutive_fails", consecFails)
+				stopStatus, stopReason = taskStopBreaker, reason
 				return
 			}
 		} else {
@@ -587,16 +658,33 @@ func itemContent(t TaskDispatch, it TaskItem) string {
 	return t.Content
 }
 
-func (e *Executor) markCancelled(t TaskDispatch, it TaskItem) {
-	e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", "cancelled by platform", 0)
-	e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: "cancelled by platform"})
+// cancelledEnv 构造一条带设备上下文与计划内容的明细结果（status/error 由调用方给定）。
+func (e *Executor) cancelledEnv(env taskEnv, t TaskDispatch, it TaskItem, status, errMsg string) ItemResult {
+	return ItemResult{
+		TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg,
+		Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+		Content: itemContent(t, it), SentAt: e.now().Format(time.RFC3339),
+	}
 }
 
-func (e *Executor) cancelRemainingReason(t TaskDispatch, rest []TaskItem, reason string) {
+func (e *Executor) markCancelled(env taskEnv, t TaskDispatch, it TaskItem) {
+	e.finishItem(e.cancelledEnv(env, t, it, "cancelled", "cancelled by platform"))
+}
+
+func (e *Executor) cancelRemainingReason(env taskEnv, t TaskDispatch, rest []TaskItem, reason string) {
 	for _, it := range rest {
-		e.persist(t.TaskID, it.ItemID, it.Phone, "cancelled", reason, 0)
-		e.report(ItemResult{TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: "cancelled", Error: reason})
+		e.finishItem(e.cancelledEnv(env, t, it, "cancelled", reason))
 	}
+}
+
+// connTypeOf 返回设备当前连接方式：USB 直连为 "usb"，否则视为 Wi-Fi 通道 "wifi"。
+func connTypeOf(udid string) string {
+	for _, u := range USBUDIDs() {
+		if u == udid {
+			return "usb"
+		}
+	}
+	return "wifi"
 }
 
 // interrupted 等待 d 时长，若期间被取消返回 true。
@@ -682,8 +770,27 @@ func parseHM(s string) int {
 
 // ---- 本地持久化（at-least-once）----
 
+// itemRecord 是 results/<task_id>.json 单条明细的落盘结构（旧文件缺字段读为零值，向后兼容）。
+type itemRecord struct {
+	Phone       string `json:"phone"`
+	Status      string `json:"status"`
+	Error       string `json:"error"`
+	DurationMs  int64  `json:"duration_ms"`
+	Udid        string `json:"udid,omitempty"`
+	ConnType    string `json:"conn_type,omitempty"`
+	Content     string `json:"content,omitempty"`
+	ContactName string `json:"contact_name,omitempty"`
+	SentAt      string `json:"sent_at,omitempty"`
+	NewSession  bool   `json:"new_session,omitempty"`
+}
+
 func (e *Executor) resultFile(taskID string) string {
 	return filepath.Join(e.resultsDir, taskID+".json")
+}
+
+// metaFile 任务级汇总落盘路径（<task_id>.meta.json）。
+func (e *Executor) metaFile(taskID string) string {
+	return filepath.Join(e.resultsDir, taskID+".meta.json")
 }
 
 func (e *Executor) persisted(taskID, itemID string) bool {
@@ -699,23 +806,192 @@ func (e *Executor) persisted(taskID, itemID string) bool {
 	return ok
 }
 
-func (e *Executor) persist(taskID, itemID, phone, status, errMsg string, dur int64) {
+// finishItem 落盘并上报单条明细（先落盘后上报，断网不丢）。
+func (e *Executor) finishItem(r ItemResult) {
+	e.persistItem(r)
+	e.report(r)
+}
+
+func (e *Executor) persistItem(r ItemResult) {
 	if err := os.MkdirAll(e.resultsDir, 0o755); err != nil {
 		return
 	}
-	p := e.resultFile(taskID)
-	m := map[string]map[string]any{}
+	p := e.resultFile(r.TaskID)
+	m := map[string]itemRecord{}
 	if b, err := os.ReadFile(p); err == nil {
 		_ = json.Unmarshal(b, &m)
 	}
-	m[itemID] = map[string]any{"phone": phone, "status": status, "error": errMsg, "duration_ms": dur}
+	m[r.ItemID] = itemRecord{
+		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
+		Udid: r.Udid, ConnType: r.ConnType, Content: r.Content,
+		ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
+	}
 	b, _ := json.Marshal(m)
 	tmp := p + ".tmp"
 	_ = os.WriteFile(tmp, b, 0o600)
 	_ = os.Rename(tmp, p)
 }
 
-// ResendPersisted 重连后补报本地已持久化结果。
+// finishTask 任务收口：按已落盘明细统计，写 meta 并上行 task:summary（meta 落盘后队列满可丢，重连补报）。
+func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, status, reason string) {
+	if status == "" {
+		status = taskDone
+	}
+	m := map[string]itemRecord{}
+	if b, err := os.ReadFile(e.resultFile(t.TaskID)); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	var ok, fail, cancel int
+	for _, r := range m {
+		switch r.Status {
+		case "sent":
+			ok++
+		case "failed":
+			fail++
+		case "cancelled":
+			cancel++
+		}
+	}
+	end := e.now()
+	s := TaskSummary{
+		TaskID: t.TaskID, Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+		Status: status, Total: len(t.Items), SentOK: ok, SentFail: fail, Cancelled: cancel,
+		Pending: len(t.Items) - ok - fail - cancel,
+		StartAt: start.Format(time.RFC3339), EndAt: end.Format(time.RFC3339),
+		DurationMs: end.Sub(start).Milliseconds(), Reason: reason,
+	}
+	if err := os.MkdirAll(e.resultsDir, 0o755); err == nil {
+		b, _ := json.Marshal(s)
+		p := e.metaFile(t.TaskID)
+		tmp := p + ".tmp"
+		if os.WriteFile(tmp, b, 0o600) == nil {
+			_ = os.Rename(tmp, p)
+		}
+	}
+	select {
+	case e.SummaryQ <- s:
+	default:
+		slog.Warn("summary queue full, dropped (persisted, will re-report)", "task", s.TaskID)
+	}
+}
+
+// readItems 读入某任务的全部已落盘明细。
+func (e *Executor) readItems(taskID string) map[string]itemRecord {
+	m := map[string]itemRecord{}
+	if b, err := os.ReadFile(e.resultFile(taskID)); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+// readSummary 读入某任务已落盘的汇总（无则返回 nil）。
+func (e *Executor) readSummary(taskID string) *TaskSummary {
+	b, err := os.ReadFile(e.metaFile(taskID))
+	if err != nil {
+		return nil
+	}
+	var s TaskSummary
+	if json.Unmarshal(b, &s) != nil || s.TaskID == "" {
+		return nil
+	}
+	return &s
+}
+
+// TaskListItem 是 /api/tasks 的列表项。
+type TaskListItem struct {
+	TaskID    string       `json:"task_id"`
+	Finished  bool         `json:"finished"` // 任务已收口（meta 已写）
+	Summary   *TaskSummary `json:"summary,omitempty"`
+	SentOK    int          `json:"sent_ok"`
+	SentFail  int          `json:"sent_fail"`
+	Cancelled int          `json:"cancelled"`
+	Items     int          `json:"items"`      // 已落盘明细数
+	UpdatedAt int64        `json:"updated_at"` // 明细文件最后修改时间（Unix 秒）
+}
+
+// TaskList 返回本地已持久化任务（按更新时间倒序，最多 100 个）。
+func (e *Executor) TaskList() []TaskListItem {
+	entries, err := os.ReadDir(e.resultsDir)
+	if err != nil {
+		return nil
+	}
+	var out []TaskListItem
+	for _, ent := range entries {
+		if ent.IsDir() || !isTaskResultsFile(ent.Name()) {
+			continue
+		}
+		taskID := ent.Name()[:len(ent.Name())-len(".json")]
+		item := TaskListItem{TaskID: taskID}
+		if s := e.readSummary(taskID); s != nil {
+			item.Summary, item.Finished = s, true
+		}
+		for _, r := range e.readItems(taskID) {
+			switch r.Status {
+			case "sent":
+				item.SentOK++
+			case "failed":
+				item.SentFail++
+			case "cancelled":
+				item.Cancelled++
+			}
+			item.Items++
+		}
+		if info, err := ent.Info(); err == nil {
+			item.UpdatedAt = info.ModTime().Unix()
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out
+}
+
+// ItemDetail 是 /api/tasks/{task_id} 的单条明细（落盘结构 + item_id）。
+type ItemDetail struct {
+	ItemID string `json:"item_id"`
+	itemRecord
+}
+
+// TaskDetail 分页返回某任务明细（按 item_id 排序；limit<=0 时默认 500）。
+func (e *Executor) TaskDetail(taskID string, offset, limit int) ([]ItemDetail, int) {
+	m := e.readItems(taskID)
+	ids := make([]string, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	if offset > len(ids) {
+		offset = len(ids)
+	}
+	end := offset + limit
+	if end > len(ids) {
+		end = len(ids)
+	}
+	out := make([]ItemDetail, 0, end-offset)
+	for _, id := range ids[offset:end] {
+		out = append(out, ItemDetail{ItemID: id, itemRecord: m[id]})
+	}
+	return out, len(ids)
+}
+
+// isTaskResultsFile 判断 results 目录下的文件是否为某任务的明细文件
+// （排除 metrics.json 与 <task>.meta.json）。
+func isTaskResultsFile(name string) bool {
+	if !strings.HasSuffix(name, ".json") || name == "metrics.json" || strings.HasSuffix(name, ".meta.json") {
+		return false
+	}
+	return true
+}
+
+// ResendPersisted 重连后补报本地已持久化的明细与任务汇总。
 func (e *Executor) ResendPersisted() {
 	entries, err := os.ReadDir(e.resultsDir)
 	if err != nil {
@@ -725,22 +1001,31 @@ func (e *Executor) ResendPersisted() {
 		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(e.resultsDir, ent.Name()))
-		if err != nil {
+		name := ent.Name()
+		if strings.HasSuffix(name, ".meta.json") {
+			if s := e.readSummary(name[:len(name)-len(".meta.json")]); s != nil {
+				select {
+				case e.SummaryQ <- *s:
+				default:
+				}
+			}
 			continue
 		}
-		var m map[string]map[string]any
-		if json.Unmarshal(b, &m) != nil {
+		if !isTaskResultsFile(name) {
 			continue
 		}
-		taskID := ent.Name()[:len(ent.Name())-5]
+		var m map[string]itemRecord
+		b, err := os.ReadFile(filepath.Join(e.resultsDir, name))
+		if err != nil || json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		taskID := name[:len(name)-5]
 		for itemID, r := range m {
 			e.report(ItemResult{
 				TaskID: taskID, ItemID: itemID,
-				Phone:      str(r["phone"]),
-				Status:     str(r["status"]),
-				Error:      str(r["error"]),
-				DurationMs: int64(num(r["duration_ms"])),
+				Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
+				Udid: r.Udid, ConnType: r.ConnType, Content: r.Content,
+				ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
 			})
 		}
 	}
@@ -762,20 +1047,4 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
-}
-func str(v any) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-func num(v any) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case json.Number:
-		f, _ := n.Float64()
-		return f
-	}
-	return 0
 }

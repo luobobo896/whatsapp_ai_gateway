@@ -125,6 +125,18 @@ func (c *Config) RemoveDevice(udid string) bool {
 	return false
 }
 
+// SetCloudToken 原子更新网关云凭证并落盘（网关登录后自动签发时调用）。
+func (c *Config) SetCloudToken(token string) error {
+	c.mu.Lock()
+	c.Cloud.Token = token
+	b, err := json.MarshalIndent(c, "", "  ")
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.path, b, 0o600)
+}
+
 // SetLLM 原子更新视觉/LLM 配置并落盘（供平台下发 model:config 调用）。
 func (c *Config) SetLLM(cfg LLMConfig) error {
 	c.mu.Lock()

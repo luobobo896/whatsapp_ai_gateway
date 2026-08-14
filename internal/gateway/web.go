@@ -14,6 +14,7 @@ import (
 func (g *Gateway) Handler(staticDir string) http.Handler {
 	mux := http.NewServeMux()
 	auth := NewWebAuth(g.Cfg)
+	auth.onToken = g.ApplyCloudToken
 
 	// 登录/登出/会话状态（公开）。
 	mux.HandleFunc("/api/login", auth.HandleLogin)
@@ -68,6 +69,35 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 			return
 		}
 		writeJSON(w, g.Exec.MetricsSummary())
+	})
+
+	// /api/tasks 本地已持久化任务列表（发送明细核对入口）。
+	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, map[string]any{"tasks": g.Exec.TaskList()})
+	})
+
+	// /api/tasks/{task_id} 单任务发送明细（offset/limit 分页，默认 limit=500）。
+	mux.HandleFunc("/api/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		taskID := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+		if taskID == "" || strings.Contains(taskID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		items, total := g.Exec.TaskDetail(taskID, offset, limit)
+		writeJSON(w, map[string]any{
+			"task_id": taskID, "total": total, "offset": offset,
+			"summary": g.Exec.readSummary(taskID), "items": items,
+		})
 	})
 
 	mux.HandleFunc("/api/easytier/status", func(w http.ResponseWriter, r *http.Request) {
@@ -289,11 +319,15 @@ func (g *Gateway) deviceList() []map[string]any {
 				model = info.Model
 			}
 		}
+		conn := "wifi"
+		if usbSet[d.UDID] {
+			conn = "usb"
+		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
-			"configured": true, "usb": usbSet[d.UDID],
+			"configured": true, "usb": usbSet[d.UDID], "conn_type": conn,
 			"wda_running": g.WDA.Running(d.UDID),
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})
@@ -306,7 +340,7 @@ func (g *Gateway) deviceList() []map[string]any {
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
-			"usb": true, "wda_running": g.WDA.Running(d.UDID),
+			"usb": true, "conn_type": "usb", "wda_running": g.WDA.Running(d.UDID),
 			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})
 	}

@@ -54,6 +54,35 @@ func SetMessageInputSelector(using, value string) {
 }
 func SetSendButtonSelector(using, value string) { whatsappSelectors.sendButton = using + ": " + value }
 
+// whatsappChatTitleSelectors 聊天页标题（收件人姓名/号码）候选选择器；真机联调校准后固化。
+var whatsappChatTitleSelectors = []string{
+	`class chain: **/XCUIElementTypeNavigationBar[1]/XCUIElementTypeStaticText[1]`,
+	`accessibility id: ChatTitleView_Title`,
+}
+
+// SetChatTitleSelector 供联调时覆盖聊天标题选择器。
+func SetChatTitleSelector(using, value string) {
+	whatsappChatTitleSelectors = []string{using + ": " + value}
+}
+
+// ChatTitle 尽力读取当前聊天页标题（收件人姓名/号码）；读不到返回空串，不影响发送。
+func ChatTitle(ctx context.Context, client *Client, sid string) string {
+	for _, sel := range whatsappChatTitleSelectors {
+		id, err := findElementBySelector(ctx, client, sid, sel)
+		if err != nil || id == "" {
+			continue
+		}
+		t, err := client.ElementText(ctx, sid, id)
+		if err != nil {
+			continue
+		}
+		if t = strings.TrimSpace(t); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // SendAssist 是发送链路的视觉/LLM 辅助：选择器找不到发送键时，用截图让视觉模型定位发送键坐标。
 type SendAssist interface {
 	LocateSendButton(ctx context.Context, screenshotPNG []byte) (x, y int, err error)

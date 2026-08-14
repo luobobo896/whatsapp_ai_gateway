@@ -24,6 +24,13 @@ func TestExecutorStressQueue(t *testing.T) {
 			resultsCh <- struct{}{}
 		}
 	}()
+	// SummaryQ 容量 64 > 任务数，收尾统一回收即可（收齐汇总也保证 meta 落盘已完成）。
+	summaries := make(chan struct{}, tasks)
+	go func() {
+		for range e.SummaryQ {
+			summaries <- struct{}{}
+		}
+	}()
 
 	var wg sync.WaitGroup
 	for i := 0; i < tasks; i++ {
@@ -52,6 +59,16 @@ func TestExecutorStressQueue(t *testing.T) {
 	}
 	if results != total {
 		t.Fatalf("results = %d, want %d", results, total)
+	}
+	// 收齐每个任务的 task:summary（含 meta 落盘收口），避免与 TempDir 清理竞争。
+	gotSummaries := 0
+	for gotSummaries < tasks {
+		select {
+		case <-summaries:
+			gotSummaries++
+		case <-deadline:
+			t.Fatalf("timeout: got %d/%d task summaries", gotSummaries, tasks)
+		}
 	}
 }
 

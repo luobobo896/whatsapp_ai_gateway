@@ -207,7 +207,16 @@ func (c *Client) FindElements(ctx context.Context, sessionID, using, value strin
 	return ids, nil
 }
 
-// ElementRect 返回元素 frame（x,y,width,height），用于坐标点击。
+// ElementText 返回元素可见文本（W3C GET /element/:id/text）。
+func (c *Client) ElementText(ctx context.Context, sessionID, elementID string) (string, error) {
+	data, err := c.do(ctx, http.MethodGet,
+		"/session/"+url.PathEscape(sessionID)+"/element/"+url.PathEscape(elementID)+"/text", nil)
+	if err != nil {
+		return "", err
+	}
+	return decodeValue(data)
+}
+
 // ElementRect 返回元素 frame（x,y,width,height），用于坐标点击。
 func (c *Client) ElementRect(ctx context.Context, sessionID, elementID string) (x, y, width, height float64, err error) {
 	data, err := c.do(ctx, http.MethodGet,

@@ -2,10 +2,13 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -98,6 +101,8 @@ type WebAuth struct {
 	cfg    *Config
 	ss     *webSessions
 	client *http.Client
+	// onToken 登录成功后回传平台自动签发的网关凭证（生产环境由 Gateway 注入；测试/开放模式为 nil）。
+	onToken func(token string) error
 }
 
 // NewWebAuth 构造鉴权器。
@@ -133,6 +138,57 @@ func (a *WebAuth) platformLoginURL() string {
 		scheme = "https"
 	}
 	return scheme + "://" + u.Host + "/api/auth/login"
+}
+
+// platformGatewayRegisterURL 由云通道 ws_url 推导平台自动签发网关凭证接口。
+func (a *WebAuth) platformGatewayRegisterURL() string {
+	u, err := url.Parse(a.cfg.Cloud.WSURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := "https"
+	switch u.Scheme {
+	case "http", "ws":
+		scheme = "http"
+	case "https", "wss":
+		scheme = "https"
+	}
+	return scheme + "://" + u.Host + "/api/ios-agent/v1/gateway/register"
+}
+
+// provisionGatewayToken 登录成功后调用平台自动签发/轮换网关凭证，并通过 onToken 回传落盘。
+func (a *WebAuth) provisionGatewayToken(ctx context.Context, email, password string) error {
+	if a.onToken == nil {
+		return nil
+	}
+	regURL := a.platformGatewayRegisterURL()
+	if regURL == "" {
+		return errors.New("gateway register url invalid")
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"email": email, "password": password, "name": a.cfg.Cloud.GatewayName,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, regURL, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return errors.New("gateway register failed: HTTP " + strings.TrimSpace(http.StatusText(resp.StatusCode)))
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.Token == "" {
+		return errors.New("gateway register response missing token")
+	}
+	return a.onToken(out.Token)
 }
 
 // cookieToken 读取会话 cookie。
@@ -200,6 +256,16 @@ func (a *WebAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(webSessionTTL.Seconds()),
 			Secure: a.cfg.Web.CookieSecure,
 		})
+		// 登录成功后自动签发/轮换网关云凭证，避免管理员手动在平台复制 token。
+		var creds struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if json.Unmarshal(body, &creds) == nil && creds.Email != "" && creds.Password != "" {
+			if err := a.provisionGatewayToken(r.Context(), creds.Email, creds.Password); err != nil {
+				slog.Warn("auto-provision gateway token failed", "error", err)
+			}
+		}
 		writeJSON(w, map[string]any{"ok": true, "passwordRequired": true, "csrfToken": csrf})
 	case resp.StatusCode == http.StatusUnauthorized:
 		msg := "邮箱或密码不正确"
