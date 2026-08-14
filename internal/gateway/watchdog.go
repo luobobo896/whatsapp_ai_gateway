@@ -77,12 +77,10 @@ func (g *Gateway) watchOnce() {
 		if g.Exec.IsBusy(dev.UDID) {
 			// 任务执行中周期性刷新 busy，避免平台 10 分钟 busyTTL 把忙碌设备误判为离线。
 			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "busy", Error: ""})
-		} else if prevOK != h.OK {
-			st := "online"
-			if !h.OK {
-				st = "offline"
-			}
-			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: st, Error: errText(h.Error)})
+			g.rememberCloudStatus(dev.UDID, "busy")
+		} else {
+			// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
+			g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID), errText(h.Error))
 		}
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
 			if !usbConnected(dev.UDID) {

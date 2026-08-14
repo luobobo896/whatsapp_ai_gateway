@@ -28,6 +28,9 @@ type Gateway struct {
 	serialMu    sync.Mutex
 	serials     map[string]string    // udid -> 硬件序列号（含未配置进 devices.json 的 USB 设备）
 	serialTried map[string]time.Time // 上次尝试取号时间（失败的至少间隔 10 分钟再试）
+
+	statusMu   sync.Mutex
+	lastStatus map[string]string // udid -> 上次上报云状态（online/busy/offline）
 }
 
 // New 构造网关。
@@ -35,6 +38,7 @@ func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *Ea
 	return &Gateway{
 		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
 		serials: map[string]string{}, serialTried: map[string]time.Time{},
+		lastStatus: map[string]string{},
 	}
 }
 

@@ -303,22 +303,53 @@ func (g *Gateway) deviceListReport() []map[string]any {
 		usbSet[d.UDID] = true
 	}
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
-	for _, d := range g.Cfg.Devices {
+	for i := range g.Cfg.Devices {
+		d := &g.Cfg.Devices[i]
 		if d.UDID == "" {
 			continue
 		}
 		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
 			continue
 		}
-		status := "online"
-		if g.Exec.IsBusy(d.UDID) {
-			status = "busy"
-		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
-			"wda_status": status, "whatsapp_version": "",
+			"wda_status": g.deviceCloudStatus(d, usbSet[d.UDID]), "whatsapp_version": "",
 		})
 	}
 	return out
+}
+
+// deviceCloudStatus 返回与设备列表 UI 一致的云上行状态：
+// busy > online（WDA 进程运行且健康/USB 直连）> offline。
+func (g *Gateway) deviceCloudStatus(d *Device, usb bool) string {
+	if g.Exec.IsBusy(d.UDID) {
+		return "busy"
+	}
+	if g.WDA.Running(d.UDID) && (healthOK(d.LastHealth) || usb) {
+		return "online"
+	}
+	return "offline"
+}
+
+// rememberCloudStatus 记录上次上报的云状态。
+func (g *Gateway) rememberCloudStatus(udid, status string) {
+	g.statusMu.Lock()
+	g.lastStatus[udid] = status
+	g.statusMu.Unlock()
+}
+
+// reportCloudStatusIfChanged 非忙碌设备云状态变化时上报 device:status。
+func (g *Gateway) reportCloudStatusIfChanged(d *Device, usb bool, errMsg string) {
+	status := g.deviceCloudStatus(d, usb)
+	g.statusMu.Lock()
+	prev := g.lastStatus[d.UDID]
+	changed := prev != status
+	if changed {
+		g.lastStatus[d.UDID] = status
+	}
+	g.statusMu.Unlock()
+	if changed {
+		g.Exec.status(DeviceStatus{UDID: d.UDID, WDAStatus: status, Error: errMsg})
+	}
 }
