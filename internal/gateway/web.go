@@ -48,6 +48,19 @@ func (g *Gateway) Handler(staticDir string) http.Handler {
 		writeJSON(w, g.deviceList())
 	})
 
+// /api/llm 当前视觉/LLM 模型配置（平台下发，api_key 不回传明文）。
+	mux.HandleFunc("/api/llm", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		c := g.Cfg.LLM
+		writeJSON(w, map[string]any{
+			"enabled": c.BaseURL != "" && c.Model != "",
+			"base_url": c.BaseURL, "model": c.Model, "has_api_key": c.APIKey != "",
+		})
+	})
+
 	// /api/metrics 网关级发送统计聚合（今日汇总 + 分设备 + 历史按天，落盘持久化）。
 	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

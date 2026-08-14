@@ -76,6 +76,7 @@ type Executor struct {
 	cfg        *Config
 	wda        *WDAManager
 	llm        *LLMClient
+	llmMu      sync.RWMutex
 	resultsDir string
 
 	mu      sync.Mutex
@@ -148,6 +149,19 @@ func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir str
 }
 
 // ---- 统计落盘聚合 ----
+
+// SetLLM 热替换运行时视觉/LLM 客户端（平台下发 model:config 后调用）。
+func (e *Executor) SetLLM(llm *LLMClient) {
+	e.llmMu.Lock()
+	defer e.llmMu.Unlock()
+	e.llm = llm
+}
+
+func (e *Executor) llmClient() *LLMClient {
+	e.llmMu.RLock()
+	defer e.llmMu.RUnlock()
+	return e.llm
+}
 
 func (e *Executor) metricsFilePath() string {
 	return filepath.Join(e.resultsDir, "metrics.json")
@@ -492,7 +506,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		}
 		t0 := time.Now()
 		status, errMsg := "sent", ""
-		assist := e.llm
+		assist := e.llmClient()
 		if assist != nil && assist.Model == "" {
 			assist = nil
 		}

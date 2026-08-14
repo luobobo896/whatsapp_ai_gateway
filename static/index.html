@@ -26,7 +26,7 @@
   }
   @media (prefers-color-scheme: dark){
     :root{
-      --bg:#000;
+      --bg:#161617;
       --bg-grad-1:#1c1c1e;
       --bg-grad-2:#111113;
       --card:#1c1c1e;
@@ -110,9 +110,9 @@
   .btn:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,113,227,.32)}
   .btn:active{transform:translateY(0) scale(.97)}
   .btn:disabled{opacity:.4;cursor:default;transform:none}
-  .btn.ghost{background:transparent;color:var(--accent);box-shadow:none}
+  .btn.ghost{background:transparent;color:var(--accent);box-shadow:none;border:1px solid color-mix(in srgb, var(--accent) 35%, transparent)}
   .btn.ghost:hover{background:color-mix(in srgb, var(--accent) 10%, transparent)}
-  .btn.ghost.red{color:var(--red)}
+  .btn.ghost.red{color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent)}
   .btn.ghost.red:hover{background:color-mix(in srgb, var(--red) 10%, transparent)}
   .btn.sm{padding:5px 13px;font-size:12.5px}
   /* ---------- 主体 ---------- */
@@ -203,6 +203,11 @@
   .modal .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
   .modal label{display:block;font-size:12px;color:var(--text-2);margin-bottom:4px}
   .modal input{width:100%;padding:11px 13px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13.5px;outline:none;transition:border-color .15s, box-shadow .15s}
+  .modal input::placeholder{color:var(--text-3)}
+@media (prefers-color-scheme: dark){
+  .modal input{background:#2c2c2e !important;border-color:rgba(255,255,255,.22) !important}
+  .modal input::placeholder{color:#98989f !important}
+}
   .modal input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(10,132,255,.15)}
   .modal .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2);padding-top:10px}
   .modal .check input{width:auto}
@@ -223,6 +228,28 @@
 .mh-row .ok b{color:var(--green)} .mh-row .fail b{color:var(--red)}
 .empty-sm{font-size:12px;color:var(--text-3);padding:6px 0}
 @media (max-width:720px){ .stats{grid-template-columns:repeat(2,1fr)} }
+html{color-scheme:light dark}
+html[data-theme="dark"]{color-scheme:dark}
+html[data-theme="light"]{color-scheme:light}
+html[data-theme="dark"]{
+  --bg:#161617;--bg-grad-1:#1f1f21;--bg-grad-2:#101012;--card:#1c1c1e;
+  --text:#f5f5f7;--text-2:#98989f;--text-3:#636366;--border:rgba(255,255,255,.1);
+  --shadow:0 8px 24px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.35);
+  --shadow-lg:0 20px 48px rgba(0,0,0,.65),0 4px 16px rgba(0,0,0,.4);
+  --accent:#0a84ff;--accent-hover:#409cff;
+}
+html[data-theme="light"]{
+  --bg:#f5f5f7;--bg-grad-1:#fbfbfd;--bg-grad-2:#eef0f4;--card:#ffffff;
+  --text:#1d1d1f;--text-2:#6e6e73;--text-3:#a1a1a6;--border:rgba(0,0,0,.08);
+  --shadow:0 8px 24px rgba(0,0,0,.06),0 2px 8px rgba(0,0,0,.04);
+  --shadow-lg:0 20px 48px rgba(0,0,0,.12),0 4px 16px rgba(0,0,0,.06);
+  --accent:#0071e3;--accent-hover:#0077ed;
+}
+html[data-theme="dark"] .device-icon{background:linear-gradient(145deg,#2c2c2e,#232326);color:#98989f}
+html[data-theme="dark"] .modal input{background:#2c2c2e !important;border-color:rgba(255,255,255,.22) !important}
+html[data-theme="dark"] .modal input::placeholder{color:#98989f !important}
+html[data-theme="light"] .modal input{background:#f5f5f7 !important;border-color:rgba(0,0,0,.08) !important}
+html[data-theme="light"] .modal input::placeholder{color:#a1a1a6 !important}
 </style>
 </head>
 <body>
@@ -248,6 +275,7 @@
         <input type="checkbox" id="etToggle" onchange="etToggleChange(this)">
         <span class="slider"></span>
       </label>
+      <button class="btn sm ghost" id="themeBtn" onclick="toggleTheme()" title="切换深浅色">🌙</button>
       <button class="btn sm" id="refreshBtn" onclick="refreshAll()">刷新</button>
       <button class="btn sm ghost" id="logoutBtn" style="display:none" onclick="logout()">登出</button>
     </div>
@@ -260,6 +288,15 @@
     <div class="hero">
       <h2>设备总览</h2>
       <p id="heroSub">管理本地连接的 iPhone 与 WebDriverAgent · 数据每 5 秒自动刷新</p>
+    </div>
+    <div class="panel" style="padding:14px 18px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-2)">
+          <span style="font-weight:600;color:var(--text)">模型配置</span>
+          <span id="llmDot" class="dot off"></span><span id="llmText">未配置</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-2)" id="llmDetail">由平台「组网」页下发，用于发送键视觉定位兜底</div>
+      </div>
     </div>
     <div class="stats">
       <div class="stat"><span class="k">云通道</span><span class="v"><span class="dot" id="stCloudDot"></span><span id="stCloud">—</span></span></div>
@@ -375,6 +412,19 @@
 let ipTarget = null;
 let lastCloudErr = sessionStorage.getItem('cloudErrToast') || ''; // 同一条凭证错误跨刷新只弹一次
 const $ = (id) => document.getElementById(id);
+
+/* ---------- 深浅色主题 ---------- */
+function effectiveTheme(){
+  const t = document.documentElement.getAttribute("data-theme");
+  if(t) return t;
+  return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+function setTheme(t){
+  if(t === "auto"){ document.documentElement.removeAttribute("data-theme"); localStorage.removeItem("gw-theme"); }
+  else { document.documentElement.setAttribute("data-theme", t); localStorage.setItem("gw-theme", t); }
+  const btn = $("themeBtn"); if(btn) btn.textContent = effectiveTheme() === "dark" ? "☀️" : "🌙";
+}
+function toggleTheme(){ setTheme(effectiveTheme() === "dark" ? "light" : "dark"); }
 
 function toast(msg){
   const t = $('toast');
@@ -612,7 +662,20 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm()]); }
+
+async function loadLlm(){
+  try{
+    const c = await (await api('/api/llm')).json();
+    const on = !!c.enabled;
+    const dot = document.getElementById('llmDot');
+    if(dot){ dot.className = on ? 'dot on' : 'dot off'; }
+    const txt = document.getElementById('llmText');
+    if(txt){ txt.textContent = on ? c.model : '未配置'; }
+    const detail = document.getElementById('llmDetail');
+    if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置')) : '由平台「组网」页下发，用于发送键视觉定位兜底'; }
+  }catch(e){}
+}
 async function act(udid){
   // 乐观更新：点击立即显示「启动中」，不显示成功；后端等 WDA 真正就绪后才返回 activated
   optimisticAct[udid] = Date.now();
@@ -750,6 +813,7 @@ async function etAction(action){
   }catch(e){ toast('操作失败'); }
 }
 
+setTheme(localStorage.getItem('gw-theme') || 'auto');
 checkSession();
 setInterval(() => { if($('loginMask').style.display !== 'flex') refreshAll(); }, 5000);
 </script>

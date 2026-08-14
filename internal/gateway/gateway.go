@@ -81,3 +81,14 @@ func (g *Gateway) LastError() string {
 
 // LastErrorActionable 最近一次云错误是否需要人工干预。
 func (g *Gateway) LastErrorActionable() bool { return g.errAction.Load() }
+
+// ApplyLLMConfig 应用平台下发的视觉/LLM 模型配置：落盘并热替换运行时客户端。
+func (g *Gateway) ApplyLLMConfig(cfg LLMConfig) error {
+	if err := g.Cfg.SetLLM(cfg); err != nil {
+		return err
+	}
+	llm := NewLLMClient(cfg.BaseURL, cfg.APIKey, cfg.Model)
+	g.LLM = llm
+	g.Exec.SetLLM(llm)
+	return nil
+}
