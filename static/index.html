@@ -217,8 +217,6 @@
     .device-right{align-items:flex-start;width:100%}
     .hero h2{font-size:26px}
   }
-.modal-mask{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:100}
-.modal-mask .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
 .panel-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
 .mh-list{display:flex;flex-wrap:wrap;gap:8px}
 .mh-row{display:flex;align-items:center;gap:10px;background:var(--panel-2, #f6f8fa);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:12px}
@@ -359,10 +357,11 @@
 <div id="toast"></div>
 
 <!-- 登录弹层（未登录时覆盖管理页） -->
-<div class="modal-mask" id="loginMask" style="display:none">
+<div class="modal-mask" id="loginMask">
   <div class="modal" style="width:min(380px, calc(100vw - 40px))">
     <h3 style="margin:0 0 4px">网关管理登录</h3>
-    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">请输入 devices.json 中配置的管理密码</p>
+    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">与 HK 平台同一账号（admin@whatsapp-ai.local），仅登录入口不同</p>
+    <input type="text" id="loginUsername" value="admin@whatsapp-ai.local" placeholder="用户名" style="width:100%;box-sizing:border-box;margin-bottom:10px" onkeydown="if(event.key==='Enter')login()">
     <input type="password" id="loginPassword" placeholder="管理密码" style="width:100%;box-sizing:border-box" onkeydown="if(event.key==='Enter')login()">
     <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px">
       <button class="btn ghost" onclick="hideLogin()">取消</button>
@@ -401,19 +400,19 @@ async function api(path, opts = {}){
   return r;
 }
 function showLogin(){
-  $('loginMask').style.display = 'flex';
+  $('loginMask').classList.add('open');
   $('loginErr').style.display = 'none';
   setTimeout(() => $('loginPassword').focus(), 50);
 }
 function hideLogin(){
-  $('loginMask').style.display = 'none';
+  $('loginMask').classList.remove('open');
   $('loginPassword').value = '';
   $('loginErr').style.display = 'none';
 }
 async function login(){
   try{
-    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: $('loginPassword').value})});
-    if(!r.ok){ $('loginErr').textContent = '密码错误'; $('loginErr').style.display = 'block'; return; }
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username: $('loginUsername').value.trim(), password: $('loginPassword').value})});
+    if(!r.ok){ $('loginErr').textContent = '用户名或密码错误'; $('loginErr').style.display = 'block'; return; }
     hideLogin();
     $('logoutBtn').style.display = '';
     refreshAll();
@@ -581,7 +580,7 @@ function renderDevices(list){
 
 async function refreshDevices(){
   try{ devicesCache = await (await api('/api/devices')).json(); }
-  catch(e){ toast('设备列表读取失败'); return; }
+  catch(e){ if(!$('loginMask').classList.contains('open')) toast('设备列表读取失败'); return; }
   renderDevices(devicesCache);
 }
 /* ---------- 统计聚合（落盘 metrics） ---------- */

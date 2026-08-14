@@ -100,18 +100,22 @@ func (a *WebAuth) cookieToken(r *http.Request) string {
 	return c.Value
 }
 
-// HandleLogin POST /api/login {password} → 签发会话 cookie。
+// HandleLogin POST /api/login {username, password} → 签发会话 cookie。
+// 账号与 HK 平台保持一致（默认 admin@whatsapp-ai.local），只是登录入口不同。
 func (a *WebAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if !a.PasswordRequired() {
 		writeJSON(w, map[string]any{"ok": true, "passwordRequired": false})
 		return
 	}
 	var body struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(a.cfg.Web.Password)) != 1 {
-		writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "密码错误"})
+	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(a.cfg.Web.Username)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(body.Password), []byte(a.cfg.Web.Password)) == 1
+	if !userOK || !passOK {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]string{"error": "用户名或密码错误"})
 		return
 	}
 	token := a.ss.create()
