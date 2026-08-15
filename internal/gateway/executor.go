@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -305,6 +306,7 @@ func (e *Executor) MetricsSummary() MetricsSummary {
 }
 
 // Submit 收到 task:dispatch：入队（同一 task 重复下发幂等）。
+// 队列满时丢弃并告警（不阻塞云通道读循环；平台重连后会补推 pending 任务）。
 func (e *Executor) Submit(t TaskDispatch) {
 	if t.TaskID == "" || t.UDID == "" {
 		slog.Warn("dispatch missing task_id/udid", "payload", t)
@@ -317,7 +319,7 @@ func (e *Executor) Submit(t TaskDispatch) {
 	}
 	ch := e.queues[t.UDID]
 	if ch == nil {
-		ch = make(chan TaskDispatch, 16)
+		ch = make(chan TaskDispatch, 256)
 		e.queues[t.UDID] = ch
 	}
 	e.cancel[t.TaskID] = make(chan struct{})
@@ -326,7 +328,17 @@ func (e *Executor) Submit(t TaskDispatch) {
 		go e.runUDID(t.UDID)
 	}
 	e.mu.Unlock()
-	ch <- t
+	// 有界背压：3 秒内排队失败才丢弃并告警（保护云通道读循环不被无限阻塞；
+	// 平台重连后会补推 pending 任务）。
+	select {
+	case ch <- t:
+	case <-time.After(3 * time.Second):
+		e.mu.Lock()
+		delete(e.cancel, t.TaskID)
+		e.mu.Unlock()
+		slog.Error("dispatch enqueue timeout, task dropped (platform will re-push pending)",
+			"task", t.TaskID, "udid", t.UDID)
+	}
 }
 
 // Cancel 收到 task:cancel。
@@ -434,6 +446,11 @@ func (e *Executor) status(s DeviceStatus) {
 }
 
 func (e *Executor) recordMetric(udid, taskID, status string, newSession bool) {
+	if udid == "" {
+		// 无设备归因的明细不计数：避免产生空 udid 统计桶污染 metrics 设备视图
+		// 与 batch_id 归因（旧格式记录的归因由显式 recordMetric 提供）。
+		return
+	}
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
 	// 跨天：先把昨天分设备计数折入 history，再重置当天计数。
@@ -521,15 +538,42 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		delete(e.busy, udid)
 		delete(e.cancel, t.TaskID)
 		e.mu.Unlock()
-		e.status(DeviceStatus{UDID: udid, WDAStatus: "online", ConnType: env.ConnType})
+		// 收尾按真实探活上报：无条件报 online 会在设备实际离线时造成 online→offline 抖动。
+		final := "online"
+		if !e.deviceReachable(udid, ip, port) {
+			final = "offline"
+		}
+		e.status(DeviceStatus{UDID: udid, WDAStatus: final, ConnType: env.ConnType})
 	}()
+
+	// 离线设备直接剔除：任务下发时 WDA 探活失败（隧道与 Wi-Fi 均不可达），
+	// 可发明细立即标记失败上报，平台可马上转派在线设备；不进逐条执行空耗超时。
+	// 缺号码属数据校验（与设备状态无关），仍按「缺少手机号」收口。
+	if !e.deviceReachable(udid, ip, port) {
+		reason := "设备离线（WDA 不可达），任务被网关拒绝，请转派在线设备后重试"
+		offline := false
+		for _, it := range t.Items {
+			if strings.TrimSpace(it.Phone) == "" {
+				e.rejectEmptyPhone(env, t, it, udid)
+				continue
+			}
+			e.finishItem(e.cancelledEnv(env, t, it, "failed", reason))
+			offline = true
+		}
+		if offline {
+			e.status(DeviceStatus{UDID: udid, WDAStatus: "offline", Error: reason, ConnType: env.ConnType})
+			slog.Warn("task rejected: device offline", "task", t.TaskID, "udid", udid, "items", len(t.Items))
+			stopStatus, stopReason = taskStopUnreach, reason
+		}
+		return
+	}
 
 	sched := t.Schedule
 	maxFails := sched.MaxConsecutiveFails
 	if maxFails <= 0 {
 		maxFails = 5
 	}
-	client := wda.NewClient(fmt.Sprintf("http://%s:%d", ip, port), 40*time.Second)
+	client := wda.NewClient(wdaBaseURLFor(udid, ip, port), 40*time.Second)
 	consecFails := 0
 
 	for idx, it := range t.Items {
@@ -575,19 +619,19 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		// 手机号缺失：禁止无号码发送——旧逻辑会落到「默认会话」把消息发给
 		// 当前打开的任意聊天，造成明细显示发送成功却无手机号。此类明细直接标记失败。
 		if strings.TrimSpace(it.Phone) == "" {
-			e.finishItem(ItemResult{
-				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone,
-				Status: "failed", Error: "明细缺少手机号，已拒绝发送（无号码禁止发送到默认会话）",
-				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
-				Content: content, SentAt: e.now().Format(time.RFC3339),
-			})
-			e.recordMetric(udid, t.TaskID, "failed", false)
-			slog.Warn("item rejected: empty phone", "task", t.TaskID, "item", it.ItemID)
+			e.rejectEmptyPhone(env, t, it, udid)
 			continue
 		}
 		// 打开会话（返回是否为新会话），新会话占比控制：超额则该条标记失败待次日，
 		// 存量会话不受影响继续发送。
+		// 可达性类瞬时故障（WDA 500/超时/连接抖动）先原地重试一次再判失败——
+		// 打开会话本身幂等（未发送任何内容），重试无重复发送风险。
 		sid, isNew, oerr := wda.OpenChatForSend(context.Background(), client, it.Phone)
+		if oerr != nil && transientWDAError(oerr) {
+			slog.Warn("open chat transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", oerr.Error())
+			time.Sleep(2 * time.Second)
+			sid, isNew, oerr = wda.OpenChatForSend(context.Background(), client, it.Phone)
+		}
 		if oerr != nil {
 			status, errMsg = "failed", oerr.Error()
 		} else {
@@ -621,7 +665,6 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
 			Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339), NewSession: isNew,
 		})
-		e.recordMetric(udid, t.TaskID, status, isNew && status == "sent")
 		slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
 			"new_session", isNew, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
 
@@ -660,6 +703,26 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			}
 		}
 	}
+}
+
+// deviceReachable 任务开始前快速探活设备 WDA（USB 隧道优先，Wi-Fi 兜底）。
+func (e *Executor) deviceReachable(udid, ip string, port int) bool {
+	u, err := url.Parse(wdaBaseURLFor(udid, ip, port))
+	if err != nil {
+		return false
+	}
+	p, _ := strconv.Atoi(u.Port())
+	if p == 0 {
+		p = 8100
+	}
+	return CheckWDA(u.Hostname(), p, 4*time.Second).OK
+}
+
+// rejectEmptyPhone 无号码明细直接标记失败（数据校验不依赖设备状态，
+// 离线剔除时同样先按此收口，保证平台看到的失败原因一致）。
+func (e *Executor) rejectEmptyPhone(env taskEnv, t TaskDispatch, it TaskItem, udid string) {
+	e.finishItem(e.cancelledEnv(env, t, it, "failed", "明细缺少手机号，已拒绝发送（无号码禁止发送到默认会话）"))
+	slog.Warn("item rejected: empty phone", "task", t.TaskID, "item", it.ItemID)
 }
 
 // itemContent 返回单条明细的实际发送内容：明细有逐条渲染内容（平台模板变量）
@@ -790,6 +853,8 @@ type itemRecord struct {
 	Error       string `json:"error"`
 	DurationMs  int64  `json:"duration_ms"`
 	Udid        string `json:"udid,omitempty"`
+	Serial      string `json:"serial,omitempty"`      // 设备硬件序列号（补报上行不丢字段）
+	DeviceName  string `json:"device_name,omitempty"` // 设备名称
 	ConnType    string `json:"conn_type,omitempty"`
 	Content     string `json:"content,omitempty"`
 	ContactName string `json:"contact_name,omitempty"`
@@ -820,8 +885,12 @@ func (e *Executor) persisted(taskID, itemID string) bool {
 }
 
 // finishItem 落盘并上报单条明细（先落盘后上报，断网不丢）。
+// 发送计数在此单点收敛（sent/failed 均计入 metrics），保证落盘明细与统计永远一致。
 func (e *Executor) finishItem(r ItemResult) {
 	e.persistItem(r)
+	if r.Status == "sent" || r.Status == "failed" {
+		e.recordMetric(r.Udid, r.TaskID, r.Status, r.Status == "sent" && r.NewSession)
+	}
 	e.report(r)
 }
 
@@ -836,8 +905,8 @@ func (e *Executor) persistItem(r ItemResult) {
 	}
 	m[r.ItemID] = itemRecord{
 		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
-		Udid: r.Udid, ConnType: r.ConnType, Content: r.Content,
-		ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
+		Udid: r.Udid, Serial: r.Serial, DeviceName: r.DeviceName, ConnType: r.ConnType,
+		Content: r.Content, ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
 	}
 	b, _ := json.Marshal(m)
 	tmp := p + ".tmp"
@@ -1106,6 +1175,13 @@ func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup,
 					g.Serial, g.Name = dev.Serial, dev.Name
 				}
 			}
+			// 设备已从配置移除时，用明细记录里落盘的序列号/名称兜底，分组标识不缺字段。
+			if g.Serial == "" && r.Serial != "" {
+				g.Serial = r.Serial
+			}
+			if g.Name == "" && r.DeviceName != "" {
+				g.Name = r.DeviceName
+			}
 			groups[udid] = g
 			order = append(order, udid)
 		}
@@ -1161,14 +1237,36 @@ func (e *Executor) ResendPersisted() {
 		}
 		taskID := name[:len(name)-5]
 		for itemID, r := range m {
+			// 老记录缺 serial/device_name 时按 udid 从配置兜底补全，保证上行字段完整。
+			serial, devName := r.Serial, r.DeviceName
+			if e.cfg != nil && r.Udid != "" {
+				if dev := e.cfg.Device(r.Udid); dev != nil {
+					if serial == "" {
+						serial = dev.Serial
+					}
+					if devName == "" {
+						devName = dev.Name
+					}
+				}
+			}
 			e.report(ItemResult{
 				TaskID: taskID, ItemID: itemID,
 				Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
-				Udid: r.Udid, ConnType: r.ConnType, Content: r.Content,
+				Udid: r.Udid, Serial: serial, DeviceName: devName, ConnType: r.ConnType, Content: r.Content,
 				ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
 			})
 		}
 	}
+}
+
+// transientWDAError 判断错误是否为可达性类瞬时故障（WDA 5xx/超时/连接抖动），
+// 这类错误值得原地重试一次；元素找不到等业务性错误不属于此类。
+func transientWDAError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsAny(err.Error(),
+		"not reachable", "connection", "timed out", "timeout", "deadline exceeded", "EOF")
 }
 
 func containsAny(s string, subs ...string) bool {

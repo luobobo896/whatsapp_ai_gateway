@@ -53,14 +53,34 @@ func (c *LLMClient) LocateSendButton(ctx context.Context, screenshotPNG []byte) 
 	if strings.EqualFold(reply, "NONE") {
 		return 0, 0, fmt.Errorf("send button not found by llm")
 	}
-	m := regexp.MustCompile(`(\d+)\s*[,，xX]\s*(\d+)`).FindStringSubmatch(reply)
+	return parseCoordReply(reply, "send button")
+}
+
+// parseCoordReply 解析视觉模型回复中的 x,y 坐标（兼容 x=100,y=200 / 100，200 等写法）。
+func parseCoordReply(reply, what string) (int, int, error) {
+	m := regexp.MustCompile(`(\d+)\s*[,，xX×]\s*[yY]?\s*[=＝]?\s*(\d+)`).FindStringSubmatch(strings.TrimSpace(reply))
 	if m == nil {
-		return 0, 0, fmt.Errorf("unparseable llm reply: %s", reply)
+		return 0, 0, fmt.Errorf("unparseable llm reply for %s: %s", what, reply)
 	}
 	var x, y int
 	fmt.Sscanf(m[1], "%d", &x)
 	fmt.Sscanf(m[2], "%d", &y)
 	return x, y, nil
+}
+
+// LocateTextInput 用截图让视觉模型定位聊天消息输入框，返回中心坐标；找不到返回 NONE。
+func (c *LLMClient) LocateTextInput(ctx context.Context, screenshotPNG []byte) (int, int, error) {
+	if !c.Enabled() {
+		return 0, 0, fmt.Errorf("llm not configured")
+	}
+	reply, err := c.chat(ctx, []chatMsg{
+		{Role: "system", Content: "你是 WhatsApp 界面自动化助手。根据截图找到输入消息的文本输入框（聊天页底部、键盘上方）。只回复输入框中心坐标，格式为 x,y（整数像素），找不到则只回复 NONE。"},
+		{Role: "user", Content: imageContent(screenshotPNG)},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return parseCoordReply(reply, "text input")
 }
 
 type chatMsg struct {

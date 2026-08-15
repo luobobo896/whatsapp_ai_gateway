@@ -1,6 +1,9 @@
 package gateway
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func newStatusTestGateway(t *testing.T) (*Gateway, *WDAManager, *Executor) {
 	t.Helper()
@@ -13,12 +16,20 @@ func newStatusTestGateway(t *testing.T) (*Gateway, *WDAManager, *Executor) {
 
 func setWDA(t *testing.T, m *WDAManager, udid string, running bool) {
 	t.Helper()
+	setWDAStarted(t, m, udid, running, 10*time.Minute)
+}
+
+// setWDAStarted 同 setWDA，可指定进程已运行时长（激活宽限期测试用）。
+func setWDAStarted(t *testing.T, m *WDAManager, udid string, running bool, age time.Duration) {
+	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if running {
 		m.processes[udid] = &wdaProc{done: make(chan struct{})}
+		m.startedAt[udid] = time.Now().Add(-age)
 	} else {
 		delete(m.processes, udid)
+		delete(m.startedAt, udid)
 	}
 }
 
@@ -53,6 +64,22 @@ func TestDeviceCloudStatus(t *testing.T) {
 				t.Fatalf("deviceCloudStatus = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDeviceCloudStatusStartGrace 激活宽限期内（进程刚拉起、监听/隧道未就绪）
+// 不判 offline，避免「激活成功→短暂离线→又在线」抖动；宽限期外恢复真实判定。
+func TestDeviceCloudStatusStartGrace(t *testing.T) {
+	g, wdaMgr, _ := newStatusTestGateway(t)
+	dev := &Device{UDID: "u-grace", LastHealth: map[string]any{"ok": false}}
+
+	setWDAStarted(t, wdaMgr, dev.UDID, true, 5*time.Second)
+	if got := g.deviceCloudStatus(dev, false); got != "online" {
+		t.Fatalf("grace period should be online, got %q", got)
+	}
+	setWDAStarted(t, wdaMgr, dev.UDID, true, 10*time.Minute)
+	if got := g.deviceCloudStatus(dev, false); got != "offline" {
+		t.Fatalf("after grace should be offline, got %q", got)
 	}
 }
 

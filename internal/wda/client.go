@@ -77,12 +77,23 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	}
 	if resp.StatusCode >= 500 {
 		// 5xx（设备离线/WDA 未就绪/超载）：视为不可达，执行器据此保留 pending 待续发。
-		return nil, fmt.Errorf("%w: wda http %d: %s", ErrNotReachable, resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("%w: wda http %d: %s", ErrNotReachable, resp.StatusCode, truncateBody(data))
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("wda http %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, fmt.Errorf("wda http %d: %s", resp.StatusCode, truncateBody(data))
 	}
 	return data, nil
+}
+
+// truncateBody 错误信息里的响应体只保留头部（WDA 的 no-such-element 会带整段
+// ObjC traceback，全量下发会污染网关/平台的明细展示与落盘）。
+func truncateBody(data []byte) string {
+	s := strings.TrimSpace(string(data))
+	const max = 300
+	if len(s) > max {
+		return s[:max] + "…(truncated)"
+	}
+	return s
 }
 
 // decodeValue 解析 {value: ...}；value 为 string 或 object（元素 id / 会话 id）。

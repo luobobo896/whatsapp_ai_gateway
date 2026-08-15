@@ -23,6 +23,7 @@ type WDAManager struct {
 	mu          sync.Mutex
 	processes   map[string]*wdaProc
 	startedAt   map[string]time.Time
+	crashUntil  map[string]time.Time // 启动后很快退出的冷却截止（避免签名/信任类故障重试风暴）
 	buildMu     sync.Mutex // 仅串行化 build-for-testing；构建耗时数分钟，绝不能拿 mu，否则期间 Running/Stop/激活全部被拖死
 	xctestrun   string
 	projectRoot string
@@ -37,6 +38,7 @@ func NewWDAManager(projectRoot, derivedData string) *WDAManager {
 	return &WDAManager{
 		processes:   map[string]*wdaProc{},
 		startedAt:   map[string]time.Time{},
+		crashUntil:  map[string]time.Time{},
 		projectRoot: projectRoot,
 		derivedData: derivedData,
 	}
@@ -116,12 +118,20 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 	if m.Running(udid) {
 		return nil // 已在运行
 	}
+	m.mu.Lock()
+	cool := m.crashUntil[udid]
+	m.mu.Unlock()
+	if time.Now().Before(cool) {
+		return fmt.Errorf("WDA 上次启动后很快退出，%.0f 秒内暂停自动重激活（疑似签名/信任问题，需在设备上信任开发者后重试）", time.Until(cool).Seconds())
+	}
 
 	xctestrun, err := m.ensureBuilt()
 	if err != nil {
 		return err
 	}
-	tmp := xctestrun + ".runtime.xctestrun"
+	// 临时 xctestrun 必须按设备隔离：多台同轮激活共用一个文件会互相覆盖
+	// 注入的 WDA_DEVICE_UDID/USE_PORT，导致设备身份窜号与进程冲突退出。
+	tmp := fmt.Sprintf("%s.%s.runtime.xctestrun", xctestrun, udid[:8])
 	if err := copyFile(xctestrun, tmp); err != nil {
 		return err
 	}
@@ -151,9 +161,15 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 		err := cmd.Wait()
 		close(p.done)
 		m.mu.Lock()
+		started := m.startedAt[udid]
 		if cur, ok := m.processes[udid]; ok && cur == p {
 			delete(m.processes, udid)
 			delete(m.startedAt, udid)
+		}
+		// 启动 2 分钟内即退出：大概率是签名/信任类故障（exit 65），进入 5 分钟冷却，
+		// 避免看护循环每 30s 重新拉起 xcodebuild 的重试风暴。
+		if !started.IsZero() && time.Since(started) < 2*time.Minute {
+			m.crashUntil[udid] = time.Now().Add(5 * time.Minute)
 		}
 		m.mu.Unlock()
 		if err != nil {
@@ -161,6 +177,13 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 		}
 	}()
 	return nil
+}
+
+// ResetCrashCooldown 清除某设备的崩溃冷却（管理页手动「激活」时调用，允许人工立即重试）。
+func (m *WDAManager) ResetCrashCooldown(udid string) {
+	m.mu.Lock()
+	delete(m.crashUntil, udid)
+	m.mu.Unlock()
 }
 
 // Stop 停止单台 WDA。

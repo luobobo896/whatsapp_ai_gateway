@@ -49,9 +49,12 @@ type EasyTierManager struct {
 	rpcPortal  string
 	setupSudo  string
 
-	mu      sync.Mutex
-	process *easyTierProc
-	config  EasyTierConfig
+	mu           sync.Mutex
+	process      *easyTierProc
+	config       EasyTierConfig
+	desired      bool      // 用户意图：true=应运行（崩溃自动拉回），false=已主动停止
+	lastRestart  time.Time // 上次自愈重启时刻（限速，防崩溃风暴）
+	startMu      sync.Mutex
 }
 
 // NewEasyTierManager 构造管理器；root 为网关仓库根目录（tools/easytier、data、scripts 位于其下）。
@@ -206,8 +209,12 @@ func (m *EasyTierManager) writeTOML() error {
 	b.WriteString("[network_identity]\n")
 	b.WriteString(fmt.Sprintf("network_name = %q\n", c.NetworkName))
 	b.WriteString(fmt.Sprintf("network_secret = %q\n", c.NetworkSecret))
+	// 中继双协议 peer：UDP 常被网络路径丢包（表现为持续 connect timeout），
+	// TCP 同端口兜底，easytier 会自动选用可用通道。
 	b.WriteString("\n[[peer]]\n")
 	b.WriteString(fmt.Sprintf("uri = \"udp://%s:%d\"\n", c.RelayHost, relayPort))
+	b.WriteString("\n[[peer]]\n")
+	b.WriteString(fmt.Sprintf("uri = \"tcp://%s:%d\"\n", c.RelayHost, relayPort))
 	for _, cidr := range m.proxyNetworks() {
 		b.WriteString("\n[[proxy_network]]\n")
 		b.WriteString(fmt.Sprintf("cidr = %q\n", cidr))
@@ -270,8 +277,14 @@ func (m *EasyTierManager) authorize() bool {
 }
 
 // Start 启动 easytier；authorize=true 时未授权会弹系统授权框（仅首次）。
+// startMu 串行化全部启动调用（手动/UI/看护自愈并发时只有一个真正拉起进程）。
 func (m *EasyTierManager) Start(authorize bool) (bool, error) {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
 	if m.Running() {
+		m.mu.Lock()
+		m.desired = true
+		m.mu.Unlock()
 		return true, nil
 	}
 	if !m.Configured() {
@@ -326,21 +339,55 @@ func (m *EasyTierManager) Start(authorize bool) (bool, error) {
 		default:
 		}
 		if m.cliOK() {
+			m.mu.Lock()
+			m.desired = true
+			m.mu.Unlock()
 			return true, nil
 		}
 		time.Sleep(time.Second)
 	}
-	return m.cliOK(), nil
+	ok := m.cliOK()
+	m.mu.Lock()
+	m.desired = ok
+	m.mu.Unlock()
+	return ok, nil
 }
 
-// killStale 杀掉使用同一配置文件的所有遗留 core（含孤儿与 sudo 包装进程）。
+// Supervise 看护自愈：用户意图为运行（desired）但进程不在时自动拉回；
+// 2 分钟限速防崩溃风暴，主动停止（desired=false）绝不自动重启。
+func (m *EasyTierManager) Supervise() {
+	m.mu.Lock()
+	desired := m.desired
+	m.mu.Unlock()
+	if !desired || m.Running() || !m.Configured() {
+		return
+	}
+	m.mu.Lock()
+	if time.Since(m.lastRestart) < 2*time.Minute {
+		m.mu.Unlock()
+		return
+	}
+	m.lastRestart = time.Now()
+	m.mu.Unlock()
+	slog.Warn("easytier-core 意外退出，看护自动拉起")
+	go func() {
+		if _, err := m.Start(false); err != nil {
+			slog.Warn("easytier auto-restart failed", "error", err)
+		}
+	}()
+}
+
+// killStale 杀掉所有遗留 core（含孤儿与 sudo 包装进程），不限定配置文件路径。
 func (m *EasyTierManager) killStale() {
-	_ = exec.Command("sudo", "-n", "pkill", "-f", "easytier-core --config-file "+m.tomlPath).Run()
+	_ = exec.Command("sudo", "-n", "pkill", "-f", "easytier-core").Run()
 	time.Sleep(500 * time.Millisecond) // 等端口释放
 }
 
-// Stop 停止 easytier（含遗留 root 进程）。
+// Stop 停止 easytier（含遗留 root 进程）；记录用户意图为「已停止」，看护不再自动拉起。
 func (m *EasyTierManager) Stop() bool {
+	m.mu.Lock()
+	m.desired = false
+	m.mu.Unlock()
 	m.mu.Lock()
 	p := m.process
 	m.process = nil

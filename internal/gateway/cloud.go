@@ -98,7 +98,7 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 			name, _ = os.Hostname()
 		}
 		start := time.Now()
-		err := g.cloudSession(ctx, url, token, name)
+		err := g.cloudSessionSafe(ctx, url, token, name)
 		g.SetConnected(false)
 		if ctx.Err() != nil {
 			return
@@ -143,6 +143,16 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 	}
+}
+
+// cloudSessionSafe 带恐慌防护的云会话：会话内 panic 不拖死重连循环。
+func (g *Gateway) cloudSessionSafe(ctx context.Context, url, token, name string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("cloud session panicked: %v", r)
+		}
+	}()
+	return g.cloudSession(ctx, url, token, name)
 }
 
 func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) error {
@@ -334,12 +344,17 @@ func (g *Gateway) deviceListReport() []map[string]any {
 }
 
 // deviceCloudStatus 返回与设备列表 UI 一致的云上行状态：
-// busy > online（WDA 进程运行且健康/USB 直连）> offline。
+// busy > online（WDA 进程运行且健康/USB 直连/激活宽限期内）> offline。
 func (g *Gateway) deviceCloudStatus(d *Device, usb bool) string {
 	if g.Exec.IsBusy(d.UDID) {
 		return "busy"
 	}
 	if g.WDA.Running(d.UDID) && (healthOK(d.LastHealth) || usb) {
+		return "online"
+	}
+	// 激活宽限期内 WDA 监听/隧道路由可能尚未就绪：仍视为 online，
+	// 避免「激活成功→短暂 offline→又 online」的状态抖动。
+	if g.WDA.Running(d.UDID) && g.WDA.StartedSecondsAgo(d.UDID) < wdaStartGrace.Seconds() {
 		return "online"
 	}
 	return "offline"

@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,26 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			return
 		}
 		http.NotFound(w, r)
+	})
+
+	// /debug/pprof 生产观测端点：仅允许本机回环访问（goroutine/内存泄漏排查）。
+	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackRequest(r) {
+			http.NotFound(w, r)
+			return
+		}
+		switch strings.TrimPrefix(r.URL.Path, "/debug/pprof/") {
+		case "cmdline":
+			pprof.Cmdline(w, r)
+		case "profile":
+			pprof.Profile(w, r)
+		case "symbol":
+			pprof.Symbol(w, r)
+		case "trace":
+			pprof.Trace(w, r)
+		default:
+			pprof.Index(w, r)
+		}
 	})
 
 	mux.HandleFunc("/api/cloud", func(w http.ResponseWriter, r *http.Request) {
@@ -194,12 +215,14 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
 			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
 			if dev.IP != "" {
-				if h := CheckWDA(dev.IP, port, 3*time.Second); h.OK {
+				if h := g.checkWDA(dev); h.OK {
 					applyHealth(dev, h)
 					writeJSON(w, map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "already-running"})
 					return
 				}
 			}
+			// 手动激活允许清除崩溃冷却（人工处理签名/信任问题后立即重试）。
+			g.WDA.ResetCrashCooldown(udid)
 			if err := g.WDA.Activate(udid, port, udid); err != nil {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
 				return
@@ -239,7 +262,7 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "device has no ip configured"})
 				return
 			}
-			writeJSON(w, CheckWDA(dev.IP, dev.Port, 3*time.Second))
+			writeJSON(w, g.checkWDA(dev))
 		case "report":
 			var body struct {
 				SentOK   int     `json:"sent_ok"`
@@ -291,7 +314,7 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 		}
 		dev := g.Cfg.Device(udid)
 		if dev != nil && dev.IP != "" {
-			h := CheckWDA(dev.IP, port, 3*time.Second)
+			h := g.checkWDA(dev)
 			if h.OK {
 				dev.LastHealth = map[string]any{"ok": true, "ready": true, "ip": h.IP, "ios_version": h.Version, "checked_at": float64(time.Now().Unix()), "starting": false}
 				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true}
@@ -362,6 +385,15 @@ func (g *Gateway) deviceList() []map[string]any {
 		})
 	}
 	return out
+}
+
+// loopbackRequest 判断请求是否来自本机回环地址（RemoteAddr 形如 127.0.0.1:xxx）。
+func loopbackRequest(r *http.Request) bool {
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	return host == "127.0.0.1" || host == "[::1]" || host == "::1" || host == "localhost"
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

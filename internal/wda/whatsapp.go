@@ -83,9 +83,13 @@ func ChatTitle(ctx context.Context, client *Client, sid string) string {
 	return ""
 }
 
-// SendAssist 是发送链路的视觉/LLM 辅助：选择器找不到发送键时，用截图让视觉模型定位发送键坐标。
+// SendAssist 是发送链路的视觉/LLM 辅助：选择器找不到元素时，用截图让视觉模型
+// 定位坐标。未配置（nil）时全部走默认选择器逻辑，行为不变。
 type SendAssist interface {
+	// LocateSendButton 定位发送键坐标。
 	LocateSendButton(ctx context.Context, screenshotPNG []byte) (x, y int, err error)
+	// LocateTextInput 定位消息输入框坐标（输入框选择器找不到时的兜底）。
+	LocateTextInput(ctx context.Context, screenshotPNG []byte) (x, y int, err error)
 }
 
 // SendMessageToPhone 驱动 WDA 给指定手机号发送一条文本（保持原签名，供 runner 复用）。
@@ -138,10 +142,23 @@ func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid str
 }
 
 // TypeAndSend 在已打开的会话中输入内容并点发送（发送键找不到时可用视觉/LLM 兜底）。
+// 点击发送后校验输入框已清空，未清空说明点击未生效，返回错误避免误报 sent。
 func TypeAndSend(ctx context.Context, client *Client, sid, content string, assist SendAssist) error {
 	inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, 15*time.Second)
 	if err != nil {
-		return fmt.Errorf("find message input: %w", err)
+		// 视觉兜底：配置了 LLM 时截图定位输入框坐标点击，再短等一次输入框出现。
+		if assist != nil {
+			if png, serr := client.Screenshot(ctx, sid); serr == nil {
+				if x, y, lerr := assist.LocateTextInput(ctx, png); lerr == nil {
+					if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
+						inputID, err = waitElement(ctx, client, sid, whatsappSelectors.messageInput, 5*time.Second)
+					}
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("find message input: %w", err)
+		}
 	}
 	if err := client.TypeText(ctx, sid, inputID, content); err != nil {
 		return fmt.Errorf("type content: %w", err)
@@ -154,7 +171,7 @@ func TypeAndSend(ctx context.Context, client *Client, sid, content string, assis
 			if png, serr := client.Screenshot(ctx, sid); serr == nil {
 				if x, y, lerr := assist.LocateSendButton(ctx, png); lerr == nil {
 					if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
-						return nil
+						return confirmSent(ctx, client, sid, content)
 					}
 				}
 			}
@@ -164,7 +181,33 @@ func TypeAndSend(ctx context.Context, client *Client, sid, content string, assis
 	if err := client.Click(ctx, sid, sendID); err != nil {
 		return fmt.Errorf("tap send: %w", err)
 	}
-	return nil
+	return confirmSent(ctx, client, sid, content)
+}
+
+// confirmSent 确认消息真的发出：发送成功后 WhatsApp 会清空输入框。
+// 轮询输入框文本，仍残留原文说明发送键点击未生效（误点别处/按钮未使能）。
+// 输入框不可见或读不到文本时无法校验，按已发送放行（不影响正常路径）。
+func confirmSent(ctx context.Context, client *Client, sid, content string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return nil
+		}
+		using, value := splitSelector(whatsappSelectors.messageInput)
+		id, err := client.FindElement(ctx, sid, using, value)
+		if err != nil || id == "" {
+			return nil
+		}
+		t, err := client.ElementText(ctx, sid, id)
+		if err != nil {
+			return nil
+		}
+		if strings.TrimSpace(t) != strings.TrimSpace(content) {
+			return nil // 已清空（或内容已变化），视为发送成功
+		}
+		time.Sleep(600 * time.Millisecond)
+	}
+	return fmt.Errorf("send unconfirmed: 输入框内容仍残留，发送键点击未生效")
 }
 
 // createWhatsAppSession 按候选 bundle 自动识别（普通 WhatsApp / WhatsApp Business）。
@@ -188,7 +231,12 @@ func createWhatsAppSession(ctx context.Context, client *Client) (sid, bid string
 func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string) (isNew bool, err error) {
 	deeplink := "whatsapp://send?phone=" + digits
 	if err := client.OpenDeepLink(ctx, sid, deeplink, bid); err == nil {
-		return false, nil
+		// 深链 HTTP 成功 ≠ 会话已打开（老 iOS 不跳转/号码无效只弹窗）。
+		// 必须等到输入框出现且标题号码匹配才视为命中，否则继续走兜底，
+		// 避免停留在上一条明细的会话里把消息发给错误的收件人。
+		if chatOpenedFor(ctx, client, sid, digits, 8*time.Second) {
+			return false, nil
+		}
 	}
 	if err := gotoChatList(ctx, client, sid); err != nil {
 		return false, err
@@ -200,6 +248,25 @@ func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string
 		return true, nil
 	}
 	return false, fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
+}
+
+// chatOpenedFor 等待聊天页打开并校验归属：输入框出现且（标题含号码时）号码
+// 与目标一致才算命中；标题是联系人姓名（无号码可比）时输入框出现即视为打开。
+func chatOpenedFor(ctx context.Context, client *Client, sid, digits string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return false
+		}
+		if id, err := findElementBySelector(ctx, client, sid, whatsappSelectors.messageInput); err == nil && id != "" {
+			if t := digitsOf(ChatTitle(ctx, client, sid)); t != "" {
+				return t == digits
+			}
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
 }
 
 // openDefaultChat 不指定号码：当前已有打开的会话则直接使用，否则打开聊天列表第一个会话。
@@ -260,10 +327,16 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 	if err := client.TypeText(ctx, sid, sf, digits); err != nil {
 		return false
 	}
-	time.Sleep(2500 * time.Millisecond)
-
-	cellID, err := findElementBySelector(ctx, client, sid, whatsappContactCell)
-	if err != nil || cellID == "" {
+	// 老设备（iPhone 7 / iOS 15）搜索结果出得慢：先等 4s，未命中再补等 2s 重试一次。
+	cellID := ""
+	for _, wait := range []time.Duration{4 * time.Second, 2 * time.Second} {
+		time.Sleep(wait)
+		if id, err := findElementBySelector(ctx, client, sid, whatsappContactCell); err == nil && id != "" {
+			cellID = id
+			break
+		}
+	}
+	if cellID == "" {
 		return false
 	}
 	// 动作在 cell 右侧：先坐标点击，再尝试 cell 内动作文本。
