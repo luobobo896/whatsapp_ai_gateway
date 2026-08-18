@@ -88,6 +88,9 @@
   .btn{appearance:none;border:0;cursor:pointer;font-family:inherit;font-size:12px;font-weight:500;border-radius:6px;padding:5px 12px;color:#fff;background:var(--accent);transition:background .15s ease,opacity .15s ease}
   .btn:hover{background:var(--accent-hover)}
   .btn:disabled{opacity:.4;cursor:default}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .7s linear infinite}
+  .btn.ghost .spinner{border-color:color-mix(in srgb, var(--accent) 30%, transparent);border-top-color:var(--accent)}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .btn.ghost{background:transparent;color:var(--accent);border:1px solid color-mix(in srgb, var(--accent) 35%, transparent)}
   .btn.ghost:hover{background:var(--accent-weak)}
   .btn.ghost.danger{color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent)}
@@ -431,11 +434,18 @@ function showLogin(){
   setTimeout(() => target.focus(), 50);
 }
 function hideLogin(){
+  $('tenantPicker').style.display = 'none';
+  $('loginBtn').disabled = false; $('loginBtn').textContent = '登录';
+
   $('loginMask').classList.remove('open');
   $('loginPassword').value = '';
   $('loginErr').style.display = 'none';
 }
 async function login(){
+  const btn = $('loginBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>登录中…';
+  $('loginErr').style.display = 'none';
   try{
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email: $('loginEmail').value.trim(), password: $('loginPassword').value})});
     if(!r.ok){
@@ -457,6 +467,11 @@ async function login(){
     if (d.provision_error) toast('网关凭证签发失败：' + d.provision_error);
     refreshAll();
   }catch(e){ $('loginErr').textContent = '登录失败，请检查网络后重试'; $('loginErr').style.display = 'block'; }
+  finally{
+    if ($('tenantPicker').style.display !== 'block'){ // 弹租户选择时保持禁用，选择流程接管
+      btn.disabled = false; btn.textContent = '登录';
+    }
+  }
 }
 function showTenantPicker(tenants){
   $('tenantPicker').style.display = 'block';
@@ -467,13 +482,15 @@ function showTenantPicker(tenants){
     b.className = 'btn ghost';
     b.style.cssText = 'justify-content:flex-start;text-align:left';
     b.textContent = (t.name || t.id);
-    b.onclick = () => pickTenant(t.id, t.name || t.id);
+    b.onclick = () => pickTenant(t.id, t.name || t.id, b, box);
     box.appendChild(b);
   });
 }
-async function pickTenant(tenantId, tenantName){
-  $('tenantPicker').style.display = 'none';
-  $('loginBtn').disabled = true;
+async function pickTenant(tenantId, tenantName, btn, box){
+  // 选中项显示签发中并禁用全部选项，防重复点击
+  if (box) Array.from(box.children).forEach(b => b.disabled = true);
+  if (btn){ btn.innerHTML = '<span class="spinner"></span>' + tenantName + '（签发凭证中…）'; }
+  $('loginBtn').innerHTML = '<span class="spinner"></span>签发凭证中…';
   try{
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
       email: $('loginEmail').value.trim(),
@@ -481,7 +498,12 @@ async function pickTenant(tenantId, tenantName){
       tenant_id: tenantId,
     })});
     let d = {}; try{ d = await r.json(); }catch(e){}
-    if(!r.ok){ $('loginErr').textContent = d.error || '租户选择后登录失败'; $('loginErr').style.display = 'block'; return; }
+    if(!r.ok){
+      $('loginErr').textContent = d.error || '租户选择后登录失败'; $('loginErr').style.display = 'block';
+      if (box) Array.from(box.children).forEach(b => b.disabled = false);
+      $('loginBtn').textContent = '登录';
+      return;
+    }
     csrfToken = d.csrfToken || '';
     hideLogin();
     $('logoutBtn').style.display = '';
@@ -490,7 +512,9 @@ async function pickTenant(tenantId, tenantName){
     refreshAll();
   }catch(e){
     $('loginErr').textContent = '租户选择后登录失败，请重试'; $('loginErr').style.display = 'block';
-  }finally{ $('loginBtn').disabled = false; }
+  }finally{
+    $('loginBtn').disabled = false; $('loginBtn').textContent = '登录';
+  }
 }
 async function logout(){
   try{ await fetch('/api/logout', {method:'POST', headers:{'X-CSRF-Token': csrfToken}}); }catch(e){}
