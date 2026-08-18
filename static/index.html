@@ -469,6 +469,7 @@ async function login(){
     $('logoutBtn').style.display = '';
     // 登录成功但网关凭证签发失败：立即提示平台拒绝原因（否则云通道离线无从排查）
     if (d.provision_error) toast('网关凭证签发失败：' + d.provision_error);
+    await loadCloudCfg(true); // 登录后回填云通道设置表单（未登录时 checkSession 提前返回不会填充）
     refreshAll();
   }catch(e){ $('loginErr').textContent = '登录失败，请检查网络后重试'; $('loginErr').style.display = 'block'; }
   finally{
@@ -513,6 +514,7 @@ async function pickTenant(tenantId, tenantName, btn, box){
     $('logoutBtn').style.display = '';
     if (d.provision_error) toast('网关凭证签发失败：' + d.provision_error);
     else toast('已选择租户「' + tenantName + '」，凭证签发成功，云通道连接中');
+    await loadCloudCfg(true); // 登录后回填云通道设置表单（未登录时 checkSession 提前返回不会填充）
     refreshAll();
   }catch(e){
     $('loginErr').textContent = '租户选择后登录失败，请重试'; $('loginErr').style.display = 'block';
@@ -556,7 +558,7 @@ async function loadCloud(){
     $('stCloud').textContent = on ? '在线' : (retrying ? '重连中' : '离线');
     $('stCloudDot').className = 'dot ' + (on ? 'on' : (retrying ? 'busy' : 'off'));
     $('stPending').textContent = (c.executor?.pending_tasks?.length ?? 0);
-    $('footerWs').textContent = c.ws_url ? '云通道 ' + c.ws_url : '';
+    $('footerWs').textContent = c.ws_url ? '云通道 ' + cloudDomain(c.ws_url) : '';
     const who = c.tenant_name ? (c.tenant_name + (c.user_name ? ' / ' + c.user_name : '')) : '';
     $('brandSub').textContent = (c.gateway_name ? c.gateway_name : '本地网关控制台') + (who ? ' · ' + who : '') + (c.connected_at ? ' · 连接于 ' + c.connected_at : '');
     // 只有需要人工干预的凭证类错误才弹 toast；同一条错误跨刷新也只弹一次（sessionStorage 记忆）。
@@ -591,11 +593,18 @@ async function cloudPillClick(){
 
 /* ---------- 云通道设置 ---------- */
 let cloudCfgLoaded = false;
+// 从完整 WS 地址提取用户可读的域名（含端口）用于展示；保存时后端会自动补全协议与标准路径。
+function cloudDomain(u){
+  if(!u) return '';
+  try{ return new URL(u).host; }catch(e){ /* 裸域名等非法 URL 走兜底 */
+    return u.replace(/^(wss?|https?):\/\//,'').split('/')[0];
+  }
+}
 async function loadCloudCfg(force){
   if (cloudCfgLoaded && !force) return; // 用户正在编辑时不被 5s 轮询覆盖
   try{
     const c = await (await fetch('/api/cloud/config')).json();
-    $('cloudWsUrl').value = c.ws_url || '';
+    $('cloudWsUrl').value = cloudDomain(c.ws_url);
     $('cloudGwName').value = c.gateway_name || '';
     $('cloudTokenFlag').textContent = c.token_configured ? '· 凭证已获取' : '· 登录后自动获取凭证';
     cloudCfgLoaded = true;
