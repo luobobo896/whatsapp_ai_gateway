@@ -136,13 +136,27 @@ func devicectlDevices() []DiscoveredDevice {
 }
 
 // privateSubnets 返回本机所有私网 IPv4 /24 网段（10/8、172.16/12、192.168/16）。
-func privateSubnets() []string {
+func privateSubnets() []string { return subnetsOf(nil) }
+
+// physicalSubnets 返回物理网卡（macOS en*，含 USB 网卡）所在私网 /24。
+// 手机与网关通常同接一个物理网络，优先扫这里可把每轮扫描从全网段数秒降到 ~1s；
+// VPN/代理 TUN、虚拟机桥等虚拟网卡（utun/bridge/awdl/anpi/vmenet）只在兜底全网段扫描时参与。
+// 无 en* 网卡的环境（Linux 等）回退全部私网网段。
+func physicalSubnets() []string {
+	return subnetsOf(func(name string) bool { return strings.HasPrefix(name, "en") })
+}
+
+// subnetsOf 收集满足 name 过滤条件的接口（nil=不过滤）上的私网 /24 网段。
+func subnetsOf(keep func(name string) bool) []string {
 	ifs, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
 	set := map[string]bool{}
 	for _, ifc := range ifs {
+		if keep != nil && !keep(ifc.Name) {
+			continue
+		}
 		addrs, err := ifc.Addrs()
 		if err != nil {
 			continue
@@ -191,14 +205,19 @@ type FoundWDA struct {
 	Model      string
 }
 
-// ScanLANWDA 并发扫描本机局域网 8100 端口，返回就绪的 WDA。
+// ScanLANWDA 并发扫描本机全部私网 /24 的 8100 端口，返回就绪的 WDA。
 func ScanLANWDA(timeout time.Duration) []FoundWDA {
+	return scanSubnets(privateSubnets(), timeout)
+}
+
+// scanSubnets 并发扫描指定网段列表的 8100 端口（物理网卡快路径与全网段共用）。
+func scanSubnets(subs []string, timeout time.Duration) []FoundWDA {
 	httpClient := &http.Client{Timeout: timeout}
 	var mu sync.Mutex
 	var res []FoundWDA
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 64)
-	for _, sub := range privateSubnets() {
+	for _, sub := range subs {
 		_, ipnet, err := net.ParseCIDR(sub)
 		if err != nil {
 			continue

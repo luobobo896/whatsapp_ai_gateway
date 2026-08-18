@@ -44,6 +44,7 @@ func (g *Gateway) WatchdogLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-g.kickWatchdog: // 激活等事件触发：立即进入下一轮（IP 自动发现不等周期）
 		case <-time.After(interval):
 		}
 	}
@@ -162,40 +163,167 @@ func (g *Gateway) deviceIdentity(ip string, port int) (uuid, name string) {
 	return uuid, name
 }
 
-// autoAssignIP 对「已激活但未配置 IP」的设备自动探测局域网 WDA。
-func (g *Gateway) autoAssignIP() error {
-	cfg := g.Cfg
-	known := map[string]bool{}
-	for _, d := range cfg.Devices {
-		if d.IP != "" {
-			known[d.IP] = true
+// pendingIPDev 是一台待分配 IP 的设备（已激活、WDA 运行中、无 IP）。
+type pendingIPDev struct {
+	udid, vendorUUID, selfIP string // selfIP=经 USB 隧道问 WDA /status 得到的手机自报 Wi-Fi IP
+}
+
+// decideIPAssignments 计算待分配设备的 IP（纯逻辑，可单测）。分配优先级：
+//  1. 隧道自报 IP：私网、未被其它设备占用 → 直接采纳（手机自述地址，无认错风险）；
+//  2. 扫描候选按 vendor_uuid 强匹配认领（候选须无主）；
+//  3. 剩余恰好 1 台待分配且恰有 1 个无主候选 → 唯一性分配（多候选时仍不猜，防认错手机）。
+func decideIPAssignments(pending []pendingIPDev, found []FoundWDA, owner map[string]string) map[string]string {
+	res := map[string]string{}
+	claimed := map[string]bool{} // 本轮已认领的候选 IP
+	unownedCands := 0
+	for _, f := range found {
+		if f.IP != "" && f.IP != "127.0.0.1" {
+			if _, taken := owner[f.IP]; !taken {
+				unownedCands++
+			}
 		}
 	}
-	// 未配置 IP 且 WDA 已运行的设备
-	var pending []string
-	for _, d := range cfg.Devices {
-		if d.IP == "" && g.WDA.Running(d.UDID) {
-			pending = append(pending, d.UDID)
+	// 1) 隧道自报
+	var rest []pendingIPDev
+	for _, p := range pending {
+		ip := p.selfIP
+		if p4 := net.ParseIP(ip); ip != "" && p4 != nil && p4.To4() != nil && isPrivateIPv4(p4.To4()) {
+			if _, taken := owner[ip]; !taken && !claimed[ip] {
+				res[p.udid] = ip
+				claimed[ip] = true
+				continue
+			}
 		}
+		rest = append(rest, p)
+	}
+	// 2) vendor_uuid 强匹配
+	var left []pendingIPDev
+	for _, p := range rest {
+		matched := false
+		if p.vendorUUID != "" {
+			for _, f := range found {
+				if f.UUID == p.vendorUUID && f.IP != "" && f.IP != "127.0.0.1" && !claimed[f.IP] {
+					if _, taken := owner[f.IP]; !taken {
+						res[p.udid] = f.IP
+						claimed[f.IP] = true
+						matched = true
+						break
+					}
+				}
+			}
+		}
+		if !matched {
+			left = append(left, p)
+		}
+	}
+	// 3) 唯一性规则：恰好 1 台待分配 且 恰好 1 个无主候选
+	if len(left) == 1 && unownedCands == 1 {
+		for _, f := range found {
+			if f.IP == "" || f.IP == "127.0.0.1" || claimed[f.IP] {
+				continue
+			}
+			if _, taken := owner[f.IP]; !taken {
+				res[left[0].udid] = f.IP
+				break
+			}
+		}
+	}
+	return res
+}
+
+// autoAssignIP 对「已激活但未配置 IP」的设备自动分配 Wi-Fi IP。
+// 优先 USB 隧道直达（手机经 WDA 自报 IP，秒级完成、无认错风险，顺带记录 vendor_uuid/name）；
+// 无隧道的设备走局域网扫描兜底：先物理网卡网段（快路径，避开 VPN/TUN 空网段），
+// 无无主候选再全网段扫描。
+func (g *Gateway) autoAssignIP() error {
+	cfg := g.Cfg
+	owner := map[string]string{} // ip -> udid：已配置设备的 IP 归属，防止被弱匹配抢占
+	for _, d := range cfg.Devices {
+		if d.UDID != "" && d.IP != "" {
+			owner[d.IP] = d.UDID
+		}
+	}
+	var pending []pendingIPDev
+	dirty := false
+	for i := range cfg.Devices {
+		d := &cfg.Devices[i]
+		if d.UDID == "" || d.IP != "" || !g.WDA.Running(d.UDID) {
+			continue
+		}
+		p := pendingIPDev{udid: d.UDID, vendorUUID: d.VendorUUID}
+		// USB 隧道在：经隧道记录设备身份，并取 WDA /status 的 ios.ip 作为自报 IP。
+		// WDA 刚拉起可能还没监听：短暂重试，让激活后踢进来的一轮当场完成分配。
+		if a := TunnelAddr(d.UDID); a != "" {
+			if host, portStr, err := net.SplitHostPort(a); err == nil {
+				port, _ := strconv.Atoi(portStr)
+				var h WDAHealth
+				for i := 0; i < 3; i++ {
+					h = CheckWDA(host, port, 2*time.Second)
+					if h.OK {
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+				if h.OK {
+					if d.VendorUUID == "" || d.Name == "" {
+						uuid, name := g.deviceIdentity(host, port)
+						if d.VendorUUID == "" && uuid != "" {
+							d.VendorUUID = uuid
+							dirty = true
+							slog.Info("device recorded vendor_uuid (tunnel)", "udid", d.UDID[:8], "uuid", uuid)
+						}
+						if d.Name == "" && name != "" {
+							d.Name = name
+							dirty = true
+						}
+					}
+					if h.IP != "" {
+						p.selfIP = h.IP
+					}
+				}
+			}
+		}
+		pending = append(pending, p)
+	}
+	if dirty {
+		_ = cfg.Save()
 	}
 	if len(pending) == 0 {
 		return nil
 	}
-	found := ScanLANWDA(500 * time.Millisecond)
-	var cands []FoundWDA
-	for _, f := range found {
-		if !known[f.IP] && f.IP != "127.0.0.1" {
-			cands = append(cands, f)
+
+	assign := decideIPAssignments(pending, nil, owner)
+	if len(assign) < len(pending) {
+		// 还有未分配：扫描兜底。先物理网卡网段（快路径），无无主候选再全网段。
+		found := scanSubnets(physicalSubnets(), 500*time.Millisecond)
+		hasUnowned := false
+		for _, f := range found {
+			if f.IP != "" && f.IP != "127.0.0.1" {
+				if _, taken := owner[f.IP]; !taken {
+					hasUnowned = true
+					break
+				}
+			}
+		}
+		if !hasUnowned {
+			found = ScanLANWDA(500 * time.Millisecond)
+		}
+		for udid, ip := range decideIPAssignments(pending, found, owner) {
+			assign[udid] = ip
 		}
 	}
-	if len(pending) == 1 && len(cands) == 1 {
-		if d := cfg.Device(pending[0]); d != nil {
-			d.IP = cands[0].IP
+
+	for udid, ip := range assign {
+		if d := cfg.Device(udid); d != nil {
+			d.IP = ip
 			d.Port = 8100
 			d.AutoReactivate = true
-			_ = cfg.Save()
-			slog.Info("auto-assigned WDA IP", "udid", pending[0][:8], "ip", cands[0].IP)
+			dirty = true
+			slog.Info("auto-assigned WDA IP", "udid", udid[:8], "ip", ip)
 		}
+	}
+	if dirty {
+		_ = cfg.Save()
 	}
 	return nil
 }

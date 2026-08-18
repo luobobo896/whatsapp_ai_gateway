@@ -42,6 +42,7 @@ type Gateway struct {
 	cloudConn *websocket.Conn // 当前云通道连接（RestartCloud 用）
 
 	cloudReconnect chan struct{} // 触发 CloudLoop 立即重连（登录自动签发凭证后）
+	kickWatchdog   chan struct{} // 触发看护循环立即跑一轮（激活成功后立刻发现 IP，不等 30s 周期）
 }
 
 // New 构造网关。
@@ -76,6 +77,15 @@ func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *Ea
 		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
 		serials: map[string]string{}, serialTried: map[string]time.Time{},
 		lastStatus: map[string]string{}, cloudReconnect: make(chan struct{}, 1),
+		kickWatchdog: make(chan struct{}, 1),
+	}
+}
+
+// KickWatchdog 非阻塞触发看护循环立即跑一轮（激活成功后立刻发现 IP）。
+func (g *Gateway) KickWatchdog() {
+	select {
+	case g.kickWatchdog <- struct{}{}:
+	default:
 	}
 }
 

@@ -273,6 +273,7 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			}
 			// 等待就绪（最多 60s；未就绪返回 starting，由前端轮询/看护循环继续跟进）
 			res := g.waitWDAReady(udid, port, 60*time.Second)
+			g.KickWatchdog() // 立即跑一轮看护：USB 隧道问 WDA 自报 IP，秒级完成自动分配
 			writeJSON(w, res)
 		case "stop":
 			dev := g.Cfg.Device(udid)
