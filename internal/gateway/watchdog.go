@@ -120,6 +120,14 @@ func (g *Gateway) watchOnce() {
 				}
 				continue
 			}
+			// 复核：瞬时抖动（USB 隧道断/网络闪断）会让探活误判离线，此时拉起
+			// xcodebuild 会与手机端仍在运行的 WDA 抢占冲突（exit 65 反复失败）。
+			// 再探一次，健康则跳过重激活，沿用手机端存活的 WDA。
+			if h2 := g.checkWDA(dev); h2.OK {
+				applyHealth(dev, h2)
+				slog.Info("WDA healthy on recheck, skip reactivation", "udid", dev.UDID[:8], "ip", dev.IP)
+				continue
+			}
 			slog.Info("WDA down, reactivating", "udid", dev.UDID[:8], "ip", dev.IP)
 			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID); err != nil {
 				slog.Error("reactivate failed", "udid", dev.UDID[:8], "error", err)
