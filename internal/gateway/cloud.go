@@ -102,6 +102,18 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 				name = strings.SplitN(host, ".", 2)[0]
 			}
 		}
+		// 凭证未签发（全新安装未登录）不空拨：避免 4001 反复被拒，在首次登录/
+		// 选租户过程中弹出误导性的"云通道错误"弹窗（也消除服务端无效凭证日志噪音）。
+		// 登录自动签发后经 cloudReconnect 立即拨号；此处仅低频轮询兜底。
+		if token == "" {
+			select {
+			case <-ctx.Done():
+				return
+			case <-g.cloudReconnect:
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
 		start := time.Now()
 		err := g.cloudSessionSafe(ctx, url, token, name)
 		g.SetConnected(false)
