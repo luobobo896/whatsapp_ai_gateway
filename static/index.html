@@ -206,7 +206,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <span class="pill" id="cloudPill"><span class="dot off" id="cloudDot"></span><span id="cloudText">连接中…</span></span>
+      <button class="pill" id="cloudPill" onclick="cloudPillClick()" title="点击恢复连接"><span class="dot off" id="cloudDot"></span><span id="cloudText">连接中…</span></button>
       <button class="pill" id="etPill" onclick="showView('network')">
         <span class="dot off" id="etPillDot"></span>组网
         <span id="etPillText">未启用</span>
@@ -355,8 +355,9 @@
   <div class="modal" style="width:min(380px, calc(100vw - 40px))">
     <h3 style="margin:0 0 4px">网关管理登录</h3>
     <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">使用 HK 平台账号登录（同一账号体系）</p>
-    <input type="email" id="loginEmail" placeholder="邮箱" style="width:100%;box-sizing:border-box;margin-bottom:10px" onkeydown="if(event.key==='Enter')login()">
-    <input type="password" id="loginPassword" placeholder="密码" style="width:100%;box-sizing:border-box" onkeydown="if(event.key==='Enter')login()">
+    <div id="loginHint" style="font-size:12px;color:var(--accent);margin:-8px 0 12px;display:none"></div>
+    <input type="email" id="loginEmail" autocomplete="username" placeholder="邮箱" style="width:100%;box-sizing:border-box;margin-bottom:10px" onkeydown="if(event.key==='Enter')login()">
+    <input type="password" id="loginPassword" autocomplete="current-password" placeholder="密码" style="width:100%;box-sizing:border-box" onkeydown="if(event.key==='Enter')login()">
     <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px">
       <button class="btn ghost" onclick="hideLogin()">取消</button>
       <button class="btn" id="loginBtn" onclick="login()">登录</button>
@@ -426,7 +427,10 @@ async function api(path, opts = {}){
   if(r.status === 401){ showLogin(); throw new Error('unauthorized'); }
   return r;
 }
-function showLogin(){
+function showLogin(hint){
+  const h = $('loginHint');
+  if (hint){ h.textContent = hint; h.style.display = 'block'; } else { h.style.display = 'none'; }
+
   $('loginMask').classList.add('open');
   $('loginErr').style.display = 'none';
   const e = $('loginEmail');
@@ -568,6 +572,21 @@ async function loadCloud(){
     $('cloudText').textContent = '云状态读取失败';
     $('cloudDot').className = 'dot err';
   }
+}
+
+async function cloudPillClick(){
+  try{
+    const c = await (await fetch('/api/cloud')).json();
+    if (c.connected){ toast('云通道已连接'); return; }
+    const s = await (await fetch('/api/session')).json();
+    const noToken = c.token_configured === false;
+    const revoked = /吊销|4005/.test(c.last_error || '');
+    if (noToken || revoked || !s.authenticated){
+      showLogin(noToken ? '云通道缺少网关凭证，登录即可自动签发恢复连接' : (revoked ? '网关凭证已被平台吊销，请重新登录签发' : '登录以恢复云通道连接'));
+      return;
+    }
+    toast((c.last_error || '云通道未连接') + '，自动重连中');
+  }catch(e){ toast('云状态读取失败'); }
 }
 
 /* ---------- 云通道设置 ---------- */
