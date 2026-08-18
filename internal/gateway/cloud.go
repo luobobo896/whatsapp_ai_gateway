@@ -278,6 +278,14 @@ readLoop:
 			readErr = nil
 			break readLoop
 		case "easytier:config":
+			// 平台「组网」页下发：保存配置并自动启动/重启（无人值守，不弹授权框）。
+			if g.EasyTier != nil {
+				if err := g.EasyTier.Apply(msg.Payload); err != nil {
+					slog.Warn("easytier:config apply failed", "error", err)
+				} else {
+					slog.Info("easytier:config applied", "running", g.EasyTier.Running())
+				}
+			}
 		case "model:config":
 			var cfg LLMConfig
 			if err := json.Unmarshal(msg.Payload, &cfg); err != nil {
@@ -286,13 +294,6 @@ readLoop:
 				slog.Warn("model:config apply failed", "error", err)
 			} else {
 				slog.Info("model:config applied", "model", cfg.Model, "enabled", cfg.BaseURL != "" && cfg.Model != "")
-			}
-			if g.EasyTier != nil {
-				if err := g.EasyTier.Apply(msg.Payload); err != nil {
-					slog.Warn("easytier:config apply failed", "error", err)
-				} else {
-					slog.Info("easytier:config applied", "running", g.EasyTier.Running())
-				}
 			}
 		}
 	}
