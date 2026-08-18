@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -95,7 +96,11 @@ func (g *Gateway) CloudLoop(ctx context.Context) {
 		token := g.Cfg.Cloud.Token
 		name := g.Cfg.Cloud.GatewayName
 		if name == "" {
-			name, _ = os.Hostname()
+			// 与注册（provisionGatewayToken）同策略去域后缀：平台校验 hello 帧的
+			// 网关名必须与凭证注册名一致，裸 hostname 带 .local 会被 4004 踢掉。
+			if host, err := os.Hostname(); err == nil {
+				name = strings.SplitN(host, ".", 2)[0]
+			}
 		}
 		start := time.Now()
 		err := g.cloudSessionSafe(ctx, url, token, name)
