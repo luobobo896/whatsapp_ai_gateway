@@ -144,24 +144,8 @@ func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid str
 // TypeAndSend 在已打开的会话中输入内容并点发送（发送键找不到时可用视觉/LLM 兜底）。
 // 点击发送后校验输入框已清空，未清空说明点击未生效，返回错误避免误报 sent。
 func TypeAndSend(ctx context.Context, client *Client, sid, content string, assist SendAssist) error {
-	inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, 15*time.Second)
-	if err != nil {
-		// 视觉兜底：配置了 LLM 时截图定位输入框坐标点击，再短等一次输入框出现。
-		if assist != nil {
-			if png, serr := client.Screenshot(ctx, sid); serr == nil {
-				if x, y, lerr := assist.LocateTextInput(ctx, png); lerr == nil {
-					if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
-						inputID, err = waitElement(ctx, client, sid, whatsappSelectors.messageInput, 5*time.Second)
-					}
-				}
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("find message input: %w", err)
-		}
-	}
-	if err := client.TypeText(ctx, sid, inputID, content); err != nil {
-		return fmt.Errorf("type content: %w", err)
+	if err := ensureTyped(ctx, client, sid, content, assist); err != nil {
+		return err
 	}
 
 	sendSelectors := append([]string{whatsappSelectors.sendButton}, whatsappSendButtonFallbacks...)
@@ -182,6 +166,78 @@ func TypeAndSend(ctx context.Context, client *Client, sid, content string, assis
 		return fmt.Errorf("tap send: %w", err)
 	}
 	return confirmSent(ctx, client, sid, content)
+}
+
+// transientCallErr 判定 WDA 请求是否为超时/连接类瞬时故障（页面过渡期元素
+// 引用失效会让 value 请求挂满超时，重找元素即可自愈）。
+func transientCallErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "context deadline exceeded") ||
+		strings.Contains(s, "Client.Timeout") ||
+		strings.Contains(s, "timeout") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "EOF") ||
+		strings.Contains(s, "timed out")
+}
+
+// ensureTyped 确保输入框内恰好是 content（幂等，带一次自愈重试）：
+//   - 已有相同文本（上次 type 实际已生效/草稿恰好相等）→ 直接进入发送，避免重复输入；
+//   - 有残留草稿 → 先清空再打；
+//   - type 超时/瞬时失败 → 等 1.5s 让聊天页加载稳定（深链跳转后姓名未显示期间
+//     元素引用易失效），重新查找输入框并点按拉起键盘后重打一次。
+func ensureTyped(ctx context.Context, client *Client, sid, content string, assist SendAssist) error {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("type content: %w", ctx.Err())
+			case <-time.After(1500 * time.Millisecond):
+			}
+		}
+		inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, 15*time.Second)
+		if err != nil {
+			// 视觉兜底：配置了 LLM 时截图定位输入框坐标点击，再短等一次输入框出现。
+			if assist != nil && attempt == 0 {
+				if png, serr := client.Screenshot(ctx, sid); serr == nil {
+					if x, y, lerr := assist.LocateTextInput(ctx, png); lerr == nil {
+						if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
+							inputID, err = waitElement(ctx, client, sid, whatsappSelectors.messageInput, 5*time.Second)
+						}
+					}
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("find message input: %w", err)
+			}
+		}
+		// 幂等防护：读输入框当前文本，避免把内容打成两份。
+		if t, terr := client.ElementText(ctx, sid, inputID); terr == nil {
+			ts := strings.TrimSpace(t)
+			if ts == strings.TrimSpace(content) {
+				return nil
+			}
+			if ts != "" {
+				_ = client.ClearElement(ctx, sid, inputID)
+			}
+		}
+		if attempt > 0 {
+			// 重试前点按输入框聚焦（过渡期键盘可能未拉起，value 输入会挂起）。
+			_ = client.Click(ctx, sid, inputID)
+		}
+		if err := client.TypeText(ctx, sid, inputID, content); err != nil {
+			if !transientCallErr(err) {
+				return fmt.Errorf("type content: %w", err)
+			}
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("type content: %w", lastErr)
 }
 
 // confirmSent 确认消息真的发出：发送成功后 WhatsApp 会清空输入框。

@@ -185,6 +185,13 @@ func (c *Client) TypeText(ctx context.Context, sessionID, elementID, text string
 	return err
 }
 
+// ClearElement 清空元素内容（输入框残留草稿时先清再打，防内容重复）。
+func (c *Client) ClearElement(ctx context.Context, sessionID, elementID string) error {
+	_, err := c.do(ctx, http.MethodPost,
+		"/session/"+url.PathEscape(sessionID)+"/element/"+url.PathEscape(elementID)+"/clear", nil)
+	return err
+}
+
 // Source 返回当前页面 accessibility 树（用于调试/校准选择器）。
 func (c *Client) Source(ctx context.Context, sessionID string) (string, error) {
 	data, err := c.do(ctx, http.MethodGet, "/session/"+url.PathEscape(sessionID)+"/source", nil)

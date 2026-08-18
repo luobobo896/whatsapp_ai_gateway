@@ -100,3 +100,93 @@ func TestChatOpenedForTitleMatch(t *testing.T) {
 		t.Fatal("contact-name title should open")
 	}
 }
+
+// typedFake 扩展 fakeWDA：可注入 value 首次挂起、统计 clear/click/value 调用。
+type typedFake struct {
+	fakeWDA
+	valueOK   atomic.Bool // false=首次 /value 挂起模拟过渡态超时
+	valueDone atomic.Bool
+	valueCnt  atomic.Int64
+	clearCnt  atomic.Int64
+	clickCnt  atomic.Int64
+}
+
+func (f *typedFake) handler(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/value") && r.Method == http.MethodPost:
+		f.valueCnt.Add(1)
+		if !f.valueDone.Load() && !f.valueOK.Load() {
+			f.valueDone.Store(true)
+			time.Sleep(1200 * time.Millisecond) // 挂起超过客户端超时 → Client.Timeout
+			return
+		}
+		f.text.Store("你好") // 打入成功
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"value": nil})
+	case strings.HasSuffix(r.URL.Path, "/clear") && r.Method == http.MethodPost:
+		f.clearCnt.Add(1)
+		f.text.Store("")
+		w.WriteHeader(http.StatusOK)
+	case strings.Contains(r.URL.Path, "/element/input-1/click") && r.Method == http.MethodPost:
+		f.clickCnt.Add(1)
+		w.WriteHeader(http.StatusOK)
+	default:
+		f.fakeWDA.handler(w, r)
+	}
+}
+
+// TestEnsureTypedRetriesTransientTimeout 首次 type 挂起超时 → 重找元素重试成功。
+func TestEnsureTypedRetriesTransientTimeout(t *testing.T) {
+	f := &typedFake{}
+	f.text.Store("") // 输入框为空
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	c := NewClient(srv.URL, 500*time.Millisecond) // 客户端超时 0.5s，1.2s 挂起必超时
+
+	if err := ensureTyped(context.Background(), c, "s1", "你好", nil); err != nil {
+		t.Fatalf("瞬时超时应自愈重试成功: %v", err)
+	}
+	if f.valueCnt.Load() != 2 {
+		t.Fatalf("value 调用 = %d, want 2（首次超时+重试成功）", f.valueCnt.Load())
+	}
+	if f.clickCnt.Load() == 0 {
+		t.Fatal("重试前应点按输入框拉起键盘")
+	}
+}
+
+// TestEnsureTypedIdempotentSkip 输入框已有相同文本（上次已打入）→ 不再重复输入。
+func TestEnsureTypedIdempotentSkip(t *testing.T) {
+	f := &typedFake{}
+	f.valueOK.Store(true)
+	f.text.Store("你好") // 已有相同内容
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	c := NewClient(srv.URL, 2*time.Second)
+
+	if err := ensureTyped(context.Background(), c, "s1", "你好", nil); err != nil {
+		t.Fatalf("幂等跳过应成功: %v", err)
+	}
+	if f.valueCnt.Load() != 0 {
+		t.Fatalf("已有相同文本不应再次 type（防重复），value = %d", f.valueCnt.Load())
+	}
+}
+
+// TestEnsureTypedClearsDraft 残留草稿 → 先清空再打。
+func TestEnsureTypedClearsDraft(t *testing.T) {
+	f := &typedFake{}
+	f.valueOK.Store(true)
+	f.text.Store("旧草稿") // 残留
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	c := NewClient(srv.URL, 2*time.Second)
+
+	if err := ensureTyped(context.Background(), c, "s1", "你好", nil); err != nil {
+		t.Fatalf("清残留后应打入成功: %v", err)
+	}
+	if f.clearCnt.Load() != 1 {
+		t.Fatalf("应清空一次残留草稿, clear = %d", f.clearCnt.Load())
+	}
+	if f.valueCnt.Load() != 1 || f.text.Load() != "你好" {
+		t.Fatalf("应打入新内容, value=%d text=%v", f.valueCnt.Load(), f.text.Load())
+	}
+}
