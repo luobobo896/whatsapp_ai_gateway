@@ -2,13 +2,10 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,6 +123,7 @@ type Executor struct {
 	llm        *LLMClient
 	llmMu      sync.RWMutex
 	resultsDir string
+	store      *resultsStore // 明细/汇总/统计持久化（<resultsDir>/results.db，SQLite）
 
 	mu      sync.Mutex
 	queues  map[string]chan TaskDispatch
@@ -194,6 +192,7 @@ func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir str
 		metricsHistory: map[string]Metrics{},
 		now:            time.Now,
 	}
+	e.store = openResultsStore(resultsDir)
 	e.loadMetrics()
 	return e
 }
@@ -213,20 +212,12 @@ func (e *Executor) llmClient() *LLMClient {
 	return e.llm
 }
 
-func (e *Executor) metricsFilePath() string {
-	return filepath.Join(e.resultsDir, "metrics.json")
-}
-
-// loadMetrics 读入历史统计。落盘数据标注的日期保持原样（跨天归档由下次
-// recordMetric 惰性完成），避免启动时刻与数据日期不一致时误归档。
+// loadMetrics 读入历史统计（SQLite results.db metrics 表）。
+// 落盘数据标注的日期保持原样（跨天归档由下次 recordMetric 惰性完成），
+// 避免启动时刻与数据日期不一致时误归档。
 func (e *Executor) loadMetrics() {
-	b, err := os.ReadFile(e.metricsFilePath())
-	if err != nil {
-		return
-	}
-	var f metricsFileState
-	if json.Unmarshal(b, &f) != nil {
-		slog.Warn("metrics file corrupted, ignoring", "path", e.metricsFilePath())
+	f, ok := e.store.loadMetricsState()
+	if !ok {
 		return
 	}
 	if f.History != nil {
@@ -264,20 +255,11 @@ func (e *Executor) foldDayLocked(day string) {
 	e.metrics = map[string]Metrics{}
 }
 
-// persistMetricsLocked 原子写盘（tmp+rename），失败仅告警不影响发送。
+// persistMetricsLocked 落库（SQLite），失败仅告警不影响发送。
 func (e *Executor) persistMetricsLocked() {
-	if err := os.MkdirAll(e.resultsDir, 0o755); err != nil {
-		return
-	}
 	f := metricsFileState{Day: e.metricsDay, Devices: e.metrics, History: e.metricsHistory}
-	b, err := json.Marshal(f)
-	if err != nil {
-		return
-	}
-	p := e.metricsFilePath()
-	tmp := p + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) != nil || os.Rename(tmp, p) != nil {
-		slog.Warn("metrics persist failed", "path", p)
+	if err := e.store.saveMetricsState(f); err != nil {
+		slog.Warn("metrics persist failed", "error", err)
 	}
 }
 
@@ -844,9 +826,9 @@ func parseHM(s string) int {
 	return h*60 + m
 }
 
-// ---- 本地持久化（at-least-once）----
+// ---- 本地持久化（at-least-once，SQLite results.db）----
 
-// itemRecord 是 results/<task_id>.json 单条明细的落盘结构（旧文件缺字段读为零值，向后兼容）。
+// itemRecord 是单条明细的落盘结构（与旧 JSON 文件兼容，导入沿用）。
 type itemRecord struct {
 	Phone       string `json:"phone"`
 	Status      string `json:"status"`
@@ -862,26 +844,8 @@ type itemRecord struct {
 	NewSession  bool   `json:"new_session,omitempty"`
 }
 
-func (e *Executor) resultFile(taskID string) string {
-	return filepath.Join(e.resultsDir, taskID+".json")
-}
-
-// metaFile 任务级汇总落盘路径（<task_id>.meta.json）。
-func (e *Executor) metaFile(taskID string) string {
-	return filepath.Join(e.resultsDir, taskID+".meta.json")
-}
-
 func (e *Executor) persisted(taskID, itemID string) bool {
-	b, err := os.ReadFile(e.resultFile(taskID))
-	if err != nil {
-		return false
-	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal(b, &m) != nil {
-		return false
-	}
-	_, ok := m[itemID]
-	return ok
+	return e.store.itemPersisted(taskID, itemID)
 }
 
 // finishItem 落盘并上报单条明细（先落盘后上报，断网不丢）。
@@ -895,34 +859,19 @@ func (e *Executor) finishItem(r ItemResult) {
 }
 
 func (e *Executor) persistItem(r ItemResult) {
-	if err := os.MkdirAll(e.resultsDir, 0o755); err != nil {
-		return
-	}
-	p := e.resultFile(r.TaskID)
-	m := map[string]itemRecord{}
-	if b, err := os.ReadFile(p); err == nil {
-		_ = json.Unmarshal(b, &m)
-	}
-	m[r.ItemID] = itemRecord{
+	_ = e.store.putItem(r.TaskID, r.ItemID, itemRecord{
 		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
 		Udid: r.Udid, Serial: r.Serial, DeviceName: r.DeviceName, ConnType: r.ConnType,
 		Content: r.Content, ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
-	}
-	b, _ := json.Marshal(m)
-	tmp := p + ".tmp"
-	_ = os.WriteFile(tmp, b, 0o600)
-	_ = os.Rename(tmp, p)
+	}, e.now())
 }
 
-// finishTask 任务收口：按已落盘明细统计，写 meta 并上行 task:summary（meta 落盘后队列满可丢，重连补报）。
+// finishTask 任务收口：按已落盘明细统计，写 meta 并上行 task:summary（meta 落库后队列满可丢，重连补报）。
 func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, status, reason string) {
 	if status == "" {
 		status = taskDone
 	}
-	m := map[string]itemRecord{}
-	if b, err := os.ReadFile(e.resultFile(t.TaskID)); err == nil {
-		_ = json.Unmarshal(b, &m)
-	}
+	m := e.readItems(t.TaskID)
 	var ok, fail, cancel int
 	for _, r := range m {
 		switch r.Status {
@@ -942,13 +891,8 @@ func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, stat
 		StartAt: start.Format(time.RFC3339), EndAt: end.Format(time.RFC3339),
 		DurationMs: end.Sub(start).Milliseconds(), Reason: reason,
 	}
-	if err := os.MkdirAll(e.resultsDir, 0o755); err == nil {
-		b, _ := json.Marshal(s)
-		p := e.metaFile(t.TaskID)
-		tmp := p + ".tmp"
-		if os.WriteFile(tmp, b, 0o600) == nil {
-			_ = os.Rename(tmp, p)
-		}
+	if err := e.store.putMeta(s); err != nil {
+		slog.Warn("task meta persist failed", "task", s.TaskID, "error", err)
 	}
 	select {
 	case e.SummaryQ <- s:
@@ -959,24 +903,12 @@ func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, stat
 
 // readItems 读入某任务的全部已落盘明细。
 func (e *Executor) readItems(taskID string) map[string]itemRecord {
-	m := map[string]itemRecord{}
-	if b, err := os.ReadFile(e.resultFile(taskID)); err == nil {
-		_ = json.Unmarshal(b, &m)
-	}
-	return m
+	return e.store.items(taskID)
 }
 
 // readSummary 读入某任务已落盘的汇总（无则返回 nil）。
 func (e *Executor) readSummary(taskID string) *TaskSummary {
-	b, err := os.ReadFile(e.metaFile(taskID))
-	if err != nil {
-		return nil
-	}
-	var s TaskSummary
-	if json.Unmarshal(b, &s) != nil || s.TaskID == "" {
-		return nil
-	}
-	return &s
+	return e.store.meta(taskID)
 }
 
 // TaskListItem 是 /api/tasks 的列表项。
@@ -993,39 +925,14 @@ type TaskListItem struct {
 
 // TaskList 返回本地已持久化任务（按更新时间倒序，最多 100 个）。
 func (e *Executor) TaskList() []TaskListItem {
-	entries, err := os.ReadDir(e.resultsDir)
-	if err != nil {
-		return nil
-	}
 	var out []TaskListItem
-	for _, ent := range entries {
-		if ent.IsDir() || !isTaskResultsFile(ent.Name()) {
-			continue
-		}
-		taskID := ent.Name()[:len(ent.Name())-len(".json")]
-		item := TaskListItem{TaskID: taskID}
-		if s := e.readSummary(taskID); s != nil {
+	for _, t := range e.store.taskIDsByUpdate(100) {
+		item := TaskListItem{TaskID: t.TaskID, UpdatedAt: t.UpdatedAt}
+		if s := e.readSummary(t.TaskID); s != nil {
 			item.Summary, item.Finished = s, true
 		}
-		for _, r := range e.readItems(taskID) {
-			switch r.Status {
-			case "sent":
-				item.SentOK++
-			case "failed":
-				item.SentFail++
-			case "cancelled":
-				item.Cancelled++
-			}
-			item.Items++
-		}
-		if info, err := ent.Info(); err == nil {
-			item.UpdatedAt = info.ModTime().Unix()
-		}
+		item.SentOK, item.SentFail, item.Cancelled, item.Items = e.store.taskStats(t.TaskID)
 		out = append(out, item)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
-	if len(out) > 100 {
-		out = out[:100]
 	}
 	return out
 }
@@ -1064,15 +971,6 @@ func (e *Executor) TaskDetail(taskID string, offset, limit int) ([]ItemDetail, i
 	return out, len(ids)
 }
 
-// isTaskResultsFile 判断 results 目录下的文件是否为某任务的明细文件
-// （排除 metrics.json 与 <task>.meta.json）。
-func isTaskResultsFile(name string) bool {
-	if !strings.HasSuffix(name, ".json") || name == "metrics.json" || strings.HasSuffix(name, ".meta.json") {
-		return false
-	}
-	return true
-}
-
 // DeviceItem 跨任务视图的单条明细（含 task_id，便于回平台核对）。
 type DeviceItem struct {
 	TaskID string `json:"task_id"`
@@ -1091,7 +989,7 @@ type DeviceItemGroup struct {
 }
 
 // DeviceItems 汇总所有任务落盘明细，按设备分组、最新活跃设备在前（每组内按时间倒序）。
-// 升级前落盘、缺 udid 的历史明细先按 metrics.json 的 batch_id→udid 映射尽力归因
+// 历史明细缺 udid 时按 metrics 的 batch_id→udid 映射尽力归因
 // （该映射只保留每设备最近一批任务），仍无法归因的归入 udid 为空的「未知设备」组。
 // udidFilter 非空时只返回该设备；limit<=0 默认 3000 条；第二返回值为是否已截断。
 func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup, bool) {
@@ -1107,10 +1005,6 @@ func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup,
 	}
 	e.metricsMu.Unlock()
 
-	entries, err := os.ReadDir(e.resultsDir)
-	if err != nil {
-		return nil, false
-	}
 	type rec struct {
 		TaskID string
 		ItemID string
@@ -1118,27 +1012,17 @@ func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup,
 		mtime time.Time
 	}
 	var all []rec
-	for _, ent := range entries {
-		if ent.IsDir() || !isTaskResultsFile(ent.Name()) {
-			continue
-		}
-		taskID := ent.Name()[:len(ent.Name())-len(".json")]
-		var mtime time.Time
-		if info, err := ent.Info(); err == nil {
-			mtime = info.ModTime()
-		}
-		for itemID, r := range e.readItems(taskID) {
-			if udidFilter != "" {
-				udid := r.Udid
-				if udid == "" {
-					udid = batchUDID[taskID]
-				}
-				if udid != udidFilter {
-					continue
-				}
+	for _, row := range e.store.recentItems(limit + 500) { // 略取宽裕量，过滤/排序后截断
+		if udidFilter != "" {
+			udid := row.Record.Udid
+			if udid == "" {
+				udid = batchUDID[row.TaskID]
 			}
-			all = append(all, rec{TaskID: taskID, ItemID: itemID, itemRecord: r, mtime: mtime})
+			if udid != udidFilter {
+				continue
+			}
 		}
+		all = append(all, rec{TaskID: row.TaskID, ItemID: row.ItemID, itemRecord: row.Record, mtime: row.UpdatedAt})
 	}
 	itemTime := func(r rec) time.Time {
 		if r.SentAt != "" {
@@ -1207,55 +1091,37 @@ func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup,
 	return out, truncated
 }
 
-// ResendPersisted 重连后补报本地已持久化的明细与任务汇总。
+// ResendPersisted 重连后补报本地已持久化的明细与任务汇总（SQLite results.db）。
 func (e *Executor) ResendPersisted() {
-	entries, err := os.ReadDir(e.resultsDir)
-	if err != nil {
-		return
+	// 任务汇总（meta）
+	for _, t := range e.store.taskIDsByUpdate(0) { // 0 = 不限量
+		if s := e.readSummary(t.TaskID); s != nil {
+			select {
+			case e.SummaryQ <- *s:
+			default:
+			}
+		}
 	}
-	for _, ent := range entries {
-		if ent.IsDir() || filepath.Ext(ent.Name()) != ".json" {
-			continue
-		}
-		name := ent.Name()
-		if strings.HasSuffix(name, ".meta.json") {
-			if s := e.readSummary(name[:len(name)-len(".meta.json")]); s != nil {
-				select {
-				case e.SummaryQ <- *s:
-				default:
+	// 全部明细（老记录缺 serial/device_name 时按 udid 从配置兜底补全，保证上行字段完整）
+	for _, row := range e.store.recentItems(0) { // 0 = 不限量
+		r := row.Record
+		serial, devName := r.Serial, r.DeviceName
+		if e.cfg != nil && r.Udid != "" {
+			if dev := e.cfg.Device(r.Udid); dev != nil {
+				if serial == "" {
+					serial = dev.Serial
+				}
+				if devName == "" {
+					devName = dev.Name
 				}
 			}
-			continue
 		}
-		if !isTaskResultsFile(name) {
-			continue
-		}
-		var m map[string]itemRecord
-		b, err := os.ReadFile(filepath.Join(e.resultsDir, name))
-		if err != nil || json.Unmarshal(b, &m) != nil {
-			continue
-		}
-		taskID := name[:len(name)-5]
-		for itemID, r := range m {
-			// 老记录缺 serial/device_name 时按 udid 从配置兜底补全，保证上行字段完整。
-			serial, devName := r.Serial, r.DeviceName
-			if e.cfg != nil && r.Udid != "" {
-				if dev := e.cfg.Device(r.Udid); dev != nil {
-					if serial == "" {
-						serial = dev.Serial
-					}
-					if devName == "" {
-						devName = dev.Name
-					}
-				}
-			}
-			e.report(ItemResult{
-				TaskID: taskID, ItemID: itemID,
-				Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
-				Udid: r.Udid, Serial: serial, DeviceName: devName, ConnType: r.ConnType, Content: r.Content,
-				ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
-			})
-		}
+		e.report(ItemResult{
+			TaskID: row.TaskID, ItemID: row.ItemID,
+			Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
+			Udid: r.Udid, Serial: serial, DeviceName: devName, ConnType: r.ConnType, Content: r.Content,
+			ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
+		})
 	}
 }
 

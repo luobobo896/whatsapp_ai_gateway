@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"fmt"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -124,8 +125,8 @@ type WebAuth struct {
 	cfg    *Config
 	ss     *webSessions
 	client *http.Client
-	// onToken 登录成功后回传平台自动签发的网关凭证（生产环境由 Gateway 注入；测试/开放模式为 nil）。
-	onToken func(token string) error
+	// onToken 登录成功后回传平台自动签发的网关凭证与租户 ID（生产环境由 Gateway 注入；测试/开放模式为 nil）。
+	onToken func(token, tenantID string) error
 }
 
 // NewWebAuth 构造鉴权器；会话存 SQLite（dbPath 为库文件路径，目录不存在时自动创建）。
@@ -184,8 +185,28 @@ func (a *WebAuth) platformGatewayRegisterURL() string {
 	return scheme + "://" + u.Host + "/api/ios-agent/v1/gateway/register"
 }
 
+// TenantOption 多租户账号注册网关时的候选租户（平台 422 TENANT_AMBIGUOUS 返回）。
+type TenantOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// TenantChoiceError 平台要求先选择租户：Candidates 为该账号可选租户列表，
+// 登录页展示选择后携带 tenant_id 重新登录即可。
+type TenantChoiceError struct {
+	Candidates []TenantOption
+}
+
+func (e *TenantChoiceError) Error() string {
+	return "账号属于多个租户，请选择网关所属租户"
+}
+
 // provisionGatewayToken 登录成功后调用平台自动签发/轮换网关凭证，并通过 onToken 回传落盘。
-func (a *WebAuth) provisionGatewayToken(ctx context.Context, email, password string) error {
+// tenantID 优先取本次登录请求携带值（用户刚选择），否则用配置保存值（多租户账号轮换沿用）。
+func (a *WebAuth) provisionGatewayToken(ctx context.Context, email, password, tenantID string) error {
+	if tenantID == "" {
+		tenantID = a.cfg.Cloud.TenantID
+	}
 	if a.onToken == nil {
 		return nil
 	}
@@ -193,8 +214,16 @@ func (a *WebAuth) provisionGatewayToken(ctx context.Context, email, password str
 	if regURL == "" {
 		return errors.New("gateway register url invalid")
 	}
+	// name 空时回退主机名（去掉 .local 等域后缀——平台对网关名有格式/唯一性校验，
+	// 实测带域后缀的主机名会被 422 拒绝）。
+	name := a.cfg.Cloud.GatewayName
+	if name == "" {
+		if host, err := os.Hostname(); err == nil {
+			name = strings.SplitN(host, ".", 2)[0]
+		}
+	}
 	payload, _ := json.Marshal(map[string]string{
-		"email": email, "password": password, "name": a.cfg.Cloud.GatewayName,
+		"email": email, "password": password, "name": name, "tenant_id": tenantID,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, regURL, bytes.NewReader(payload))
 	if err != nil {
@@ -208,15 +237,48 @@ func (a *WebAuth) provisionGatewayToken(ctx context.Context, email, password str
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return errors.New("gateway register failed: HTTP " + strings.TrimSpace(http.StatusText(resp.StatusCode)))
+		// 多租户账号未指定租户：平台返回候选列表，交由登录页引导用户选择后带 tenant_id 重试
+		var amb struct {
+			Error struct {
+				Code       string `json:"code"`
+				Message    string `json:"message"`
+			} `json:"error"`
+			Candidates []TenantOption `json:"candidates"`
+		}
+		if resp.StatusCode == http.StatusUnprocessableEntity && json.Unmarshal(body, &amb) == nil &&
+			amb.Error.Code == "TENANT_AMBIGUOUS" && len(amb.Candidates) > 0 {
+			return &TenantChoiceError{Candidates: amb.Candidates}
+		}
+		// 其他错误：透传平台拒绝原因，只留关键内容方便排障
+		detail := ""
+		var e struct {
+			Detail any `json:"detail"`
+		}
+		if json.Unmarshal(body, &e) == nil && e.Detail != nil {
+			if b, err := json.Marshal(e.Detail); err == nil {
+				detail = strings.TrimSpace(string(b))
+			}
+		}
+		if detail == "" && len(body) > 0 {
+			detail = strings.TrimSpace(string(body))
+		}
+		if len(detail) > 300 {
+			detail = detail[:300]
+		}
+		err := errors.New("gateway register failed: HTTP " + strings.TrimSpace(http.StatusText(resp.StatusCode)))
+		if detail != "" {
+			err = fmt.Errorf("%w (%s)", err, detail)
+		}
+		return err
 	}
 	var out struct {
-		Token string `json:"token"`
+		Token    string `json:"token"`
+		TenantID string `json:"tenantId"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil || out.Token == "" {
 		return errors.New("gateway register response missing token")
 	}
-	return a.onToken(out.Token)
+	return a.onToken(out.Token, out.TenantID)
 }
 
 // cookieToken 读取会话 cookie。
@@ -293,13 +355,27 @@ func (a *WebAuth) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		var creds struct {
 			Email    string `json:"email"`
 			Password string `json:"password"`
+			TenantID string `json:"tenant_id"` // 多租户账号：用户选择租户后重试登录携带
 		}
+		provisionErr := ""
+		var tenantChoices []TenantOption
 		if json.Unmarshal(body, &creds) == nil && creds.Email != "" && creds.Password != "" {
-			if err := a.provisionGatewayToken(r.Context(), creds.Email, creds.Password); err != nil {
-				slog.Warn("auto-provision gateway token failed", "error", err)
+			if err := a.provisionGatewayToken(r.Context(), creds.Email, creds.Password, creds.TenantID); err != nil {
+				var choice *TenantChoiceError
+				if errors.As(err, &choice) {
+					// 平台要求选择租户：前端弹出候选列表，选择后带 tenant_id 重新登录
+					tenantChoices = choice.Candidates
+				} else {
+					slog.Warn("auto-provision gateway token failed", "error", err)
+					provisionErr = err.Error() // 透传给前端：凭证签发失败时用户能立即看到平台拒绝原因
+				}
 			}
 		}
-		writeJSON(w, map[string]any{"ok": true, "passwordRequired": true, "csrfToken": csrf})
+		resp := map[string]any{"ok": true, "passwordRequired": true, "csrfToken": csrf, "provision_error": provisionErr}
+		if len(tenantChoices) > 0 {
+			resp["provision_tenants"] = tenantChoices
+		}
+		writeJSON(w, resp)
 	case resp.StatusCode == http.StatusUnauthorized:
 		msg := "邮箱或密码不正确"
 		var pe struct {

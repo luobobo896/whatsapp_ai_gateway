@@ -9,3 +9,8 @@ tools/easytier/easytier-cli
 
 # 本地运行时配置（含网关凭证 token，禁止提交）
 devices.json
+
+# 桌面壳构建与打包产物
+desktop/.build/
+build/
+*.dmg

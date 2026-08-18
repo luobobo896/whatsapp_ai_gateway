@@ -16,32 +16,42 @@ import (
 
 func main() {
 	var (
-		configPath  = flag.String("config", "", "devices.json 路径（默认当前目录，或 GATEWAY_CONFIG）")
+		stateDir    = flag.String("state", "", "状态目录（gateway.db、data/、static 的锚点；默认当前目录，或 GATEWAY_STATE_DIR）")
+		configPath  = flag.String("config", "", "兼容旧参数：devices.json 路径（取其目录作为状态目录，并触发一次性迁移）")
 		projectRoot = flag.String("project", "", "WhatsAppDeviceAgent 工程路径")
-		derived     = flag.String("derived", "/tmp/WebDriverAgentFarmDerived", "xcodebuild derivedDataPath")
+		derived     = flag.String("derived", "", "xcodebuild derivedDataPath（默认 <state>/derived，兼容 /tmp/WebDriverAgentFarmDerived）")
 		listen      = flag.String("listen", "0.0.0.0:8300", "HTTP 监听地址")
-		staticDir   = flag.String("static", "", "静态文件目录（默认生成临时 index.html）")
+		staticDir   = flag.String("static", "", "静态文件目录（默认 <state>/static）")
 	)
 	flag.Parse()
 
-	cfgPath := *configPath
-	if cfgPath == "" {
-		cfgPath = os.Getenv("GATEWAY_CONFIG")
+	state := *stateDir
+	if state == "" {
+		state = os.Getenv("GATEWAY_STATE_DIR")
 	}
-	if cfgPath == "" {
-		cfgPath = "devices.json"
+	if state == "" && *configPath != "" {
+		state = filepath.Dir(*configPath)
 	}
-	cfg, err := gateway.LoadConfig(cfgPath)
+	if state == "" {
+		if legacy := os.Getenv("GATEWAY_CONFIG"); legacy != "" {
+			state = filepath.Dir(legacy)
+		}
+	}
+	if state == "" {
+		state = "."
+	}
+	cfg, err := gateway.OpenConfig(state)
 	if err != nil {
-		slog.Error("load config", "error", err)
+		slog.Error("open config db", "state", state, "error", err)
 		os.Exit(1)
 	}
+	defer cfg.Close()
 	if *projectRoot == "" {
-		*projectRoot = filepath.Join(filepath.Dir(cfgPath), "..", "whatsapp_ai_ios", "WhatsAppDeviceAgent")
+		*projectRoot = filepath.Join(state, "..", "whatsapp_ai_ios", "WhatsAppDeviceAgent")
 	}
 	static := *staticDir
 	if static == "" {
-		static = filepath.Join(filepath.Dir(cfgPath), "static")
+		static = filepath.Join(state, "static")
 	}
 	// 静态目录缺 index.html 时生成默认占位页。
 	if _, err := os.Stat(filepath.Join(static, "index.html")); err != nil {
@@ -51,11 +61,14 @@ func main() {
 		}
 	}
 
-	wdaMgr := gateway.NewWDAManager(*projectRoot, *derived)
+	if *derived == "" {
+		*derived = filepath.Join(state, "derived")
+	}
+	wdaMgr := gateway.NewWDAManager(*projectRoot, *derived, cfg.Signing.Team)
 	llm := gateway.NewLLMClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
-	resultsDir := filepath.Join(filepath.Dir(cfgPath), "data", "results")
+	resultsDir := filepath.Join(state, "data", "results")
 	exec := gateway.NewExecutor(cfg, wdaMgr, llm, resultsDir)
-	et := gateway.NewEasyTierManager(filepath.Dir(cfgPath), cfg)
+	et := gateway.NewEasyTierManager(state, cfg)
 	defer et.Stop() // 网关退出时停掉托管的 easytier-core，避免孤儿进程占用端口
 	gw := gateway.New(cfg, wdaMgr, exec, llm, et)
 
@@ -68,7 +81,8 @@ func main() {
 		et.Recover()
 	}
 	go gw.WatchdogLoop(ctx)
-	go gw.CloudLoop(ctx)
+	gw.SetAppContext(ctx)
+	gw.EnsureCloudLoop() // 云通道已启用则启动；未启用时由「云通道设置」保存后热拉起
 
 	h, err := gw.Handler(static)
 	if err != nil {

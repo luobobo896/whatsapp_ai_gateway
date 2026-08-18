@@ -28,10 +28,12 @@ type WDAManager struct {
 	xctestrun   string
 	projectRoot string
 	derivedData string
+	team        string // DEVELOPMENT_TEAM 透传（空=工程内默认值）
 }
 
 // NewWDAManager 构造管理器；projectRoot 为 WhatsAppDeviceAgent 工程路径。
-func NewWDAManager(projectRoot, derivedData string) *WDAManager {
+// team 非空时透传给 xcodebuild 的 DEVELOPMENT_TEAM（换签名账号用），空则用工程内写死值。
+func NewWDAManager(projectRoot, derivedData, team string) *WDAManager {
 	if derivedData == "" {
 		derivedData = "/tmp/WebDriverAgentFarmDerived"
 	}
@@ -41,6 +43,7 @@ func NewWDAManager(projectRoot, derivedData string) *WDAManager {
 		crashUntil:  map[string]time.Time{},
 		projectRoot: projectRoot,
 		derivedData: derivedData,
+		team:        team,
 	}
 }
 
@@ -82,7 +85,7 @@ func (m *WDAManager) ensureBuilt() (string, error) {
 		}
 	}
 	slog.Info("WDA product not built, running build-for-testing (may take minutes)")
-	cmd := exec.Command("xcodebuild",
+	args := []string{
 		"-project", filepath.Join(m.projectRoot, "WebDriverAgent.xcodeproj"),
 		"-scheme", "WebDriverAgentRunner", "-configuration", "Debug",
 		"-destination", "generic/platform=iOS",
@@ -92,8 +95,12 @@ func (m *WDAManager) ensureBuilt() (string, error) {
 		"GCC_TREAT_WARNINGS_AS_ERRORS=NO",
 		"OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
 		"RUN_CLANG_STATIC_ANALYZER=NO",
-		"build-for-testing",
-	)
+	}
+	if m.team != "" {
+		args = append(args, "DEVELOPMENT_TEAM="+m.team)
+	}
+	args = append(args, "build-for-testing")
+	cmd := exec.Command("xcodebuild", args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("build-for-testing: %w", err)

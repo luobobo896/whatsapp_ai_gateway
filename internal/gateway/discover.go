@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -53,19 +54,31 @@ func validSerial(s string) bool {
 
 // ideviceSerial 经 libimobiledevice 的 ideviceinfo 查询硬件序列号。
 // 序列号只有 lockdownd 协议提供（ioreg/devicectl/WDA 都只有 UDID），需要设备 USB 在线且已配对。
+// 二进制定位与 iproxy 同策略：PATH（壳注入 bundle bin）→ bundle 内置 → Homebrew。
 func ideviceSerial(udid string) string {
 	bin := "ideviceinfo"
 	if _, err := exec.LookPath("ideviceinfo"); err != nil {
-		for _, p := range []string{"/opt/homebrew/bin/ideviceinfo", "/usr/local/bin/ideviceinfo"} {
+		bin = ""
+		candidates := []string{}
+		if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
+			candidates = append(candidates, filepath.Join(res, "bin", "ideviceinfo"))
+		}
+		candidates = append(candidates, "/opt/homebrew/bin/ideviceinfo", "/usr/local/bin/ideviceinfo")
+		for _, p := range candidates {
 			if _, err := os.Stat(p); err == nil {
 				bin = p
 				break
 			}
 		}
+		if bin == "" {
+			return ""
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "-u", udid, "-k", "SerialNumber").Output()
+	cmd := exec.CommandContext(ctx, bin, "-u", udid, "-k", "SerialNumber")
+	cmd.Env = append(os.Environ(), bundleLibFallback()...)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

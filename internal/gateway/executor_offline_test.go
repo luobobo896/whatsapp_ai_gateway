@@ -90,14 +90,13 @@ func TestParseCoordReply(t *testing.T) {
 func TestResendPersistedFieldsComplete(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{Devices: []Device{{UDID: "udid-r2", Serial: "SER-R2", Name: "iPhone R2"}}}
+	// 老格式记录：无 serial/device_name（须在构造前就位——构造时一次性迁移进 SQLite）。
+	_ = os.WriteFile(dir+"/task-old.json", []byte(`{"i2":{"phone":"8613800000002","status":"sent","udid":"udid-r2","conn_type":"wifi"}}`), 0o600)
 	e := NewExecutor(cfg, nil, nil, dir)
 
 	// 新记录：带完整字段落盘。
 	e.finishItem(ItemResult{TaskID: "task-r", ItemID: "i1", Phone: "8613800000001", Status: "sent",
 		Udid: "udid-r2", Serial: "SER-R2", DeviceName: "iPhone R2", ConnType: "usb"})
-	// 老格式记录：无 serial/device_name。
-	p := dir + "/task-old.json"
-	_ = os.WriteFile(p, []byte(`{"i2":{"phone":"8613800000002","status":"sent","udid":"udid-r2","conn_type":"wifi"}}`), 0o600)
 
 	e.ResendPersisted()
 	got := map[string]ItemResult{}

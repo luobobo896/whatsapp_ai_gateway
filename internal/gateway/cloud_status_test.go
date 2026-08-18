@@ -8,7 +8,7 @@ import (
 func newStatusTestGateway(t *testing.T) (*Gateway, *WDAManager, *Executor) {
 	t.Helper()
 	cfg := &Config{}
-	wdaMgr := NewWDAManager("", "")
+	wdaMgr := NewWDAManager("", "", "")
 	exec := NewExecutor(cfg, wdaMgr, nil, t.TempDir())
 	g := New(cfg, wdaMgr, exec, nil, nil)
 	return g, wdaMgr, exec

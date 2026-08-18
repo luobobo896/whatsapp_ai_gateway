@@ -290,7 +290,7 @@ func TestWebAuthLoginAutoProvision(t *testing.T) {
 		t.Fatal(err)
 	}
 	var captured string
-	auth.onToken = func(token string) error { captured = token; return nil }
+	auth.onToken = func(token, tenantID string) error { captured = token; return nil }
 
 	ts := httptest.NewServer(http.HandlerFunc(auth.HandleLogin))
 	defer ts.Close()

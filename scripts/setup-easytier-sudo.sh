@@ -9,11 +9,23 @@
 # 脚本可能被 sudo / osascript(root) 执行；目标用户取 GUI 控制台用户（stat /dev/console）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-CORE="$(pwd)/tools/easytier/easytier-core"
-if [ ! -x "$CORE" ]; then
-  echo "✗ easytier-core 不存在：$CORE" >&2
+# 固定安装路径（与 gateway easytierBinDir 查找逻辑一致）：sudoers 放行该绝对路径，
+# app 更新/移动不受影响；仓库 tools/easytier（或 bundle 内，经 WDA_EASYTIER_SRC 指定）只作安装源。
+INSTALL_DIR="/usr/local/libexec/wda-gateway"
+CORE_SRC="$(pwd)/tools/easytier/easytier-core"
+if [ ! -x "$CORE_SRC" ] && [ -n "${WDA_EASYTIER_SRC:-}" ] && [ -x "$WDA_EASYTIER_SRC/easytier-core" ]; then
+  CORE_SRC="$WDA_EASYTIER_SRC/easytier-core"
+fi
+if [ ! -x "$CORE_SRC" ]; then
+  echo "✗ easytier-core 不存在：$CORE_SRC" >&2
   exit 1
 fi
+mkdir -p "$INSTALL_DIR"
+install -m 0700 "$CORE_SRC" "$INSTALL_DIR/easytier-core"
+if [ -x "$(dirname "$CORE_SRC")/easytier-cli" ]; then
+  install -m 0700 "$(dirname "$CORE_SRC")/easytier-cli" "$INSTALL_DIR/easytier-cli"
+fi
+CORE="$INSTALL_DIR/easytier-core"
 TARGET_USER="${SUDO_USER:-$(stat -f '%Su' /dev/console 2>/dev/null || whoami)}"
 GROUP="wda-gateway"
 RULE_FILE="/etc/sudoers.d/wda-gateway-easytier"

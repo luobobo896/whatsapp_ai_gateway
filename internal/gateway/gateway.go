@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,9 @@ type Gateway struct {
 	Exec     *Executor
 	LLM      *LLMClient
 	EasyTier *EasyTierManager
+
+	appCtx       context.Context // 顶层上下文（EnsureCloudLoop 在配置热启用后拉起云循环）
+	cloudLoopRun atomic.Bool     // CloudLoop 是否在运行（未启用冷启动后可按需再拉起）
 
 	connected   atomic.Bool
 	connectedAt atomic.Value // string
@@ -41,6 +45,32 @@ type Gateway struct {
 }
 
 // New 构造网关。
+// SetAppContext 存入顶层上下文：页面配置热启用云通道后，EnsureCloudLoop 用它拉起循环。
+func (g *Gateway) SetAppContext(ctx context.Context) { g.appCtx = ctx }
+
+// EnsureCloudLoop 按需启动/触发云通道循环：
+//   - 云通道已启用但循环未运行（如冷启动时未启用、被跳过）→ 拉起；
+//   - 已在运行 → 触发立即重连（CloudLoop 每次会话都会读取最新配置）。
+func (g *Gateway) EnsureCloudLoop() {
+	if g.appCtx == nil {
+		return
+	}
+	if !g.Cfg.Cloud.Enabled || g.Cfg.Cloud.WSURL == "" {
+		return
+	}
+	if g.cloudLoopRun.CompareAndSwap(false, true) {
+		go func() {
+			defer g.cloudLoopRun.Store(false)
+			g.CloudLoop(g.appCtx)
+		}()
+		return
+	}
+	select {
+	case g.cloudReconnect <- struct{}{}:
+	default:
+	}
+}
+
 func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *EasyTierManager) *Gateway {
 	return &Gateway{
 		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
@@ -64,9 +94,10 @@ func (g *Gateway) clearCloudConn(c *websocket.Conn) {
 	g.cloudMu.Unlock()
 }
 
-// ApplyCloudToken 保存平台签发的网关云凭证并触发重连（登录自动签发时回调）。
-func (g *Gateway) ApplyCloudToken(token string) error {
-	if err := g.Cfg.SetCloudToken(token); err != nil {
+// ApplyCloudToken 保存平台签发的网关云凭证并触发重连（登录自动签发时回调）；
+// tenantID 非空时一并记住所选租户（多租户账号后续轮换沿用）。
+func (g *Gateway) ApplyCloudToken(token, tenantID string) error {
+	if err := g.Cfg.SetCloudToken(token, tenantID); err != nil {
 		return err
 	}
 	g.RestartCloud()

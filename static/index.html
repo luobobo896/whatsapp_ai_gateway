@@ -246,6 +246,23 @@
       <div class="stat"><span class="k">今日发送失败</span><span class="v err" id="stSentFail">0</span></div>
     </div>
 
+    <!-- 云通道设置：全新安装时在此填写平台地址；保存后立即生效（连接重建/登录遮罩出现） -->
+    <div class="panel" id="cloudCfgPanel" style="margin-bottom:16px">
+      <div class="panel-head"><span style="font-size:13px;font-weight:600">云通道设置</span><span style="font-size:11px;color:var(--text-3)">通常无需修改；网关凭证登录后自动获取</span></div>
+      <div class="panel-body" style="display:grid;grid-template-columns:2fr 1fr auto auto;gap:10px;align-items:end">
+        <div>
+          <div style="font-size:11px;color:var(--text-2);margin-bottom:4px">平台域名 <span id="cloudTokenFlag" style="color:var(--text-3)"></span></div>
+          <input id="cloudWsUrl" placeholder="hk.hsddns.com" style="width:100%;box-sizing:border-box">
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-2);margin-bottom:4px">网关名称</div>
+          <input id="cloudGwName" placeholder="如 macmini-01" style="width:100%;box-sizing:border-box">
+        </div>
+        <button class="btn sm" onclick="saveCloudCfg()">保存并连接</button>
+        <button class="btn sm ghost" onclick="disableCloudCfg()">停用</button>
+      </div>
+    </div>
+
     <div class="section-head">
       <h3>设备</h3>
       <span class="count" id="deviceCount"></span>
@@ -282,7 +299,7 @@
     <div class="back" onclick="showView('devices')">‹ 返回设备总览</div>
     <div class="hero" style="margin-bottom:20px">
       <h2>组网 · easytier 后备通道</h2>
-      <p>可选能力，默认关闭；平台下发 easytier:config 后作为 WSS 之外的后备链路</p>
+      <p>可选能力，默认关闭；配置由云平台登录后自动下发（需云通道已连接），下发后即可启动</p>
     </div>
     <div class="stats" style="grid-template-columns:repeat(4,1fr)">
       <div class="stat"><span class="k"><span id="etCfgDot" class="dot off"></span>配置状态</span><span class="v" id="etCfg">—</span></div>
@@ -342,6 +359,11 @@
       <button class="btn" id="loginBtn" onclick="login()">登录</button>
     </div>
     <div id="loginErr" style="font-size:12px;color:var(--red);margin-top:8px;display:none"></div>
+    <!-- 多租户账号：登录成功后平台要求选择网关所属租户 -->
+    <div id="tenantPicker" style="display:none">
+      <p style="font-size:12px;color:var(--text-2);margin:10px 0 8px">该账号属于多个租户，请选择网关所属租户（选择后自动完成凭证签发）：</p>
+      <div id="tenantList" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
   </div>
 </div>
 
@@ -424,10 +446,51 @@ async function login(){
     }
     let d = {}; try{ d = await r.json(); }catch(e){}
     csrfToken = d.csrfToken || '';
+    // 多租户账号：弹出租户选择，选择后带 tenant_id 自动重试登录（完成凭证签发）
+    if (d.provision_tenants && d.provision_tenants.length){
+      showTenantPicker(d.provision_tenants);
+      return;
+    }
     hideLogin();
     $('logoutBtn').style.display = '';
+    // 登录成功但网关凭证签发失败：立即提示平台拒绝原因（否则云通道离线无从排查）
+    if (d.provision_error) toast('网关凭证签发失败：' + d.provision_error);
     refreshAll();
   }catch(e){ $('loginErr').textContent = '登录失败，请检查网络后重试'; $('loginErr').style.display = 'block'; }
+}
+function showTenantPicker(tenants){
+  $('tenantPicker').style.display = 'block';
+  const box = $('tenantList');
+  box.innerHTML = '';
+  tenants.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'btn ghost';
+    b.style.cssText = 'justify-content:flex-start;text-align:left';
+    b.textContent = (t.name || t.id);
+    b.onclick = () => pickTenant(t.id, t.name || t.id);
+    box.appendChild(b);
+  });
+}
+async function pickTenant(tenantId, tenantName){
+  $('tenantPicker').style.display = 'none';
+  $('loginBtn').disabled = true;
+  try{
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      email: $('loginEmail').value.trim(),
+      password: $('loginPassword').value,
+      tenant_id: tenantId,
+    })});
+    let d = {}; try{ d = await r.json(); }catch(e){}
+    if(!r.ok){ $('loginErr').textContent = d.error || '租户选择后登录失败'; $('loginErr').style.display = 'block'; return; }
+    csrfToken = d.csrfToken || '';
+    hideLogin();
+    $('logoutBtn').style.display = '';
+    if (d.provision_error) toast('网关凭证签发失败：' + d.provision_error);
+    else toast('已选择租户「' + tenantName + '」，凭证签发成功，云通道连接中');
+    refreshAll();
+  }catch(e){
+    $('loginErr').textContent = '租户选择后登录失败，请重试'; $('loginErr').style.display = 'block';
+  }finally{ $('loginBtn').disabled = false; }
 }
 async function logout(){
   try{ await fetch('/api/logout', {method:'POST', headers:{'X-CSRF-Token': csrfToken}}); }catch(e){}
@@ -445,6 +508,7 @@ async function checkSession(){
       $('logoutBtn').style.display = 'none';
     }
   }catch(e){}
+  loadCloudCfg(); // 首次填充云通道设置表单（有编辑保护，不被轮询覆盖）
   refreshAll();
 }
 
@@ -479,6 +543,45 @@ async function loadCloud(){
   }catch(e){
     $('cloudText').textContent = '云状态读取失败';
     $('cloudDot').className = 'dot err';
+  }
+}
+
+/* ---------- 云通道设置 ---------- */
+let cloudCfgLoaded = false;
+async function loadCloudCfg(force){
+  if (cloudCfgLoaded && !force) return; // 用户正在编辑时不被 5s 轮询覆盖
+  try{
+    const c = await (await fetch('/api/cloud/config')).json();
+    $('cloudWsUrl').value = c.ws_url || '';
+    $('cloudGwName').value = c.gateway_name || '';
+    $('cloudTokenFlag').textContent = c.token_configured ? '· 凭证已获取' : '· 登录后自动获取凭证';
+    cloudCfgLoaded = true;
+  }catch(e){ /* 静默：下次刷新再试 */ }
+}
+async function disableCloudCfg(){
+  if (!confirm('停用云通道后将不连接平台、不接收任务，确认停用？')) return;
+  try{
+    await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled:false})});
+    toast('云通道已停用');
+    await loadCloud();
+    await loadCloudCfg(true);
+    checkSession();
+  }catch(e){ toast('停用失败：' + (e.message || e)); }
+}
+async function saveCloudCfg(){
+  const body = {
+    ws_url: $('cloudWsUrl').value.trim(),
+    gateway_name: $('cloudGwName').value.trim(),
+    enabled: true, // 保存即启用：填了平台域名就意味着要连接
+  };
+  try{
+    const r = await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    toast(r.ok ? '已保存，正在连接平台' + (r.normalized ? '（地址已自动补全）' : '') + (r.token_configured === false ? '；登录后自动获取凭证' : '') : '保存失败');
+    await loadCloud();
+    await loadCloudCfg(true);
+    if (r.enabled) checkSession(); // 启用后登录遮罩可能出现，立即刷新会话态
+  }catch(e){
+    toast('保存失败：' + (e.message || e));
   }
 }
 
@@ -646,7 +749,8 @@ async function act(udid){
       settled = true;
       toast(d.via === 'usb' ? '激活成功（USB 直连，IP 自动发现中）' : '激活成功，WDA 已就绪');
     } else if (d.status === 'starting'){
-      toast('WDA 仍在启动（未就绪）…'); // 不报成功，保持「启动中」
+      // 不报成功，保持「启动中」；首次激活含编译，耗时数分钟属正常
+      toast('WDA 启动中…（首次激活需编译 WDA，可能耗时数分钟，请耐心等待）');
     } else {
       settled = true;
       toast('激活未完成：' + (d.message || r.status));

@@ -27,9 +27,12 @@ type EasyTierConfig struct {
 }
 
 func defaultEasyTierConfig() EasyTierConfig {
+	// 业务拓扑字段（network_name/relay_host/network_cidr/gateway_ipv4）默认留空：
+	// 全新安装显示「未配置」，等待平台 easytier:config 下发（Apply 按非空字段合并）。
+	// 仅保留端口/MTU/模式等技术默认值。
 	return EasyTierConfig{
-		NetworkName: "wa-ios", RelayHost: "hk.hsddns.com", RelayPort: 11010,
-		NetworkCIDR: "10.168.0.0/16", GatewayIPv4: "10.168.1.2", MTU: 1380, Sudo: true,
+		NetworkName: "", RelayHost: "", RelayPort: 11010,
+		NetworkCIDR: "", GatewayIPv4: "", MTU: 1380, Sudo: true,
 	}
 }
 
@@ -42,7 +45,6 @@ type easyTierProc struct {
 type EasyTierManager struct {
 	root       string
 	cfg        *Config
-	binDir     string
 	configPath string
 	tomlPath   string
 	logPath    string
@@ -57,17 +59,58 @@ type EasyTierManager struct {
 	startMu      sync.Mutex
 }
 
-// NewEasyTierManager 构造管理器；root 为网关仓库根目录（tools/easytier、data、scripts 位于其下）。
+// systemEasyTierDir 打包交付形态的固定安装路径：sudoers 放行该绝对路径，
+// 不随 app 更新/移动失效（bundle 内只是安装源，安装脚本拷贝到此处）。
+const systemEasyTierDir = "/usr/local/libexec/wda-gateway"
+
+// bundleResourcesDir 壳 App 注入的 bundle Resources 路径（打包交付形态；
+// 源码运行时为空，全部回退到 <state> 相对布局）。
+func bundleResourcesDir() string { return os.Getenv("WDA_GATEWAY_RESOURCES") }
+
+// easytierBinDir 二进制目录查找：优先系统固定安装路径（若已安装），
+// 其次仓库内 tools/easytier（源码运行形态）。与 setup-easytier-sudo.sh 的放行路径保持一致。
+func easytierBinDir(root string) string {
+	if _, err := os.Stat(filepath.Join(systemEasyTierDir, "easytier-core")); err == nil {
+		return systemEasyTierDir
+	}
+	if res := bundleResourcesDir(); res != "" {
+		if p := filepath.Join(res, "tools", "easytier"); fileExists(filepath.Join(p, "easytier-core")) {
+			return p
+		}
+	}
+	return filepath.Join(root, "tools", "easytier")
+}
+
+// setupSudoScript 授权脚本路径：优先 bundle Resources（壳注入），其次 <state>/scripts（源码形态）。
+func setupSudoScript(root string) string {
+	if res := bundleResourcesDir(); res != "" {
+		if p := filepath.Join(res, "scripts", "setup-easytier-sudo.sh"); fileExists(p) {
+			return p
+		}
+	}
+	return filepath.Join(root, "scripts", "setup-easytier-sudo.sh")
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// corePath/cliPath 每次解析二进制路径：授权安装到系统固定路径后立即生效，
+// 不依赖构造时刻的目录状态。
+func (m *EasyTierManager) corePath() string { return filepath.Join(easytierBinDir(m.root), "easytier-core") }
+func (m *EasyTierManager) cliPath() string  { return filepath.Join(easytierBinDir(m.root), "easytier-cli") }
+
+// NewEasyTierManager 构造管理器；root 为网关状态目录（tools/easytier、data、scripts 位于其下）。
 func NewEasyTierManager(root string, cfg *Config) *EasyTierManager {
 	m := &EasyTierManager{
 		root:       root,
 		cfg:        cfg,
-		binDir:     filepath.Join(root, "tools", "easytier"),
-		configPath: filepath.Join(root, "data", "easytier.json"),
-		tomlPath:   filepath.Join(root, "data", "easytier.toml"),
+		configPath: filepath.Join(root, "data", "easytier.json"), // 仅作旧文件迁移判定，运行时读写走 gateway.db
+		tomlPath:   "/tmp/wda-gateway-easytier.toml",             // easytier-core 运行时输入（外部二进制消费，与 wda 日志同策略放 /tmp）
 		logPath:    "/tmp/easytier-gateway.log",
 		rpcPortal:  "127.0.0.1:15888",
-		setupSudo:  filepath.Join(root, "scripts", "setup-easytier-sudo.sh"),
+		setupSudo:  setupSudoScript(root),
 	}
 	m.load()
 	return m
@@ -75,19 +118,27 @@ func NewEasyTierManager(root string, cfg *Config) *EasyTierManager {
 
 // ---- 配置 ----
 
+// load 从 gateway.db（config 表 easytier key）加载；旧 data/easytier.json 存在且库内
+// 无记录时一次性迁移（旧文件改名 .bak），与 devices.json 迁移同策略。
 func (m *EasyTierManager) load() {
 	m.config = defaultEasyTierConfig()
+	if v, ok := m.cfg.ReadExtra("easytier"); ok {
+		_ = json.Unmarshal([]byte(v), &m.config)
+		return
+	}
 	if b, err := os.ReadFile(m.configPath); err == nil {
-		_ = json.Unmarshal(b, &m.config)
+		var old EasyTierConfig
+		if json.Unmarshal(b, &old) == nil {
+			m.config = old
+			_ = m.save() // 导入库
+			_ = os.Rename(m.configPath, m.configPath+".bak")
+		}
 	}
 }
 
 func (m *EasyTierManager) save() error {
-	if err := os.MkdirAll(filepath.Dir(m.configPath), 0o755); err != nil {
-		return err
-	}
 	b, _ := json.MarshalIndent(m.config, "", "  ")
-	return os.WriteFile(m.configPath, b, 0o600)
+	return m.cfg.WriteExtra("easytier", string(b))
 }
 
 // Configured 是否已配置完整（有 secret + relay_host + gateway_ipv4）。
@@ -106,7 +157,7 @@ func (m *EasyTierManager) PublicConfig() map[string]any {
 		"network_name": c.NetworkName, "relay_host": c.RelayHost, "relay_port": c.RelayPort,
 		"network_cidr": c.NetworkCIDR, "gateway_ipv4": c.GatewayIPv4, "mtu": c.MTU, "tun": c.Sudo,
 		"network_secret_set": c.NetworkSecret != "",
-		"binary":             filepath.Join(m.binDir, "easytier-core"),
+		"binary":             m.corePath(),
 	}
 }
 
@@ -254,7 +305,7 @@ func (m *EasyTierManager) Running() bool {
 }
 
 func (m *EasyTierManager) cmdArgs() []string {
-	base := []string{filepath.Join(m.binDir, "easytier-core"), "--config-file", m.tomlPath, "--disable-env-parsing"}
+	base := []string{m.corePath(), "--config-file", m.tomlPath, "--disable-env-parsing"}
 	if os.Geteuid() == 0 {
 		return base
 	}
@@ -262,7 +313,7 @@ func (m *EasyTierManager) cmdArgs() []string {
 }
 
 func (m *EasyTierManager) sudoOK() bool {
-	return exec.Command("sudo", "-n", filepath.Join(m.binDir, "easytier-core"), "--version").Run() == nil
+	return exec.Command("sudo", "-n", m.corePath(), "--version").Run() == nil
 }
 
 func (m *EasyTierManager) authorize() bool {
@@ -290,7 +341,7 @@ func (m *EasyTierManager) Start(authorize bool) (bool, error) {
 	if !m.Configured() {
 		return false, errors.New("easytier 配置未就绪（缺 network_secret 或 gateway_ipv4）")
 	}
-	core := filepath.Join(m.binDir, "easytier-core")
+	core := m.corePath()
 	if _, err := os.Stat(core); err != nil {
 		return false, fmt.Errorf("easytier-core 不存在：%s", core)
 	}
@@ -429,7 +480,7 @@ func (m *EasyTierManager) Recover() {
 
 func (m *EasyTierManager) cli(args ...string) ([]byte, error) {
 	full := append([]string{"-p", m.rpcPortal}, args...)
-	return exec.Command(filepath.Join(m.binDir, "easytier-cli"), full...).Output()
+	return exec.Command(m.cliPath(), full...).Output()
 }
 
 func (m *EasyTierManager) cliOK() bool {

@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"net/http/pprof"
 	"os"
 	"path/filepath"
@@ -63,6 +65,48 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			"tenant_id":             tid, "tenant_name": tname, "user_email": uemail, "user_name": uname,
 			"executor": g.Exec.Status(),
 		})
+	})
+
+	// /api/cloud/config 云通道连接设置：GET 脱敏读取，PUT 更新并热生效（连接立即重建）。
+	mux.HandleFunc("/api/cloud/config", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, map[string]any{
+				"ws_url": g.Cfg.Cloud.WSURL, "gateway_name": g.Cfg.Cloud.GatewayName,
+				"enabled": g.Cfg.Cloud.Enabled, "token_configured": g.Cfg.Cloud.Token != "",
+			})
+		case http.MethodPut:
+			var body struct {
+				WSURL       string `json:"ws_url"`
+				GatewayName string `json:"gateway_name"`
+				Enabled     bool   `json:"enabled"`
+				Token       string `json:"token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "请求体格式错误"})
+				return
+			}
+			if body.WSURL == "" {
+				body.WSURL = g.Cfg.Cloud.WSURL // 留空保持现值
+			}
+			normalized := normalizeCloudWSURL(body.WSURL) != body.WSURL
+			if body.Enabled && normalizeCloudWSURL(body.WSURL) == "" {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "启用云通道必须填写平台地址"})
+				return
+			}
+			if err := g.Cfg.SetCloud(body.WSURL, body.GatewayName, body.Enabled, body.Token); err != nil {
+				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			g.EnsureCloudLoop() // 冷启动未启用后首次配置：热拉起云循环
+			slog.Info("cloud config updated", "ws_url", g.Cfg.Cloud.WSURL, "enabled", body.Enabled)
+			writeJSON(w, map[string]any{
+				"ok": true, "enabled": g.Cfg.Cloud.Enabled, "ws_url": g.Cfg.Cloud.WSURL,
+				"normalized": normalized, "token_configured": g.Cfg.Cloud.Token != "",
+			})
+		default:
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
 	})
 
 	mux.HandleFunc("/api/devices", func(w http.ResponseWriter, r *http.Request) {
@@ -288,9 +332,15 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 		}
 	})
 
-	// /api/login 与 /api/session 公开；其余 /api/* 需会话；state-changing 方法另需 CSRF。
+	// /api/login 与 /api/session 公开；/api/cloud/config 也公开（配置平台地址是登录的前置条件，
+	// ws_url 填错时若要求登录会形成死锁）；写操作 CSRF 校验带同源/无会话放行（见 csrfOrSameOrigin）。
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/login" || r.URL.Path == "/api/session" {
+		publicAPI := r.URL.Path == "/api/login" || r.URL.Path == "/api/session" || r.URL.Path == "/api/cloud/config"
+		if !strings.HasPrefix(r.URL.Path, "/api/") || publicAPI {
+			if publicAPI && r.Method != http.MethodGet && r.Method != http.MethodHead && !csrfOrSameOrigin(auth, r) {
+				writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid csrf token"})
+				return
+			}
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -304,6 +354,31 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 		}
 		mux.ServeHTTP(w, r)
 	}), nil
+}
+
+// csrfOrSameOrigin 公开配置接口的写保护：正常会话走 CSRF；未登录（拿不到 CSRF token，
+// 典型为首次配置 ws_url）时按 Origin 同源放行；无会话 cookie 且无 Origin 的非浏览器
+// 调用（curl 等）也放行。跨站 Origin 一律拒绝。
+func csrfOrSameOrigin(auth *WebAuth, r *http.Request) bool {
+	if auth.CSRFValid(r) {
+		return true
+	}
+	hasSessionCookie := false
+	if c, err := r.Cookie("wda_gateway_session"); err == nil && c.Value != "" {
+		hasSessionCookie = true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" && !hasSessionCookie {
+		return true // 非浏览器调用（无 cookie 无 Origin）
+	}
+	for _, h := range []string{"Origin", "Referer"} {
+		if v := r.Header.Get(h); v != "" {
+			if u, err := url.Parse(v); err == nil && u.Host == r.Host {
+				return true // 同源页面（未登录时无 CSRF token 可用）
+			}
+		}
+	}
+	return false
 }
 
 func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map[string]any {

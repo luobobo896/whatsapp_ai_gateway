@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 )
 
@@ -28,19 +29,37 @@ type usbTunnelManager struct {
 
 var usbTunnels = &usbTunnelManager{procs: map[string]*usbTunnelProc{}, misses: map[string]int{}}
 
-// iproxyBin 定位 iproxy 可执行文件（PATH 优先，homebrew 兜底）。
+// iproxyBin 定位 iproxy 可执行文件（PATH 优先，bundle 内置与 homebrew 兜底）。
+// 打包交付形态：壳 App 把 bundle Resources/bin 注入 PATH，这里再显式兜底一次。
 func iproxyBin() string {
 	if _, err := exec.LookPath("iproxy"); err == nil {
-		for _, p := range []string{"iproxy", "/opt/homebrew/bin/iproxy", "/usr/local/bin/iproxy"} {
-			if _, err := os.Stat(p); err == nil {
-				return p
-			}
+		return "iproxy"
+	}
+	candidates := []string{}
+	if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
+		candidates = append(candidates, filepath.Join(res, "bin", "iproxy"))
+	}
+	candidates = append(candidates, "/opt/homebrew/bin/iproxy", "/usr/local/bin/iproxy")
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
 	return ""
 }
 
 // freeLocalPort 取一个可用本地端口（listen :0 后立即释放，存在极小竞争窗口）。
+// bundleLibFallback 打包形态下注入给 libimobiledevice 系子进程的 dyld 覆盖目录：
+// 包内二进制保持 Homebrew 原样（install_name_tool 修改会致 dyld4 死循环），
+// 其 LC_LOAD_DYLIB 是 Homebrew 绝对路径；DYLD_LIBRARY_PATH 优先于 LC 绝对路径按
+// leaf name 命中（已实测 dyld 从包内 lib 加载），客户机有无 Homebrew 均确定走包内。
+func bundleLibFallback() []string {
+	if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
+		return []string{"DYLD_LIBRARY_PATH=" + filepath.Join(res, "lib")}
+	}
+	return nil
+}
+
 func freeLocalPort() (int, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -100,6 +119,7 @@ func EnsureUSBTunnels(ports map[string]int) {
 			continue
 		}
 		cmd := exec.Command(bin, "-u", udid, fmt.Sprintf("%d:%d", local, devPort))
+		cmd.Env = append(os.Environ(), bundleLibFallback()...)
 		if err := cmd.Start(); err != nil {
 			continue
 		}
