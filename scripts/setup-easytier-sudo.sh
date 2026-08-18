@@ -21,9 +21,9 @@ if [ ! -x "$CORE_SRC" ]; then
   exit 1
 fi
 mkdir -p "$INSTALL_DIR"
-install -m 0700 "$CORE_SRC" "$INSTALL_DIR/easytier-core"
+install -m 0755 "$CORE_SRC" "$INSTALL_DIR/easytier-core"
 if [ -x "$(dirname "$CORE_SRC")/easytier-cli" ]; then
-  install -m 0700 "$(dirname "$CORE_SRC")/easytier-cli" "$INSTALL_DIR/easytier-cli"
+  install -m 0755 "$(dirname "$CORE_SRC")/easytier-cli" "$INSTALL_DIR/easytier-cli"
 fi
 CORE="$INSTALL_DIR/easytier-core"
 TARGET_USER="${SUDO_USER:-$(stat -f '%Su' /dev/console 2>/dev/null || whoami)}"

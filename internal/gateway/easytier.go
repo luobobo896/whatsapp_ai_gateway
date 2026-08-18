@@ -96,10 +96,38 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// corePath/cliPath 每次解析二进制路径：授权安装到系统固定路径后立即生效，
+// corePath 每次解析二进制路径：授权安装到系统固定路径后立即生效，
 // 不依赖构造时刻的目录状态。
 func (m *EasyTierManager) corePath() string { return filepath.Join(easytierBinDir(m.root), "easytier-core") }
-func (m *EasyTierManager) cliPath() string  { return filepath.Join(easytierBinDir(m.root), "easytier-cli") }
+
+// cliPath 解析查询客户端：15888 端口是 easytier 的自定义二进制 RPC（非 HTTP/WS），
+// easytier-cli 即其官方客户端，调用它就是「经 RPC 端口控制」。部分安装路径下 cli 为
+// root-only（0700）当前用户不可执行——按实际可执行性探测并缓存，自动跳过。
+var (
+	cliPathOnce   sync.Once
+	cliPathCached string
+)
+
+func (m *EasyTierManager) cliPath() string {
+	cliPathOnce.Do(func() {
+		candidates := []string{filepath.Join(systemEasyTierDir, "easytier-cli")}
+		if res := bundleResourcesDir(); res != "" {
+			candidates = append(candidates, filepath.Join(res, "tools", "easytier", "easytier-cli"))
+		}
+		candidates = append(candidates, filepath.Join(m.root, "tools", "easytier", "easytier-cli"))
+		for _, p := range candidates {
+			if fi, err := os.Stat(p); err == nil && fi.Mode()&0o111 != 0 {
+				// 权限位可执行 ≠ 当前用户可执行（root 0700）：实际试跑判定
+				if exec.Command(p, "-V").Run() == nil {
+					cliPathCached = p
+					return
+				}
+			}
+		}
+		cliPathCached = filepath.Join(easytierBinDir(m.root), "easytier-cli")
+	})
+	return cliPathCached
+}
 
 // NewEasyTierManager 构造管理器；root 为网关状态目录（tools/easytier、data、scripts 位于其下）。
 func NewEasyTierManager(root string, cfg *Config) *EasyTierManager {
@@ -305,7 +333,10 @@ func (m *EasyTierManager) Running() bool {
 }
 
 func (m *EasyTierManager) cmdArgs() []string {
-	base := []string{m.corePath(), "--config-file", m.tomlPath, "--disable-env-parsing"}
+	// --rpc-portal 必须走 CLI 参数：v2.6.4 的 toml rpc_portal 字段不生效（实测 15888 不监听），
+	// 状态查询（easytier-cli）依赖该端口。
+	base := []string{m.corePath(), "--config-file", m.tomlPath, "--disable-env-parsing",
+		"--rpc-portal", m.rpcPortal}
 	if os.Geteuid() == 0 {
 		return base
 	}
