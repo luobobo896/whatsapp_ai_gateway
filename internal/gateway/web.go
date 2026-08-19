@@ -31,10 +31,19 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 		if r.URL.Path == "/" {
 			// 管理页单页资源：禁止缓存，保证前端更新后用户普通刷新（Cmd+R）即生效，
 			// 否则浏览器启发式缓存旧 JS 导致新功能（删除即隐藏等）不生效。
+			// 注意：不能用 http.ServeFile——Go 的 fixPragmaCacheControl 会在写响应头时
+			// 按 Pragma/Cache-Control 组合改写/丢弃头，实测 Cache-Control 不生效；
+			// 改为读文件 + 显式写头，完全控制缓存语义。
+			data, err := os.ReadFile(filepath.Join(staticDir, "index.html"))
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
-			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			_, _ = w.Write(data)
 			return
 		}
 		http.NotFound(w, r)
