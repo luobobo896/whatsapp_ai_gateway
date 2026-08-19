@@ -707,12 +707,13 @@ function deviceCard(d){
   else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
-  // 按钮：忙碌 -> 忙碌中(禁用)；运行 -> 停止；未激活 -> 激活（非忙碌设备可删除）
-  // 注意：busy 单独处理，避免"停止"按钮在 busy 时出现却无法生效（点了状态不变）。
+  // 按钮：忙碌 -> 忙碌中(禁用)；WDA 健康运行 -> 停止；否则（未激活/启动中/异常）-> 激活
+  // 注意：WDA 激活异常（进程在但健康失败）时按钮必须显示"激活"，允许用户直接重新激活，
+  // 而不是停在"停止"上。busy 单独处理避免误显示停止。
   let actions = '';
   if (d.busy) {
     actions = `<button class="btn sm" disabled style="opacity:.5;cursor:not-allowed">忙碌中</button>`;
-  } else if (running) {
+  } else if (running && healthy) {
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
   } else {
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
