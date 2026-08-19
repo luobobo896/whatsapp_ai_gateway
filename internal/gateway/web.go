@@ -261,6 +261,10 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			if dev == nil {
 				dev = &Device{UDID: udid, Port: port, AutoReactivate: true}
 				g.Cfg.Devices = append(g.Cfg.Devices, *dev)
+				// 新设备立即持久化（此前依赖 UnignoreDevice 的隐式 saveLocked，
+				// 若隐藏列表已无该设备导致逻辑分支异常，auto_reactivate 可能丢失，
+				// 重启后 watchdog 不再自动拉起）。
+				_ = g.Cfg.Save()
 			} else {
 				dev.AutoReactivate = true
 				_ = g.Cfg.Save()
