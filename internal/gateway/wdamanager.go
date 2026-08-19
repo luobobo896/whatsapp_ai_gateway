@@ -114,6 +114,19 @@ func (m *WDAManager) ensureBuilt() (string, error) {
 	return m.xctestrun, nil
 }
 
+// destinationForUDID 生成 xcodebuild -destination 参数。
+//   - 40 位老格式 UDID（iOS ≤15，如 iPhone 7 Plus 5060c403af...）：必须用无前缀
+//     `id=<udid>`。带 `platform=iOS,id=` 前缀在 Xcode 16 上匹配不到 iOS 15 老设备
+//     （实测报 Unable to find a device，无前缀可正常安装并启动 WDA）。
+//   - 8-16 带连字符格式（iOS 16+，如 00008120-...）：必须带 `platform=iOS,id=`
+//     前缀且 UDID 大写（normalizeUDID，小写 exit 70）。
+func destinationForUDID(udid string) string {
+	if strings.Contains(udid, "-") {
+		return "platform=iOS,id=" + normalizeUDID(udid)
+	}
+	return "id=" + udid
+}
+
 // Activate 激活单台 WDA（xcodebuild test-without-building）。
 func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error {
 	if port == 0 {
@@ -147,10 +160,12 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 	env = append(env, "EXPANDED_CODE_SIGN_IDENTITY="+signingIdentity())
 	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:USE_PORT", fmt.Sprint(port))
 	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:WDA_DEVICE_UDID", reportedUDID)
-	// iOS 16+ 真机 UDID 是 8-16 hex 带连字符（如 00008120-000865D90A10C01E）：
-	// 1) `-destination id=<udid>` 匹配不到，必须带 platform 前缀 `platform=iOS,id=...`；
-	// 2) 该格式 UDID 大小写敏感，必须用大写（小写 exit 70）。normalizeUDID 统一处理。
-	cmd := exec.Command("xcodebuild", "-xctestrun", tmp, "-destination", "platform=iOS,id="+normalizeUDID(udid), "test-without-building")
+	// destination 按 UDID 格式区分（destinationForUDID）：
+	// 1) iOS 16+ 8-16 hex 带连字符（如 00008120-000865D90A10C01E）：必须带
+	//    `platform=iOS,id=...` 前缀且大写（小写 exit 70）；
+	// 2) iOS ≤15 老格式 40 位 hex（如 5060c403...）：带前缀匹配不到，必须用无前缀
+	//    `id=...`（Xcode 16 实测，无前缀可正常安装启动 WDA）。
+	cmd := exec.Command("xcodebuild", "-xctestrun", tmp, "-destination", destinationForUDID(udid), "test-without-building")
 	cmd.Env = env
 	logPath := filepath.Join("/tmp", "wda-"+udid[:8]+".log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
