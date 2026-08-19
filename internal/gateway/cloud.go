@@ -333,7 +333,8 @@ func pump[T any](ctx context.Context, conn *websocket.Conn, q <-chan T, typ stri
 }
 
 func (g *Gateway) deviceListReport() []map[string]any {
-	// 与 Web 设备列表一致：只上报在线设备（USB 直连或 Wi-Fi 健康），离线设备不出现。
+	// 与 Web 设备列表一致：已配置设备始终上报（USB 直连 / Wi-Fi 在线 / 离线），
+	// 离线状态由 wda_status 表达；拔掉 USB 后设备不消失。
 	usb := Discover()
 	usbSet := map[string]bool{}
 	for _, d := range usb {
@@ -343,9 +344,6 @@ func (g *Gateway) deviceListReport() []map[string]any {
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
 		if d.UDID == "" {
-			continue
-		}
-		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
 			continue
 		}
 		conn := "wifi"

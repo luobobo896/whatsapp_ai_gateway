@@ -423,9 +423,10 @@ func (g *Gateway) deviceList() []map[string]any {
 		if d.UDID == "" {
 			continue
 		}
-		if !usbSet[d.UDID] && !healthOK(d.LastHealth) {
-			continue // 离线：无 USB 且 Wi-Fi 不可达
-		}
+		// 已配置设备始终显示：拔掉 USB 后设备转 Wi-Fi（或离线）不消失，
+		// 在线状态由 last_health 表达；彻底离线的设备仍保留，可手动删除。
+		// （此前 `!usbSet && !healthOK` 直接把离线设备从列表/云上报过滤，
+		//   导致拔 USB 且 Wi-Fi 探活失败时设备“被自动删除”。）
 		name, model := d.Name, d.Model
 		if info, ok := usbInfo[d.UDID]; ok {
 			if name == "" {
