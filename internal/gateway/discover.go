@@ -184,19 +184,32 @@ func devicectlDevices() []DiscoveredDevice {
 		return nil
 	}
 	var res []DiscoveredDevice
+	// 新表头: Name Hostname Identifier State Model（5 列）。
+	// 实测状态列可能是 "available (paired)" / "connected"；unavailable 排除。
 	for _, line := range strings.Split(string(out), "\n") {
 		parts := strings.Fields(line)
-		if len(parts) < 4 {
+		if len(parts) < 5 || parts[0] == "Name" {
 			continue
 		}
-		ident := parts[len(parts)-3]
-		state := parts[len(parts)-2]
-		if state != "available" || !udidRe.MatchString(ident) {
+		state := parts[3]
+		if state == "unavailable" {
 			continue
 		}
-		model := parts[len(parts)-1]
-		name := strings.Join(parts[:len(parts)-4], " ")
-		res = append(res, DiscoveredDevice{UDID: ident, Name: name, Model: model})
+		// UDID 优先取 Hostname 前缀（iOS 16+ 新格式 8-16，如 00008120-….coredevice.local）；
+		// 旧格式设备退回 Identifier 列（40 位 hex）。
+		var udid string
+		if m := regexp.MustCompile(`^([0-9A-Fa-f]{8}-[0-9A-Fa-f]{16})\.`).FindStringSubmatch(parts[1]); m != nil {
+			udid = m[1]
+		} else if udidRe.MatchString(parts[2]) {
+			udid = parts[2]
+		} else {
+			continue
+		}
+		model := strings.Join(parts[4:], " ")
+		if strings.HasPrefix(model, "(") { // "available (paired)" 中括号属于状态列
+			model = strings.Join(parts[5:], " ")
+		}
+		res = append(res, DiscoveredDevice{UDID: udid, Name: parts[0], Model: model})
 	}
 	return res
 }

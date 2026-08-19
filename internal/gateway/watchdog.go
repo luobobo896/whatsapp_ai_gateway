@@ -17,9 +17,12 @@ const wdaStartGrace = 90 * time.Second
 // usbConnected 判断设备当前是否 USB 直连（ioreg UsbAppleDeviceUDID）。
 // 网络不可达且未 USB 连接 = 设备物理离线（拔线/断电/Wi-Fi 断开），
 // 跳过 xcodebuild 重激活，避免看护循环对离线设备反复构建失败（P2-10 根因修复）。
+// usbConnected 判断设备当前在线（USB 直连或 CoreDevice 可见）。
+// 只用 idevice_id 会把 devicectl 可见（如拔 USB 后仍通过网络配对连接）的设备
+// 误判为离线，导致 watchdog 跳过 WDA 重激活、WiFi 下 WDA 一直异常。
 func usbConnected(udid string) bool {
-	for _, u := range USBUDIDs() {
-		if strings.EqualFold(u, udid) {
+	for _, d := range Discover() {
+		if strings.EqualFold(d.UDID, udid) {
 			return true
 		}
 	}
