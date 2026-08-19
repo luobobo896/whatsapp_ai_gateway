@@ -29,6 +29,11 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
+			// 管理页单页资源：禁止缓存，保证前端更新后用户普通刷新（Cmd+R）即生效，
+			// 否则浏览器启发式缓存旧 JS 导致新功能（删除即隐藏等）不生效。
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
 			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
 			return
 		}
