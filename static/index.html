@@ -417,6 +417,8 @@ function toast(msg){
   t._h = setTimeout(() => t.classList.remove('show'), 2200);
 }
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// 截断健康检查错误信息，便于在卡片上展示具体异常原因
+function shortErr(s, n){ if(!s) return ''; s = String(s).replace(/\s+/g,' ').trim(); n = n || 56; return s.length > n ? s.slice(0, n) + '…' : s; }
 function apiErr(d, status){ return d?.detail || (typeof d?.error === 'string' ? d.error : d?.error?.message) || ('HTTP ' + status); }
 
 /* ---------- 视图切换 ---------- */
@@ -705,7 +707,7 @@ function deviceCard(d){
   else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
   else if (d.usb) { healthCls = 'color:var(--green)'; healthTxt = 'USB 直连（IP 自动发现中）'; }
   else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
-  else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
+  else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常：' + esc(shortErr(h.error)); }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
   // 按钮：忙碌 -> 忙碌中(禁用)；WDA 健康运行 -> 停止；否则（未激活/启动中/异常）-> 激活
   // 注意：WDA 激活异常（进程在但健康失败）时按钮必须显示"激活"，允许用户直接重新激活，
