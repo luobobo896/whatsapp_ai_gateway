@@ -194,4 +194,19 @@ else
   echo "   NOTARY_PROFILE=<profile> sh scripts/build-dmg.sh"
 fi
 
+# 只保留最新 DMG（手册补充：避免仓库根堆积）
+for f in "$ROOT"/WDAFarmGateway-*.dmg; do
+  [ -e "$f" ] || continue
+  [ "$f" = "$ROOT/$DMG_NAME" ] || { echo "  › 清理旧 dmg: $f"; rm -f "$f"; }
+done
+# 记录最新产物信息到 dist/latest.json（忽略入 git）
+mkdir -p "$ROOT/dist"
+SHA="$(shasum -a 256 "$ROOT/$DMG_NAME" | awk '{print $1}')"
+SIZE="$(stat -f%z "$ROOT/$DMG_NAME")"
+python3 - "$ROOT/dist/latest.json" <<PY
+import json, sys
+json.dump({"path": "$ROOT/$DMG_NAME", "version": "$VERSION", "commit": "$(git rev-parse --short HEAD)", "sha256": "$SHA", "size": $SIZE, "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"}, open(sys.argv[1], "w"), indent=2, ensure_ascii=False)
+print("  › 记录最新产物: dist/latest.json")
+PY
+
 echo "✅ 完成：$ROOT/$DMG_NAME"
