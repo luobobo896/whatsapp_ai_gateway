@@ -125,6 +125,18 @@ func (g *Gateway) watchOnce() {
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
 		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID), errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
+			// 老机型（40 位 UDID，iPhone X 及以前，A11 及更早）不支持 WiFi 启动 WDA：
+			// xcodebuild 激活必须 USB 连接（无 CoreDevice WiFi 开发配对），拔线后 WDA
+			// 必然停止且无法通过 WiFi 重激活。直接标记「需 USB」并跳过，避免每 30s 一次
+			// xcodebuild 失败重试风暴（exit 70 + 冷却）。重新插线后 USB 隧道恢复，自动激活。
+			legacy := !strings.Contains(dev.UDID, "-")
+			if legacy && !usbConnected(dev.UDID) {
+				if prevOK {
+					slog.Warn("legacy device unplugged, WDA requires USB", "udid", dev.UDID[:8], "ip", dev.IP)
+				}
+				dev.LastHealth["error"] = "WDA 需 USB 连接：该机型不支持 WiFi 启动 WDA，请重新插线（插回后自动恢复）"
+				continue
+			}
 			if !usbConnected(dev.UDID) && !wifiReachable(dev) {
 				// 设备物理离线（USB 未接 且 WiFi 也不可达）：跳过重激活，避免 xcodebuild 反复失败。
 				if prevOK {

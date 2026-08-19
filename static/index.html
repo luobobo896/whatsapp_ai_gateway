@@ -680,7 +680,13 @@ function deviceCard(d){
   else wdaBadge = '<span class="tag tag-red">WDA 异常</span>';
   // 健康文本（未激活/启动中优先，避免与「异常」并存）
   let healthCls, healthTxt;
-  if (!running) { healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活'; }
+  if (!running) {
+    if (h.error && h.error.indexOf('需 USB') >= 0) {
+      healthCls = 'color:var(--orange)'; healthTxt = '需 USB 连接';
+    } else {
+      healthCls = 'color:var(--text-2)'; healthTxt = 'WDA 未激活';
+    }
+  }
   else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
   else if (d.usb) { healthCls = 'color:var(--green)'; healthTxt = 'USB 直连（IP 自动发现中）'; }
   else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
