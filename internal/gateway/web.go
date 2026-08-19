@@ -227,6 +227,15 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 
 	mux.HandleFunc("/api/devices/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/api/devices/")
+		// 隐藏（已删除）设备列表：供前端渲染"已隐藏设备"恢复入口。
+		if rest == "ignored" {
+			if r.Method != http.MethodGet {
+				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+				return
+			}
+			writeJSON(w, g.Cfg.Ignored)
+			return
+		}
 		parts := strings.SplitN(rest, "/", 2)
 		udid := parts[0]
 		if udid == "" {
@@ -256,6 +265,8 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				dev.AutoReactivate = true
 				_ = g.Cfg.Save()
 			}
+			// 激活即恢复显示：从隐藏列表移除，USB 在线设备重新出现在列表。
+			_ = g.Cfg.UnignoreDevice(udid)
 			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
 			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
 			if dev.IP != "" {
@@ -284,23 +295,29 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			stopped := g.WDA.Stop(udid)
 			writeJSON(w, map[string]any{"udid": udid, "status": "stopped", "auto_reactivate": false, "stopped": stopped})
 		case "delete":
-			// 删除 = 移除配置（IP/身份/自动拉起）并停掉网关托管的 WDA 进程。
-			// USB 仍连接的设备会以「未配置」身份重新出现在列表（发现层自动恢复，防误删）；
-			// 未插 USB 的设备删除后即从列表消失。
+			// 删除 = 移除配置（IP/身份/自动拉起）+ 停掉网关托管的 WDA 进程 + 加入隐藏列表。
+			// 隐藏后即使 USB 仍连接也不在设备列表出现（此前 USB 在线设备会以「未配置」
+			// 身份立刻重新出现，用户反馈"删除没用"）；重新激活/恢复后重新显示。
 			if g.Exec.IsBusy(udid) {
 				writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "设备正在执行任务，不能删除"})
 				return
 			}
 			stopped := g.WDA.Stop(udid)
 			removed := g.Cfg.RemoveDevice(udid)
-			if !removed {
-				writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "设备不在配置中（USB 设备无需删除，拔线即消失）"})
+			_ = g.Cfg.IgnoreDevice(udid)
+			writeJSON(w, map[string]any{
+				"udid": udid, "status": "deleted", "removed": removed, "stopped": stopped,
+				"hidden": true,
+			})
+		case "unignore":
+			// 恢复显示被手动删除（隐藏）的设备：仅取消隐藏，不自动激活。
+			// USB 在线设备随即以「未配置」状态重新出现在列表，可再点激活。
+			if r.Method != http.MethodPost {
+				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 				return
 			}
-			writeJSON(w, map[string]any{
-				"udid": udid, "status": "deleted", "removed": true, "stopped": stopped,
-				"usb_reappears": usbConnected(udid),
-			})
+			_ = g.Cfg.UnignoreDevice(udid)
+			writeJSON(w, map[string]any{"udid": udid, "status": "unignored", "visible": true})
 		case "health":
 			dev := g.Cfg.Device(udid)
 			if dev == nil || dev.IP == "" {
@@ -420,7 +437,7 @@ func (g *Gateway) deviceList() []map[string]any {
 	emitted := map[string]bool{}
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
-		if d.UDID == "" {
+		if d.UDID == "" || g.Cfg.IsIgnored(d.UDID) {
 			continue
 		}
 		// 已配置设备始终显示：拔掉 USB 后设备转 Wi-Fi（或离线）不消失，
@@ -451,7 +468,7 @@ func (g *Gateway) deviceList() []map[string]any {
 		emitted[d.UDID] = true
 	}
 	for _, d := range usb {
-		if emitted[d.UDID] {
+		if emitted[d.UDID] || g.Cfg.IsIgnored(d.UDID) {
 			continue
 		}
 		out = append(out, map[string]any{

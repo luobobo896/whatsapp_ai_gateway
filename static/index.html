@@ -276,6 +276,14 @@
       <h4>暂无已连接设备</h4>
       <p>将 iPhone 接入 USB 并配置后，设备会出现在这里</p>
     </div>
+    <div class="hidden-devices" id="hiddenDevices" style="display:none;margin-top:20px">
+      <div class="section-head">
+        <h4 style="margin:0">已隐藏设备</h4>
+        <span class="count" id="hiddenCount"></span>
+      </div>
+      <p style="font-size:12px;color:var(--text-2);margin:4px 0 10px">手动删除的设备会隐藏在这里（USB 仍连接也不会出现在上方列表）；点击「恢复」可重新显示。</p>
+      <div class="devices" id="hiddenList"></div>
+    </div>
   </div>
 
   <!-- ================= 发送明细 ================= -->
@@ -771,7 +779,7 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadIgnored(), loadEt(), loadMetrics(), loadLlm()]); }
 
 async function loadLlm(){
   try{
@@ -834,17 +842,52 @@ async function stop(udid){
 async function delDevice(udid){
   const d = devicesCache.find(x => x.udid === udid) || {};
   const label = d.serial || d.name || udid.slice(0, 8);
-  const msg = d.usb
-    ? `确定删除设备「${label}」？\n\n设备仍通过 USB 连接：删除后配置（IP/身份）会被清除，但设备会作为「未激活」的新设备重新出现在列表中。`
-    : `确定删除设备「${label}」？\n\n设备当前未通过 USB 连接：删除后将从此列表移除，重新插线激活才会再次出现。`;
+  const msg = `确定删除并隐藏设备「${label}」？\n\n删除后该设备从列表消失（即使 USB 仍连接也不显示），可在下方「已隐藏设备」中恢复。`;
   if (!confirm(msg)) return;
   try{
     const r = await api('/api/devices/' + encodeURIComponent(udid) + '/delete', {method:'POST'});
     let dd = {}; try{ dd = await r.json(); }catch(e){}
     if(!r.ok){ toast('删除失败：' + apiErr(dd, r.status)); return; }
-    toast(dd.usb_reappears ? '已删除配置；设备仍连着 USB，稍后自动重新出现' : '已删除设备');
+    toast('已删除并隐藏设备');
   }catch(e){ toast('删除失败'); }
-  refreshDevices();
+  refreshAll();
+}
+/* ---------- 已隐藏设备管理 ---------- */
+let ignoredCache = [];
+async function loadIgnored(){
+  try{
+    ignoredCache = await (await api('/api/devices/ignored')).json();
+  }catch(e){ ignoredCache = []; }
+  renderIgnored(ignoredCache);
+}
+function renderIgnored(list){
+  const box = $('hiddenDevices');
+  if (!box) return;
+  if (!list || !list.length){ box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  $('hiddenCount').textContent = '共 ' + list.length + ' 台';
+  $('hiddenList').innerHTML = list.map(u => {
+    const short = u.length > 12 ? u.slice(0, 12) + '…' : u;
+    return `<div class="device-row">
+      <div class="device-cell device-id">
+        <div class="device-info">
+          <div class="device-title"><span class="device-name">已隐藏设备</span><span class="tag">${esc(short)}</span></div>
+          <div class="device-meta"><span>${esc(u)}</span></div>
+        </div>
+      </div>
+      <div class="device-cell device-actions">
+        <button class="btn sm" onclick="unignore('${esc(u)}')">恢复</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+async function unignore(udid){
+  try{
+    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/unignore', {method:'POST'});
+    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('恢复失败：' + apiErr(d, r.status)); return; }
+    toast('已恢复显示（USB 在线设备会重新出现在列表）');
+  }catch(e){ toast('恢复失败'); }
+  refreshAll();
 }
 /* ---------- 发送明细（按设备分组，本地落盘 results） ---------- */
 let itemFilter = ''; // 当前按设备过滤（'' = 全部设备）

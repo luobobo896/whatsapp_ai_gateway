@@ -32,6 +32,9 @@ type Config struct {
 	LLM            LLMConfig   `json:"llm,omitempty"`
 	Web            WebConfig   `json:"web,omitempty"`
 	Signing        SigningConfig `json:"signing,omitempty"`
+	// Ignored 手动删除（隐藏）的设备 UDID：删除后即使 USB 仍连接也不在列表出现，
+	// 直到用户显式恢复（unignore）或重新激活。防误删的同时满足"删除要真正生效"。
+	Ignored        []string    `json:"ignored,omitempty"`
 }
 
 // SigningConfig 构建/签名配置（打包交付用）。
@@ -266,6 +269,13 @@ func (c *Config) load() error {
 			return fmt.Errorf("config.health_interval: %w", err)
 		}
 	}
+	if v, ok, err := c.readKey("ignored"); err != nil {
+		return err
+	} else if ok {
+		if err := json.Unmarshal([]byte(v), &c.Ignored); err != nil {
+			return fmt.Errorf("config.ignored: %w", err)
+		}
+	}
 	rows, err := c.db.Query(`SELECT data FROM devices ORDER BY rowid`)
 	if err != nil {
 		return err
@@ -331,6 +341,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, string(b)); err != ni
 		"web":             c.Web,
 		"signing":         c.Signing,
 		"health_interval": c.HealthInterval,
+		"ignored":         c.Ignored,
 	} {
 		if err := upsert(key, v); err != nil {
 			return err
@@ -393,6 +404,45 @@ func (c *Config) RemoveDevice(udid string) bool {
 		_, _ = c.db.Exec(`DELETE FROM devices WHERE udid=?`, udid)
 	}
 	return found
+}
+
+// IsIgnored 判断 UDID 是否处于手动删除（隐藏）状态。
+func (c *Config) IsIgnored(udid string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, u := range c.Ignored {
+		if strings.EqualFold(u, udid) {
+			return true
+		}
+	}
+	return false
+}
+
+// IgnoreDevice 把 UDID 加入隐藏列表并落盘（删除设备后调用，避免 USB 在线设备重新出现）。
+func (c *Config) IgnoreDevice(udid string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, u := range c.Ignored {
+		if strings.EqualFold(u, udid) {
+			return c.saveLocked()
+		}
+	}
+	c.Ignored = append(c.Ignored, udid)
+	return c.saveLocked()
+}
+
+// UnignoreDevice 从隐藏列表移除 UDID 并落盘（重新显示/重新激活时调用）。
+func (c *Config) UnignoreDevice(udid string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.Ignored[:0]
+	for _, u := range c.Ignored {
+		if !strings.EqualFold(u, udid) {
+			out = append(out, u)
+		}
+	}
+	c.Ignored = out
+	return c.saveLocked()
 }
 
 // SetCloudToken 原子更新网关云凭证并落库（网关登录后自动签发时调用）；
