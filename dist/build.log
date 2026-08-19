@@ -319,3 +319,32 @@ Build complete! (0.19s)
   › 记录最新产物: dist/latest.json
 ✅ 完成：/Users/zhouxy/LJ/External/whatsapp_ai_gateway/WDAFarmGateway-8ba98cb-arm64.dmg
 exit=0
+===== build-dmg 2026-08-19 15:32:05 =====
+▶ [1/7] Go 测试与构建
+  ✓ go test 全绿
+▶ [2/7] Swift 壳构建
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[2/4] Compiling WDAFarmGateway GatewayProcess.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking WDAFarmGateway
+Build complete! (4.24s)
+▶ [3/7] 组装 .app（白名单，敏感数据不入包）
+▶ [4/7] iproxy 随包（USB 隧道必需，含依赖 dylib rpath 修正）
+  ✓ iproxy/ideviceinfo/idevice_id（原样未修改）+ 6 个 dylib（DYLD fallback 解析）
+▶ [5/7] 签名
+/Users/zhouxy/LJ/External/whatsapp_ai_gateway/build/WDAFarmGateway.app: replacing existing signature
+  ⚠ 未找到 Developer ID 证书，已 ad-hoc 签名（客户首次打开需右键→打开）
+▶ [6/7] 安装说明
+▶ [7/7] DMG
+  ✓ /Users/zhouxy/LJ/External/whatsapp_ai_gateway/WDAFarmGateway-f2446a3-arm64.dmg ( 26M)
+▶ 敏感数据终检
+  ✓ 无敏感数据泄漏
+ℹ 跳过公证（未设置 NOTARY_PROFILE）。有 Developer ID 后：
+   xcrun notarytool store-credentials <profile> --apple-id <账号> --team-id <TeamID>
+   NOTARY_PROFILE=<profile> sh scripts/build-dmg.sh
+  › 清理旧 dmg: /Users/zhouxy/LJ/External/whatsapp_ai_gateway/WDAFarmGateway-8ba98cb-arm64.dmg
+  › 记录最新产物: dist/latest.json
+✅ 完成：/Users/zhouxy/LJ/External/whatsapp_ai_gateway/WDAFarmGateway-f2446a3-arm64.dmg
+exit=0
