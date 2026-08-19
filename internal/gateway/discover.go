@@ -21,8 +21,50 @@ import (
 
 var udidRe = regexp.MustCompile(`([0-9A-Fa-f]{40})`)
 
-// USBUDIDs 返回 USB 直连真机的 UDID（ioreg UsbAppleDeviceUDID）。
+var (
+	udid40Re     = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	udidHyphenRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{16}$`)
+)
+
+// USBUDIDs 返回 USB 直连真机的 UDID（usbmux 原文格式）。
+// 主源 idevice_id -l：iPhone XS 及以后机型的 UDID 是 8-16 hex 带连字符
+// （如 00008120-000865D90A10C01E），老机型是 40 位 hex；iproxy/ideviceinfo
+// 只认该原文（无连字符的 24 位 hex 实测 not found），xcodebuild destination id=
+// 同格式，devices.json 与隧道对账键因此全程不做格式变换。
+// iOS 17+ 新机型在 ioreg 已不暴露 UsbAppleDeviceUDID（只剩无连字符 USB serial），
+// ioreg 仅作无 libimobiledevice 环境下老机型的回退。
 func USBUDIDs() []string {
+	if udids := usbmuxListUDIDs(); len(udids) > 0 {
+		return udids
+	}
+	return usbUDIDsViaIOReg()
+}
+
+// usbmuxListUDIDs 经 idevice_id -l 列出 usbmux 在线设备（原文 UDID，每行一个）。
+func usbmuxListUDIDs() []string {
+	bin := libiDeviceBin("idevice_id")
+	if bin == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "-l")
+	cmd.Env = append(os.Environ(), bundleLibFallback()...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var res []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if u := strings.ToLower(strings.TrimSpace(line)); looksLikeUDID(u) {
+			res = append(res, u)
+		}
+	}
+	return res
+}
+
+// usbUDIDsViaIOReg 从 ioreg 提取 UsbAppleDeviceUDID（仅老机型暴露该属性）。
+func usbUDIDsViaIOReg() []string {
 	out, err := exec.Command("ioreg", "-p", "IOUSB", "-l", "-w0").Output()
 	if err != nil {
 		return nil
@@ -30,12 +72,37 @@ func USBUDIDs() []string {
 	seen := map[string]bool{}
 	var res []string
 	for _, m := range regexp.MustCompile(`"UsbAppleDeviceUDID"\s*=\s*"([0-9A-Fa-f]{40})"`).FindAllStringSubmatch(string(out), -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			res = append(res, m[1])
+		if !seen[strings.ToLower(m[1])] {
+			seen[strings.ToLower(m[1])] = true
+			res = append(res, strings.ToLower(m[1]))
 		}
 	}
 	return res
+}
+
+// looksLikeUDID 校验 usbmux 上报的 UDID 原文：老机型 40 位 hex，
+// iPhone XS 及以后 8-16 hex 带连字符。
+func looksLikeUDID(s string) bool {
+	return udid40Re.MatchString(s) || udidHyphenRe.MatchString(s)
+}
+
+// libiDeviceBin 定位 libimobiledevice 系可执行文件，与 iproxyBin 同策略：
+// PATH（壳注入 bundle bin）→ bundle 内置 → Homebrew。
+func libiDeviceBin(name string) string {
+	if _, err := exec.LookPath(name); err == nil {
+		return name
+	}
+	candidates := []string{}
+	if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
+		candidates = append(candidates, filepath.Join(res, "bin", name))
+	}
+	candidates = append(candidates, "/opt/homebrew/bin/"+name, "/usr/local/bin/"+name)
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // validSerial 校验 ideviceinfo 返回内容像硬件序列号（C38SG3S0HG00 / 新式 24 位），
@@ -54,25 +121,10 @@ func validSerial(s string) bool {
 
 // ideviceSerial 经 libimobiledevice 的 ideviceinfo 查询硬件序列号。
 // 序列号只有 lockdownd 协议提供（ioreg/devicectl/WDA 都只有 UDID），需要设备 USB 在线且已配对。
-// 二进制定位与 iproxy 同策略：PATH（壳注入 bundle bin）→ bundle 内置 → Homebrew。
 func ideviceSerial(udid string) string {
-	bin := "ideviceinfo"
-	if _, err := exec.LookPath("ideviceinfo"); err != nil {
-		bin = ""
-		candidates := []string{}
-		if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
-			candidates = append(candidates, filepath.Join(res, "bin", "ideviceinfo"))
-		}
-		candidates = append(candidates, "/opt/homebrew/bin/ideviceinfo", "/usr/local/bin/ideviceinfo")
-		for _, p := range candidates {
-			if _, err := os.Stat(p); err == nil {
-				bin = p
-				break
-			}
-		}
-		if bin == "" {
-			return ""
-		}
+	bin := libiDeviceBin("ideviceinfo")
+	if bin == "" {
+		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()

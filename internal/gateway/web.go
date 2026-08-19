@@ -406,7 +406,7 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 }
 
 func (g *Gateway) deviceList() []map[string]any {
-	// 设备列表实时获取：USB 直连（ioreg/devicectl）与 Wi-Fi 在线（WDA 健康）才算在线；
+	// 设备列表实时获取：USB 直连（idevice_id/ioreg/devicectl）与 Wi-Fi 在线（WDA 健康）才算在线；
 	// 离线设备不再出现（不在线就没有数据）。
 	usb := Discover()
 	usbSet := map[string]bool{}

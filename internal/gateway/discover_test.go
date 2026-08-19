@@ -50,3 +50,20 @@ func TestValidSerial(t *testing.T) {
 		}
 	}
 }
+
+func TestLooksLikeUDID(t *testing.T) {
+	cases := map[string]bool{
+		"4886579a97a96bad83b527862bab409b5a07c741": true,  // 老机型 40 位 hex（usbmux 原文）
+		"00008120-000865d90a10c01e":                true,  // iPhone XS 及以后 8-16 带连字符（usbmux 原文）
+		"00008120000865d90a10c01e":                 false, // 无连字符 24 位：iproxy/ideviceinfo 不认，非标准格式
+		"a46bad8f-21e5-54c0-9960-e4aac7a4aa04":     false, // devicectl 的 CoreDevice UUID，不是 UDID
+		"":                                         false,
+		"001000001":                                false, // USB Hub serial
+		"not-a-udid":                               false,
+	}
+	for s, want := range cases {
+		if got := looksLikeUDID(s); got != want {
+			t.Errorf("looksLikeUDID(%q) = %v, want %v", s, got, want)
+		}
+	}
+}

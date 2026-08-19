@@ -77,7 +77,9 @@ if command -v iproxy >/dev/null 2>&1; then
   # （dyld 文档化回退：LC_LOAD_DYLIB 的绝对路径不存在时搜索该目录）。
   QUEUE=("$IPROXY")
   IDEV="$(dirname "$IPROXY")/ideviceinfo"
+  IDEVID="$(dirname "$IPROXY")/idevice_id"
   [ -x "$IDEV" ] && QUEUE+=("$IDEV")
+  [ -x "$IDEVID" ] && QUEUE+=("$IDEVID")
   while [ ${#QUEUE[@]} -gt 0 ]; do
     CUR="${QUEUE[0]}"; QUEUE=("${QUEUE[@]:1}")
     for DEP in $(collect_libs "$CUR"); do
@@ -96,8 +98,9 @@ if command -v iproxy >/dev/null 2>&1; then
   done
   cp "$IPROXY" "$RES/bin/iproxy"
   [ -x "$IDEV" ] && cp "$IDEV" "$RES/bin/ideviceinfo"
+  [ -x "$IDEVID" ] && cp "$IDEVID" "$RES/bin/idevice_id"
   chmod +w "$RES/bin/"* "$RES/lib/"*.dylib
-  echo "  ✓ iproxy/ideviceinfo（原样未修改）+ $(find "$RES/lib" -type f | wc -l | tr -d ' ') 个 dylib（DYLD fallback 解析）"
+  echo "  ✓ iproxy/ideviceinfo/idevice_id（原样未修改）+ $(find "$RES/lib" -type f | wc -l | tr -d ' ') 个 dylib（DYLD fallback 解析）"
 else
   echo "  ⚠ 本机无 iproxy（未装 libimobiledevice），USB 隧道需客户自行 brew install libimobiledevice"
 fi
