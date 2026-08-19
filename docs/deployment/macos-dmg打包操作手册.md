@@ -35,6 +35,18 @@ sh scripts/build-dmg.sh
 
 版本与下载地址（与 `scripts/install.sh` 一致）：EasyTier `v2.6.4` macOS aarch64。
 
+### 2.3 机型/系统兼容与 iOS 15 老设备的 DeveloperDiskImage
+
+- **支持范围**：iPhone 7 及以上机型（arm64 构建，兼容 arm64/arm64e 设备）、iOS 15 及以上系统。
+- **iOS 16+ 前置**：客户设备需在「设置 → 隐私与安全性」开启「开发者模式」。
+- **iOS 15/16 老设备激活**：依赖 `DeveloperDiskImage.dmg`（DDI）挂载。网关在激活前会自动从
+  本机 Xcode 复制匹配版本的 DDI 到 `~/Library/Developer/Xcode/iOS DeviceSupport/<型号> <版本> (<构建>/`
+  （幂等，日志可见 `EnsureDeviceSupportDDI: 已补齐`）。要求客户机 Xcode 自带 15.x/16.x 镜像
+  （Xcode 16.x 自带 15.0/15.2/15.4/15.5，够用）；若某台客户机 Xcode 过新缺少 15.x，需手动放置
+  对应 DDI 或换用 Xcode 16.x。
+- **UDID 格式差异**：老机型 40 位 hex（iOS ≤15）用无前缀 `id=` destination，新款连字符格式
+  （iOS 16+）用 `platform=iOS,id=`+大写，网关自动区分，无需人工干预。
+
 ## 3. 从零打包步骤（新 Mac 完整版）
 
 ```bash

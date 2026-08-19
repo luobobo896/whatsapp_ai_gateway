@@ -15,6 +15,17 @@ Mac mini 上常驻的本地网关：发现 USB 真机、按 UDID 激活/看护 W
                                     iPhone 1..N（各 Wi-Fi IP:8100）
 ```
 
+## 机型/系统兼容
+
+- **机型**：iPhone 7 及以上（A10 及以后；构建产物为 arm64，兼容 arm64/arm64e 设备）。
+- **系统**：iOS 15 及以上。
+  - iOS 16+ 需在设备「设置 → 隐私与安全性」开启「开发者模式」；
+  - iOS 15/16 老设备激活时网关自动从本机 Xcode 复制匹配版本的 DeveloperDiskImage
+    到设备支持目录（`~/Library/Developer/Xcode/iOS DeviceSupport/`，幂等）；
+    若本机 Xcode 不含 iOS 15 镜像（建议 Xcode 16.x），请手动放置对应 DDI。
+- **识别/激活**：老机型（40 位 UDID，iOS ≤15）用无前缀 `id=` destination，
+  新款（连字符 UDID，iOS 16+）用 `platform=iOS,id=`+大写，网关自动区分。
+
 ## 快速开始
 
 ```bash

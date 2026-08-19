@@ -149,6 +149,15 @@ WDA Farm Gateway（${VERSION}）安装说明
   - 首次激活后需在 iPhone「设置 → 通用 → VPN与设备管理」里信任开发者证书，再重新激活；
   - 激活 WDA 首次会编译（数分钟），之后秒级。
 
+五、机型/系统兼容
+  - 支持 iPhone 7 及以上机型、iOS 15 及以上系统；
+  - iOS 16+ 需先在 iPhone「设置 → 隐私与安全性」打开「开发者模式」；
+  - iOS 15/16 老设备（如 iPhone 7/8/X）激活时，网关会自动从本机 Xcode 复制
+    匹配的 DeveloperDiskImage 到设备支持目录（无需手工干预）；若本机 Xcode
+    未包含 iOS 15 镜像，请升级 Xcode 或手动放置对应版本 DeveloperDiskImage.dmg；
+  - 老机型（40 位 UDID，iOS ≤15）与新款（连字符 UDID，iOS 16+）已分别按
+    xcodebuild 兼容格式自动匹配，无需关心大小写/前缀。
+
 五、可选：easytier 组网后备通道
   默认关闭。启用时按页面提示完成一次性授权（安装到 /usr/local/libexec/wda-gateway 并放行 sudoers）。
 
