@@ -147,10 +147,10 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 	env = append(env, "EXPANDED_CODE_SIGN_IDENTITY="+signingIdentity())
 	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:USE_PORT", fmt.Sprint(port))
 	_ = plistSet(tmp, "WebDriverAgentRunner:EnvironmentVariables:WDA_DEVICE_UDID", reportedUDID)
-	// iOS 16+ 真机 UDID 是 8-16 hex 带连字符（如 00008120-000865D90A10C01E），
-	// Xcode 16.4 下 `-destination id=<udid>` 匹配不到（报 Unable to find a device），
-	// 必须带 platform 前缀：`platform=iOS,id=<udid>`（实测可正常拉起 WDA）。
-	cmd := exec.Command("xcodebuild", "-xctestrun", tmp, "-destination", "platform=iOS,id="+udid, "test-without-building")
+	// iOS 16+ 真机 UDID 是 8-16 hex 带连字符（如 00008120-000865D90A10C01E）：
+	// 1) `-destination id=<udid>` 匹配不到，必须带 platform 前缀 `platform=iOS,id=...`；
+	// 2) 该格式 UDID 大小写敏感，必须用大写（小写 exit 70）。normalizeUDID 统一处理。
+	cmd := exec.Command("xcodebuild", "-xctestrun", tmp, "-destination", "platform=iOS,id="+normalizeUDID(udid), "test-without-building")
 	cmd.Env = env
 	logPath := filepath.Join("/tmp", "wda-"+udid[:8]+".log")
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {

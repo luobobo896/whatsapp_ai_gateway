@@ -71,11 +71,17 @@ func freeLocalPort() (int, error) {
 
 // EnsureUSBTunnels 按当前 USB 设备与目标端口对账隧道（看护循环每轮调用）。
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
-func EnsureUSBTunnels(ports map[string]int) {
+func EnsureUSBTunnels(rawPorts map[string]int) {
 	udids := USBUDIDs()
 	m := usbTunnels
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// UDID 大小写归一化：iOS 16+ 新格式（8-16 hex 带连字符）在 iproxy 里大小写敏感
+	// （小写连不上），统一经 normalizeUDID（8-16 转大写）保证与 discover 对账一致。
+	ports := make(map[string]int, len(rawPorts))
+	for u, p := range rawPorts {
+		ports[normalizeUDID(u)] = p
+	}
 	if len(udids) == 0 && len(m.procs) > 0 {
 		// ioreg 偶发失败/空结果：视为发现层抖动，本轮不对账，
 		// 避免把全部隧道拆掉造成所有设备同时掉线（真拔线由连续确认机制兜底）。
@@ -84,7 +90,7 @@ func EnsureUSBTunnels(ports map[string]int) {
 	}
 	usb := map[string]bool{}
 	for _, u := range udids {
-		usb[u] = true
+		usb[normalizeUDID(u)] = true
 	}
 	// 拆除防抖：单台设备连续 2 轮未在 USB 列表确认才拆，单次抖动不误杀；
 	// 只拆确认消失的设备，其余隧道不受影响（停一台只停一台）。

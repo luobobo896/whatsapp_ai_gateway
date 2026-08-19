@@ -22,8 +22,8 @@ import (
 var udidRe = regexp.MustCompile(`([0-9A-Fa-f]{40})`)
 
 var (
-	udid40Re     = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	udidHyphenRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{16}$`)
+	udid40Re     = regexp.MustCompile(`^[0-9A-Fa-f]{40}$`)
+	udidHyphenRe = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}$`)
 )
 
 // USBUDIDs 返回 USB 直连真机的 UDID（usbmux 原文格式）。
@@ -56,7 +56,9 @@ func usbmuxListUDIDs() []string {
 	}
 	var res []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if u := strings.ToLower(strings.TrimSpace(line)); looksLikeUDID(u) {
+		// 保留 idevice_id 上报的原始大小写：iOS 16+ 新格式 UDID 在 iproxy/xcodebuild
+		// 里大小写敏感，转小写会导致激活匹配失败/隧道连不上（实测）。
+		if u := strings.TrimSpace(line); looksLikeUDID(u) {
 			res = append(res, u)
 		}
 	}
@@ -72,9 +74,10 @@ func usbUDIDsViaIOReg() []string {
 	seen := map[string]bool{}
 	var res []string
 	for _, m := range regexp.MustCompile(`"UsbAppleDeviceUDID"\s*=\s*"([0-9A-Fa-f]{40})"`).FindAllStringSubmatch(string(out), -1) {
-		if !seen[strings.ToLower(m[1])] {
-			seen[strings.ToLower(m[1])] = true
-			res = append(res, strings.ToLower(m[1]))
+		u := m[1]
+		if !seen[strings.ToUpper(u)] {
+			seen[strings.ToUpper(u)] = true
+			res = append(res, u)
 		}
 	}
 	return res
@@ -84,6 +87,17 @@ func usbUDIDsViaIOReg() []string {
 // iPhone XS 及以后 8-16 hex 带连字符。
 func looksLikeUDID(s string) bool {
 	return udid40Re.MatchString(s) || udidHyphenRe.MatchString(s)
+}
+
+// normalizeUDID 归一化 UDID 大小写：iOS 16+ 新格式（8-16 hex 带连字符）在
+// xcodebuild destination 与 libimobiledevice（iproxy/idevice_id）里大小写敏感——
+// 小写会 "Unable to find a device"（exit 70）或隧道连不上，必须用大写；老 40 位
+// hex 大小写不敏感，保持原样以免破坏历史匹配。
+func normalizeUDID(udid string) string {
+	if strings.Contains(udid, "-") {
+		return strings.ToUpper(udid)
+	}
+	return udid
 }
 
 // libiDeviceBin 定位 libimobiledevice 系可执行文件，与 iproxyBin 同策略：
