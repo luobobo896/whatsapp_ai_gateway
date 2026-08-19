@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,18 @@ func usbConnected(udid string) bool {
 		}
 	}
 	return false
+}
+
+// wifiReachable 判断设备 WiFi IP 是否可达（设备在线但 WDA 可能未跑）。
+// 用于：USB 未连接时，只要设备在网（IP 能 ping 通）就允许重激活 WDA，
+// 而不是一律按"未接 USB"跳过——否则拔 USB 后 WiFi 下 WDA 异常且永不恢复。
+func wifiReachable(dev *Device) bool {
+	if dev == nil || dev.IP == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "ping", "-c", "1", "-t", "2", dev.IP).Run() == nil
 }
 
 // reactivateDecision 是否应重激活：健康失败 + 允许自动重激活 + 未在运行 + USB 在线。
@@ -112,10 +125,10 @@ func (g *Gateway) watchOnce() {
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
 		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID), errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
-			if !usbConnected(dev.UDID) {
-				// 设备物理离线（无网络且未接 USB）：跳过重激活，避免 xcodebuild 反复失败。
+			if !usbConnected(dev.UDID) && !wifiReachable(dev) {
+				// 设备物理离线（USB 未接 且 WiFi 也不可达）：跳过重激活，避免 xcodebuild 反复失败。
 				if prevOK {
-					slog.Warn("device offline and not USB-attached, skip reactivation",
+					slog.Warn("device offline and not reachable, skip reactivation",
 						"udid", dev.UDID[:8], "ip", dev.IP)
 				}
 				if h.Error == "" || !strings.Contains(h.Error, "USB") {
