@@ -664,7 +664,10 @@ function deviceCard(d){
   const model = esc(d.model || 'iPhone');
   const ios = esc(d.ios_version || h.ios_version || '');
   const udid = esc(d.udid);
-  const addr = d.ip ? (esc(d.ip) + ':' + esc(d.port || 8100)) : '—';
+  // 需 USB 连接（老机型拔线后 WDA 停）时不显示过期的旧 IP，避免误导为设备在线；
+  // 其余情况显示配置/自报 IP。
+  const needUsb = (h.error || '').indexOf('需 USB') >= 0;
+  const addr = (d.ip && !needUsb) ? (esc(d.ip) + ':' + esc(d.port || 8100)) : '—';
   // 统一状态：忙碌 > 未激活 > 在线(WDA健康或USB直连) > 启动中(宽限期或健康数据旧) > 异常
   let st;
   if (d.busy) st = { cls: 'busy', txt: '忙碌' };
