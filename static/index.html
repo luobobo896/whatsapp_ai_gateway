@@ -358,6 +358,18 @@
 
 <div id="toast"></div>
 
+<!-- 通用确认弹层（替代 confirm()：浏览器"阻止此页面创建额外对话框"会拦截原生 confirm，导致点击按钮毫无反应） -->
+<div class="modal-mask" id="confirmModal" onclick="if(event.target===this)hideConfirm()">
+  <div class="modal">
+    <h4 id="confirmTitle">确认</h4>
+    <p id="confirmMsg" style="white-space:pre-wrap"></p>
+    <div class="modal-actions">
+      <button class="btn sm ghost" onclick="hideConfirm()">取消</button>
+      <button class="btn sm ghost danger" id="confirmOkBtn" onclick="confirmOk()">确定</button>
+    </div>
+  </div>
+</div>
+
 <!-- 登录弹层 -->
 <div class="modal-mask" id="loginMask">
   <div class="modal" style="width:min(380px, calc(100vw - 40px))">
@@ -695,12 +707,15 @@ function deviceCard(d){
   else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常'; }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
-  // 按钮：未激活 -> 激活；运行/忙碌 -> 停止（无需手动设置 IP）；非忙碌设备可删除（删除即隐藏）
+  // 按钮：忙碌 -> 忙碌中(禁用)；运行 -> 停止；未激活 -> 激活（非忙碌设备可删除）
+  // 注意：busy 单独处理，避免"停止"按钮在 busy 时出现却无法生效（点了状态不变）。
   let actions = '';
-  if (!running && !d.busy) {
-    actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
-  } else if (running || d.busy) {
+  if (d.busy) {
+    actions = `<button class="btn sm" disabled style="opacity:.5;cursor:not-allowed">忙碌中</button>`;
+  } else if (running) {
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
+  } else {
+    actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
   }
   actions += ` <button class="btn sm ghost" onclick="showDeviceItems('${d.udid}')">明细</button>`;
   if (!d.busy) {
@@ -848,18 +863,38 @@ async function stop(udid){
   }catch(e){ toast('停止失败'); }
   refreshDevices();
 }
+/* ---------- 通用确认框（替代原生 confirm，避免被浏览器拦截） ---------- */
+let _confirmCb = null;
+function showConfirm(title, msg, okText, cb){
+  $('confirmTitle').textContent = title;
+  $('confirmMsg').textContent = msg;
+  const ok = $('confirmOkBtn');
+  ok.textContent = okText || '确定';
+  $('confirmModal').classList.add('open');
+  _confirmCb = cb;
+}
+function hideConfirm(){
+  $('confirmModal').classList.remove('open');
+  _confirmCb = null;
+}
+function confirmOk(){
+  const cb = _confirmCb;
+  hideConfirm();
+  if (cb) cb();
+}
+
 async function delDevice(udid){
   const d = devicesCache.find(x => x.udid === udid) || {};
   const label = d.serial || d.name || udid.slice(0, 8);
-  const msg = `确定删除并隐藏设备「${label}」？\n\n删除后该设备从列表消失（即使 USB 仍连接也不显示），可在下方「已隐藏设备」中恢复。`;
-  if (!confirm(msg)) return;
-  try{
-    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/delete', {method:'POST'});
-    let dd = {}; try{ dd = await r.json(); }catch(e){}
-    if(!r.ok){ toast('删除失败：' + apiErr(dd, r.status)); return; }
-    toast('已删除并隐藏设备');
-  }catch(e){ toast('删除失败'); }
-  refreshAll();
+  showConfirm('删除并隐藏设备', `确定删除并隐藏设备「${label}」？\n删除后该设备从列表消失（即使 USB 仍连接也不显示），可在下方「已隐藏设备」中恢复。`, '删除', async () => {
+    try{
+      const r = await api('/api/devices/' + encodeURIComponent(udid) + '/delete', {method:'POST'});
+      let dd = {}; try{ dd = await r.json(); }catch(e){}
+      if(!r.ok){ toast('删除失败：' + apiErr(dd, r.status)); return; }
+      toast('已删除并隐藏设备');
+    }catch(e){ toast('删除失败'); }
+    refreshAll();
+  });
 }
 /* ---------- 已隐藏设备管理 ---------- */
 let ignoredCache = [];
