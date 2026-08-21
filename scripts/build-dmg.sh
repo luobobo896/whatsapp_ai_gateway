@@ -48,13 +48,13 @@ plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
 mkdir -p "$RES/static"
 cp "$ROOT/static/index.html" "$RES/static/index.html"
 
-# WDA 源码工程（xcodebuild 编译安装到 iPhone 所需；剔除 .git / 评审缓存）
+# WDA 源码工程（xcodebuild 编译安装到 iPhone 所需；剔除 .git）
 if [ ! -d "$WDA_PROJECT_DIR" ]; then
   echo "  ✗ WDA 工程不存在：$WDA_PROJECT_DIR（用 WDA_PROJECT_DIR 覆盖）" >&2
   exit 1
 fi
 rsync -a --delete \
-  --exclude '.git' --exclude '.code-review-graph' --exclude 'DerivedData' \
+  --exclude '.git' --exclude 'DerivedData' \
   "$WDA_PROJECT_DIR/" "$RES/WhatsAppDeviceAgent/"
 
 # easytier 二进制 + 授权脚本（安装源；启用时安装到 /usr/local/libexec/wda-gateway）
