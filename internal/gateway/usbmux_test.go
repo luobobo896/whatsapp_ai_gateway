@@ -63,3 +63,18 @@ func TestWdaBaseURLForFallback(t *testing.T) {
 		t.Fatalf("fallback wrong: %s", got)
 	}
 }
+
+func TestWdaBaseURLForPrefersUSBTunnel(t *testing.T) {
+	udid := "test-tunnel-udid"
+	usbTunnels.mu.Lock()
+	usbTunnels.procs[udid] = &usbTunnelProc{port: 63344, done: make(chan struct{})}
+	usbTunnels.mu.Unlock()
+	t.Cleanup(func() {
+		usbTunnels.mu.Lock()
+		delete(usbTunnels.procs, udid)
+		usbTunnels.mu.Unlock()
+	})
+	if got := wdaBaseURLFor(udid, "192.168.10.237", 8100); got != "http://127.0.0.1:63344" {
+		t.Fatalf("tunnel first, got %s", got)
+	}
+}

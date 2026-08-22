@@ -41,16 +41,37 @@ func resolveActivator(configured string) string {
 }
 
 func autoActivator(hasGoIOS, hasTidevice bool) string {
+	return autoActivatorFor(hasGoIOS, hasTidevice, runtime.GOOS)
+}
+
+func autoActivatorFor(hasGoIOS, hasTidevice bool, goos string) string {
 	if hasGoIOS {
 		return activatorGoIOS
 	}
 	if hasTidevice {
 		return activatorTidevice
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return activatorGoIOS
 	}
 	return activatorXcodebuild
+}
+
+// enableWifiLockdown 打开 lockdown EnableWifiConnections（Xcode「Connect via network」）。
+// 不打开时拔 USB 会拆掉 testmanagerd，机上 WDA 一起死。没有辅助程序就跳过。
+func enableWifiLockdown(udid string) {
+	if udid == "" {
+		return
+	}
+	bin := lookTool("wifi-lockdown", "wifi-lockdown.exe")
+	if bin == "" {
+		return
+	}
+	if _, err := runTool(bin, []string{udid}, 15*time.Second); err != nil {
+		slog.Warn("enable wifi lockdown failed", "udid", shortOf(udid), "error", err)
+		return
+	}
+	slog.Info("wifi lockdown enabled", "udid", shortOf(udid))
 }
 
 func (m *WDAManager) wdaBundleID() string {
@@ -60,11 +81,12 @@ func (m *WDAManager) wdaBundleID() string {
 	return defaultWDABundleID
 }
 
-func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind string) error {
+func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind, wifiIP string) error {
+	enableWifiLockdown(udid)
 	if err := m.ensureRunnerInstalled(udid, kind); err != nil {
 		return err
 	}
-	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind)
+	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind, wifiIP)
 	if err != nil {
 		return err
 	}
@@ -81,10 +103,14 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind 
 	return nil
 }
 
-func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind string) (string, []string, error) {
+func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifiIP string) (string, []string, error) {
 	bundle := m.wdaBundleID()
 	switch kind {
 	case activatorGoIOS:
+		if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
+			slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP)
+			return bin, args, nil
+		}
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
@@ -99,6 +125,32 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind strin
 	default:
 		return "", nil, fmt.Errorf("未知激活后端 %q", kind)
 	}
+}
+
+// wifiRunwdaInvocation 在本机同时有 wifi-runwda 和 ios 时，用包装器拉起 go-ios。
+// 包装器会优先走 usbmux Network，让 XCTest 调试会话不绑死 USB。
+func wifiRunwdaInvocation(udid, wifiIP string, port int, reportedUDID, bundleID string) (string, []string, bool) {
+	wrap := lookTool("wifi-runwda", "wifi-runwda.exe")
+	if wrap == "" {
+		return "", nil, false
+	}
+	iosBin := lookTool("ios", "ios.exe")
+	if iosBin == "" {
+		return "", nil, false
+	}
+	if bundleID == "" {
+		bundleID = defaultWDABundleID
+	}
+	args := []string{
+		"-udid", udid,
+		"-port", strconv.Itoa(port),
+		"-bundle", bundleID,
+		"-ios", iosBin,
+	}
+	if wifiIP != "" {
+		args = append(args, "-ip", wifiIP)
+	}
+	return wrap, args, true
 }
 
 // goiosArgs 构造 `ios runwda` 参数（不含可执行文件本身）。

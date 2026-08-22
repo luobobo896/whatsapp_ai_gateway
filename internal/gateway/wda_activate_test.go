@@ -62,13 +62,11 @@ func TestAutoActivator(t *testing.T) {
 	if got := autoActivator(false, true); got != activatorTidevice {
 		t.Fatalf("tidevice when no goios: %q", got)
 	}
-	none := autoActivator(false, false)
-	if runtime.GOOS == "windows" {
-		if none != activatorGoIOS {
-			t.Fatalf("windows no tools want goios, got %q", none)
-		}
-	} else if none != activatorXcodebuild {
-		t.Fatalf("mac no tools want xcodebuild, got %q", none)
+	if got := autoActivatorFor(false, false, "windows"); got != activatorGoIOS {
+		t.Fatalf("windows no tools want goios, got %q", got)
+	}
+	if got := autoActivatorFor(false, false, "darwin"); got != activatorXcodebuild {
+		t.Fatalf("mac no tools want xcodebuild, got %q", got)
 	}
 }
 
@@ -108,16 +106,110 @@ func TestTideviceArgs(t *testing.T) {
 	}
 }
 
+func TestEnableWifiLockdownMissingBinaryIsNoop(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
+	enableWifiLockdown("00008120-000865D90A10C01E")
+}
+
 func TestProtocolCmdMissingBinary(t *testing.T) {
 	m := NewWDAManager("", "", "")
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS, ""); err == nil {
 		t.Fatal("expected error when ios binary is missing")
 	}
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice, ""); err == nil {
 		t.Fatal("expected error when tidevice binary is missing")
 	}
+}
+
+func TestWifiRunwdaInvocationMissingBinary(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
+	if _, _, ok := wifiRunwdaInvocation("00008120-000865D90A10C01E", "127.0.0.1", 8100, "", defaultWDABundleID); ok {
+		t.Fatal("missing wifi-runwda must not be selected")
+	}
+}
+
+func TestWifiRunwdaInvocationBuildsArgs(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	udid := "4886579a97a96bad83b527862bab409b5a07c741"
+	bin, args, ok := wifiRunwdaInvocation(udid, "192.168.10.237", 8100, "", defaultWDABundleID)
+	if !ok {
+		t.Fatal("expected wifi-runwda when both binaries resolve")
+	}
+	if bin == "" {
+		t.Fatal("empty wrapper path")
+	}
+	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237"} {
+		if !containsExact(args, want) {
+			t.Fatalf("missing %q in %#v", want, args)
+		}
+	}
+}
+
+func TestProtocolCmdPrefersWifiRunwda(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	udid := "4886579a97a96bad83b527862bab409b5a07c741"
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) != "wifi-runwda" {
+		t.Fatalf("bin=%q want wifi-runwda", bin)
+	}
+	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios"} {
+		if !containsExact(args, want) {
+			t.Fatalf("missing %q in %#v", want, args)
+		}
+	}
+}
+
+func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
+	dir := plantActivateTools(t, false, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	udid := "00008120-000865D90A10C01E"
+	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) != "ios" {
+		t.Fatalf("bin=%q want ios", bin)
+	}
+	want := goiosArgs(udid, defaultWDABundleID, 8100, "")
+	if len(args) != len(want) {
+		t.Fatalf("args %#v want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d]=%q want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func plantActivateTools(t *testing.T, wrap, ios bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexit 0\n"
+	if wrap {
+		if err := os.WriteFile(filepath.Join(dir, "wifi-runwda"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ios {
+		if err := os.WriteFile(filepath.Join(dir, "ios"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 func TestWDABundleIDDefault(t *testing.T) {

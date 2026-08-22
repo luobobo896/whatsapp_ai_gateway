@@ -673,7 +673,7 @@ function deviceState(d){
 function deviceCard(d){
   const h = d.last_health || {};
   const m = d.metrics || {};
-  const running = !!d.wda_running;
+  const running = !!d.wda_running || !!h.ok;
   const healthy = !!h.ok;
   const starting = !!h.starting; // 进程刚启动、健康未就绪（宽限期内）-> 启动中，不是异常
   // 健康数据新鲜度：watchdog 探活间隔 30s，超过 50s 未更新说明刚激活/进程刚起、还没轮到探活

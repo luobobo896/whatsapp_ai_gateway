@@ -5,6 +5,7 @@ data/
 .DS_Store
 tools/easytier/easytier-core
 tools/easytier/easytier-cli
+tools/ios
 /gateway
 
 # 本地运行时配置（含网关凭证 token，禁止提交）
@@ -16,3 +17,5 @@ build/
 dist/
 *.dmg
 *.ipa
+tools/wifi-lockdown
+tools/wifi-runwda

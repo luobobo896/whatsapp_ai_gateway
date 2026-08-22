@@ -296,7 +296,11 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			}
 			// 手动激活允许清除崩溃冷却（人工处理签名/信任问题后立即重试）。
 			g.WDA.ResetCrashCooldown(udid)
-			if err := g.WDA.Activate(udid, port, udid); err != nil {
+			wifiIP := ""
+			if dev != nil {
+				wifiIP = dev.IP
+			}
+			if err := g.WDA.Activate(udid, port, udid, wifiIP); err != nil {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
 				return
 			}
@@ -423,20 +427,22 @@ func csrfOrSameOrigin(auth *WebAuth, r *http.Request) bool {
 func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map[string]any {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !g.WDA.Running(udid) {
-			return map[string]any{"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true}
-		}
 		dev := g.Cfg.Device(udid)
-		if dev != nil && dev.IP != "" {
+		if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
 			h := g.checkWDA(dev)
 			if h.OK {
-				dev.LastHealth = map[string]any{"ok": true, "ready": true, "ip": h.IP, "ios_version": h.Version, "checked_at": float64(time.Now().Unix()), "starting": false}
+				applyHealth(dev, h)
+				if h.IP != "" {
+					_ = syncStoredWifiIP(dev, h.IP)
+				}
 				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true}
 			}
-		} else {
-			// USB 直连、尚未配 IP：WDA 进程已运行即视为激活成功；
-			// 手机 Wi-Fi IP 由 watchdog 的 LAN 扫描自动发现，无需手动设置。
+		} else if g.WDA.Running(udid) {
+			// USB 直连、尚未配 IP：主机进程在即视为激活成功；Wi-Fi IP 由看护补。
 			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "usb"}
+		}
+		if !g.WDA.Running(udid) {
+			return map[string]any{"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true}
 		}
 		time.Sleep(3 * time.Second)
 	}
@@ -484,7 +490,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
 			"configured": true, "usb": attached, "conn_type": conn,
-			"wda_running": g.WDA.Running(d.UDID),
+			"wda_running": wdaAppearsRunning(g.WDA.Running(d.UDID), d.LastHealth),
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})
 		emitted[d.UDID] = true

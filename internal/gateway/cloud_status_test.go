@@ -50,8 +50,9 @@ func TestDeviceCloudStatus(t *testing.T) {
 		{name: "running and healthy", dev: healthy, usb: false, running: true, want: "online"},
 		{name: "running and usb but unhealthy", dev: unhealthy, usb: true, running: true, want: "online"},
 		{name: "running but offline", dev: unhealthy, usb: false, running: true, want: "offline"},
-		{name: "healthy but wda not running", dev: healthy, usb: false, running: false, want: "offline"},
-		{name: "usb but wda not running", dev: healthy, usb: true, running: false, want: "offline"},
+		{name: "healthy without host process", dev: healthy, usb: false, running: false, want: "online"},
+		{name: "usb and healthy without host process", dev: healthy, usb: true, running: false, want: "online"},
+		{name: "usb unhealthy without host process", dev: unhealthy, usb: true, running: false, want: "offline"},
 		{name: "busy wins", dev: healthy, usb: true, running: true, busy: true, want: "busy"},
 	}
 	for _, tc := range cases {
@@ -103,8 +104,20 @@ func TestDeviceListReportUsesRunningState(t *testing.T) {
 	if got[0]["serial"] != "C39ST1KEHG00" {
 		t.Fatalf("u-online serial = %v, want C39ST1KEHG00", got[0]["serial"])
 	}
-	if status["u-stale"] != "offline" {
-		t.Fatalf("u-stale status = %q, want offline (WDA 进程未运行，即使健康探活 ok 也不上报 online)", status["u-stale"])
+	if status["u-stale"] != "online" {
+		t.Fatalf("u-stale status = %q, want online (机上 /status 通了即可，主机激活进程可以已因拔 USB 退出)", status["u-stale"])
+	}
+}
+
+func TestWDAAppearsRunningFromHealth(t *testing.T) {
+	if !wdaAppearsRunning(true, nil) {
+		t.Fatal("host process still starting must count as running")
+	}
+	if !wdaAppearsRunning(false, map[string]any{"ok": true}) {
+		t.Fatal("healthy Wi-Fi WDA must count as running after USB unplug")
+	}
+	if wdaAppearsRunning(false, map[string]any{"ok": false}) {
+		t.Fatal("dead host and failed health must not look running")
 	}
 }
 

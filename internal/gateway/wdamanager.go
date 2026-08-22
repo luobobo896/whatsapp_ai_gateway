@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -172,7 +173,7 @@ func destinationForUDID(udid string) string {
 
 // Activate 激活单台 WDA。日常路径是 IPA：缺 Runner 就 install，再 tidevice/go-ios 拉起。
 // 只有 auto 找不到协议工具时，Mac 才回退 xcodebuild。
-func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error {
+func (m *WDAManager) Activate(udid string, port int, reportedUDID, wifiIP string) error {
 	if port == 0 {
 		port = 8100
 	}
@@ -191,12 +192,13 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 
 	kind := resolveActivator(m.activator)
 	if kind == activatorGoIOS || kind == activatorTidevice {
-		return m.activateProtocol(udid, port, reportedUDID, kind)
+		return m.activateProtocol(udid, port, reportedUDID, kind, wifiIP)
 	}
 	return m.activateXcodebuild(udid, port, reportedUDID)
 }
 
 func (m *WDAManager) activateXcodebuild(udid string, port int, reportedUDID string) error {
+	enableWifiLockdown(udid)
 	// 激活前确保 iOS ≤16 老设备（iPhone 7/8/X 等）的 DeveloperDiskImage 就绪：
 	// Xcode 的 DeviceSupport 目录通常缺 DDI，导致 xcodebuild 挂载/安装 WDA 失败。
 	// 幂等；失败仅告警不阻塞（iOS 17+ 走 CoreDevice 原生支持，会静默跳过）。
@@ -255,16 +257,36 @@ func (m *WDAManager) track(udid string, cmd *exec.Cmd) {
 			delete(m.processes, udid)
 			delete(m.startedAt, udid)
 		}
-		// 启动 2 分钟内即退出：大概率是签名/信任类故障（exit 65），进入 5 分钟冷却，
-		// 避免看护循环每 30s 重新拉起激活进程的重试风暴。
-		if !started.IsZero() && time.Since(started) < 2*time.Minute {
+		// 启动 2 分钟内即退出：大概率是签名/信任类故障（exit 65），进入 5 分钟冷却。
+		// 拔 USB 导致的 host 退出（exit 75）不是崩溃：机上 XCTest 仍可走 Wi-Fi。
+		if !started.IsZero() && time.Since(started) < 2*time.Minute && !hostProcDetachExpected(err) {
 			m.crashUntil[udid] = time.Now().Add(5 * time.Minute)
 		}
 		m.mu.Unlock()
 		if err != nil {
-			slog.Warn("WDA process exited", "udid", udid[:8], "error", err)
+			if hostProcDetachExpected(err) {
+				slog.Info("WDA host process exited after USB detach; device WDA may stay on Wi-Fi",
+					"udid", shortOf(udid), "error", err)
+			} else {
+				slog.Warn("WDA process exited", "udid", shortOf(udid), "error", err)
+			}
 		}
 	}()
+}
+
+// hostProcDetachExpected：激活进程因设备断开而退出（拔 USB），不是签名崩溃。
+func hostProcDetachExpected(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 75 {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "exit status 75") ||
+		strings.Contains(s, "was disconnected") ||
+		strings.Contains(s, "not connected")
 }
 
 // ResetCrashCooldown 清除某设备的崩溃冷却（管理页手动「激活」时调用，允许人工立即重试）。

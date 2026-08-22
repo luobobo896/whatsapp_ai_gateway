@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/coder/websocket v1.8.15
+	howett.net/plist v1.0.1
 	modernc.org/sqlite v1.54.0
 )
 

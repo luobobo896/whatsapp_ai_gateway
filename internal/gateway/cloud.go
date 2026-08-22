@@ -361,11 +361,12 @@ func (g *Gateway) deviceListReport() []map[string]any {
 }
 
 // deviceCloudStatus 返回与设备列表 UI 一致的云上行状态：
-// busy > online（WDA 进程运行且健康/USB 直连/激活宽限期内）> offline。
+// busy > 机上 /status 通 > 主机激活进程仍在（USB/宽限期）> offline。
 func (g *Gateway) deviceCloudStatus(d *Device, usb bool) string {
 	attached := usb || TunnelAddr(d.UDID) != ""
-	inGrace := g.WDA.Running(d.UDID) && g.WDA.StartedSecondsAgo(d.UDID) < wdaStartGrace.Seconds()
-	return wdaCloudStatus(g.Exec.IsBusy(d.UDID), g.WDA.Running(d.UDID), healthOK(d.LastHealth), attached, inGrace)
+	host := g.WDA.Running(d.UDID)
+	inGrace := host && g.WDA.StartedSecondsAgo(d.UDID) < wdaStartGrace.Seconds()
+	return wdaCloudStatus(g.Exec.IsBusy(d.UDID), host, healthOK(d.LastHealth), attached, inGrace)
 }
 
 // attachedUSB：idevice 枚举到，或 USB 隧道仍在。枚举空但 iproxy 还在时不能报 Wi-Fi/离线。
@@ -376,17 +377,24 @@ func attachedUSB(udid string, usbSet map[string]bool, tunnelUp bool) bool {
 	return tunnelUp
 }
 
+// wdaCloudStatus：busy > 机上 WDA HTTP 通 > 主机激活进程仍在（USB/宽限期）> offline。
+// 激活进程会因拔 USB 退出（xcodebuild exit 75）；XCTest 仍在手机 :8100 时必须保持 online。
 func wdaCloudStatus(busy, running, healthy, attached, inGrace bool) string {
 	if busy {
 		return "busy"
 	}
-	if running && (healthy || attached) {
+	if healthy {
 		return "online"
 	}
-	if running && inGrace {
+	if running && (attached || inGrace) {
 		return "online"
 	}
 	return "offline"
+}
+
+// wdaAppearsRunning 本地列表的「WDA 在跑」：主机进程或机上 /status 通。
+func wdaAppearsRunning(hostProc bool, lastHealth map[string]any) bool {
+	return hostProc || healthOK(lastHealth)
 }
 
 // rememberCloudStatus 记录上次上报的云状态。

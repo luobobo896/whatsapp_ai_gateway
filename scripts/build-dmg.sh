@@ -99,8 +99,18 @@ if command -v iproxy >/dev/null 2>&1; then
   cp "$IPROXY" "$RES/bin/iproxy"
   [ -x "$IDEV" ] && cp "$IDEV" "$RES/bin/ideviceinfo"
   [ -x "$IDEVID" ] && cp "$IDEVID" "$RES/bin/idevice_id"
-  chmod +w "$RES/bin/"* "$RES/lib/"*.dylib
+  if [ -x "$ROOT/tools/ios" ]; then
+    cp "$ROOT/tools/ios" "$RES/bin/ios"
+  fi
+  if [ -x "$ROOT/tools/wifi-lockdown" ]; then
+    cp "$ROOT/tools/wifi-lockdown" "$RES/bin/wifi-lockdown"
+  fi
+  if [ -x "$ROOT/tools/wifi-runwda" ]; then
+    cp "$ROOT/tools/wifi-runwda" "$RES/bin/wifi-runwda"
+  fi
+  chmod +w "$RES/bin/"* "$RES/lib/"*.dylib 2>/dev/null || true
   echo "  ✓ iproxy/ideviceinfo/idevice_id（原样未修改）+ $(find "$RES/lib" -type f | wc -l | tr -d ' ') 个 dylib（DYLD fallback 解析）"
+  [ -x "$RES/bin/ios" ] && echo "  ✓ go-ios（ios runwda）"
 else
   echo "  ⚠ 本机无 iproxy（未装 libimobiledevice），USB 隧道需客户自行 brew install libimobiledevice"
 fi

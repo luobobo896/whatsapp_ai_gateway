@@ -92,7 +92,10 @@ func (g *Gateway) watchOnce() {
 	}
 	for i := range cfg.Devices {
 		dev := &cfg.Devices[i]
-		if dev.UDID == "" || dev.IP == "" {
+		if dev.UDID == "" {
+			continue
+		}
+		if dev.IP == "" && TunnelAddr(dev.UDID) == "" {
 			continue
 		}
 		// 任务执行中 WDA 被会话/元素请求占满，/status 探活易超时误判离线：
@@ -105,12 +108,16 @@ func (g *Gateway) watchOnce() {
 		h := g.checkWDA(dev)
 		prevOK := healthOK(dev.LastHealth)
 		applyHealth(dev, h)
-		// USB 隧道探活成功时，ios.ip 是这台手机自报的 Wi-Fi，覆盖 EasyTier 扫到的叠加网地址。
-		if h.OK && h.IP != "" && TunnelAddr(dev.UDID) != "" {
+		// 机上 WDA 自报 ios.ip：USB 隧道或 Wi-Fi 探活都写入，拔线后发送走这个地址。
+		if h.OK && h.IP != "" {
 			old := dev.IP
 			if syncStoredWifiIP(dev, h.IP) {
 				n := evictWifiIP(cfg.Devices, dev.UDID, dev.IP)
-				slog.Info("wifi IP refreshed from USB WDA", "udid", dev.UDID[:8], "old", old, "new", dev.IP, "evicted", n)
+				via := "wifi"
+				if TunnelAddr(dev.UDID) != "" {
+					via = "usb"
+				}
+				slog.Info("wifi IP refreshed from WDA", "udid", dev.UDID[:8], "via", via, "old", old, "new", dev.IP, "evicted", n)
 			}
 		}
 		// 在线时记录 WDA identifierForVendor(uuid) 与设备名（如 iPhone Plus-2），供识别与网络变化后按 uuid 重新匹配。
@@ -144,16 +151,13 @@ func (g *Gateway) watchOnce() {
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
 		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID) || TunnelAddr(dev.UDID) != "", errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
-			// 老机型（40 位 UDID，iPhone X 及以前，A11 及更早）不支持 WiFi 启动 WDA：
-			// xcodebuild 激活必须 USB 连接（无 CoreDevice WiFi 开发配对），拔线后 WDA
-			// 必然停止且无法通过 WiFi 重激活。直接标记「需 USB」并跳过，避免每 30s 一次
-			// xcodebuild 失败重试风暴（exit 70 + 冷却）。重新插线后 USB 隧道恢复，自动激活。
-			legacy := !strings.Contains(dev.UDID, "-")
-			if legacy && !usbConnected(dev.UDID) {
+			// 40 位 UDID 不能在无 USB 时 *拉起* WDA（无 CoreDevice 无线配对）。
+			// 已激活的 XCTest 可以拔线后走 Wi-Fi :8100；这里只跳过重拉起，不改写健康态。
+			if cannotLaunchWDAWithoutUSB(dev.UDID, usbConnected(dev.UDID)) {
 				if prevOK {
-					slog.Warn("legacy device unplugged, WDA requires USB", "udid", dev.UDID[:8], "ip", dev.IP)
+					slog.Warn("legacy device unplugged, skip relaunch; probe Wi-Fi WDA next rounds",
+						"udid", dev.UDID[:8], "ip", dev.IP)
 				}
-				dev.LastHealth["error"] = "WDA 需 USB 连接：该机型不支持 WiFi 启动 WDA，请重新插线（插回后自动恢复）"
 				continue
 			}
 			if !usbConnected(dev.UDID) && !wifiReachable(dev) {
@@ -176,7 +180,7 @@ func (g *Gateway) watchOnce() {
 				continue
 			}
 			slog.Info("WDA down, reactivating", "udid", dev.UDID[:8], "ip", dev.IP)
-			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID); err != nil {
+			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID, dev.IP); err != nil {
 				slog.Error("reactivate failed", "udid", dev.UDID[:8], "error", err)
 			}
 		}
@@ -186,9 +190,18 @@ func (g *Gateway) watchOnce() {
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
+// cannotLaunchWDAWithoutUSB：40 位 UDID 没有无线开发配对，只能插着 USB 首次拉起。
+// 保活不是这个函数的职责：/status 通了就继续用，不要因拔线去重跑 xcodebuild。
+func cannotLaunchWDAWithoutUSB(udid string, usb bool) bool {
+	return udid != "" && !strings.Contains(udid, "-") && !usb
+}
+
 // checkWDA 探测设备 WDA 健康：USB 隧道优先（不依赖手机 Wi-Fi），
 // 无隧道或隧道不通时回退 Wi-Fi IP。
 func (g *Gateway) checkWDA(dev *Device) WDAHealth {
+	if dev == nil {
+		return WDAHealth{OK: false, Error: "nil device"}
+	}
 	if a := TunnelAddr(dev.UDID); a != "" {
 		host, portStr, err := net.SplitHostPort(a)
 		if err == nil {
@@ -197,8 +210,11 @@ func (g *Gateway) checkWDA(dev *Device) WDAHealth {
 			if h.OK {
 				return h
 			}
-			slog.Warn("usb tunnel health failed, fallback to wifi", "udid", dev.UDID[:8], "error", h.Error)
+			slog.Warn("usb tunnel health failed, fallback to wifi", "udid", shortOf(dev.UDID), "error", h.Error)
 		}
+	}
+	if dev.IP == "" {
+		return WDAHealth{OK: false, Error: "no wifi ip"}
 	}
 	return CheckWDA(dev.IP, dev.Port, 3*time.Second)
 }
