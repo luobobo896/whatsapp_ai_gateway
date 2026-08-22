@@ -114,6 +114,7 @@ type DeviceStatus struct {
 	WDAStatus string `json:"wda_status"`
 	Error     string `json:"error"`
 	ConnType  string `json:"conn_type,omitempty"` // usb | wifi
+	LanKey    string `json:"lan_key,omitempty"`   // 网关 LAN 指纹（规则 4）
 }
 
 // Executor 按 UDID 串行执行群发任务，先本地持久化结果再上报（at-least-once）。

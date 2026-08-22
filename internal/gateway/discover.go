@@ -217,6 +217,19 @@ func devicectlDevices() []DiscoveredDevice {
 // privateSubnets 返回本机所有私网 IPv4 /24 网段（10/8、172.16/12、192.168/16）。
 func privateSubnets() []string { return subnetsOf(nil) }
 
+// lanFingerprint 返回网关局域网指纹：优先物理网卡私网 /24，否则全部私网 /24，逗号分隔且已排序。
+// 供云端规则 4（同 LAN 单一通信网关）比对；无私网地址时返回空串。
+func lanFingerprint() string {
+	subs := physicalSubnets()
+	if len(subs) == 0 {
+		subs = privateSubnets()
+	}
+	if len(subs) == 0 {
+		return ""
+	}
+	return strings.Join(subs, ",")
+}
+
 // physicalSubnets 返回物理网卡（macOS en*，含 USB 网卡）所在私网 /24。
 // 手机与网关通常同接一个物理网络，优先扫这里可把每轮扫描从全网段数秒降到 ~1s；
 // VPN/代理 TUN、虚拟机桥等虚拟网卡（utun/bridge/awdl/anpi/vmenet）只在兜底全网段扫描时参与。

@@ -39,12 +39,24 @@ var whatsappSendButtonFallbacks = []string{
 	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Send' OR label CONTAINS 'Send' OR name CONTAINS '发送' OR label CONTAINS '发送')`,
 }
 
-// whatsappBackToChats 返回聊天列表的返回键。不能用单纯 CONTAINS '聊天'：
-// 会话页上的「聊天主题」也会命中，一点就进壁纸/气泡设置，群发卡死。
+// whatsappBackToChats 返回聊天列表的返回键。
+// 不能用单纯 CONTAINS '聊天'：会话页「聊天主题」也会命中，一点就进壁纸设置。
+// NOT 必须带括号：NSPredicate 里 `NOT label CONTAINS` 会解析失败，导致中文返回键永远找不到。
+// 优先限定 NavigationBar，避免点到会话页里的「聊天主题」入口。
 var whatsappBackToChats = []string{
-	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS '聊天' AND NOT label CONTAINS '主题' AND NOT name CONTAINS '主题'`,
-	`predicate string: type == 'XCUIElementTypeButton' AND (label == 'Chats' OR name == 'Chats')`,
-	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Back' OR name CONTAINS '返回' OR label CONTAINS '返回')`,
+	"class chain: **/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton[`label CONTAINS '聊天' AND NOT (label CONTAINS '主题') AND NOT (label CONTAINS '气泡')`]",
+	"class chain: **/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton[`label CONTAINS 'Chats' AND NOT (label CONTAINS 'Theme')`]",
+	"class chain: **/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton[`label CONTAINS '对话'`]",
+	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS '聊天' AND NOT (label CONTAINS '主题') AND NOT (name CONTAINS '主题') AND NOT (label CONTAINS '气泡')`,
+	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS 'Chats' AND NOT (label CONTAINS 'Theme') AND NOT (name CONTAINS 'Theme')`,
+	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Back' OR name CONTAINS '返回' OR label CONTAINS '返回' OR label CONTAINS 'Back')`,
+}
+
+// whatsappChatsTab 底栏「聊天」Tab（部分版本会话页仍露出 TabBar）。
+var whatsappChatsTab = []string{
+	`predicate string: type == 'XCUIElementTypeButton' AND (label == '聊天' OR name == '聊天' OR label == 'Chats' OR name == 'Chats' OR label == '对话' OR name == '对话')`,
+	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS '聊天' AND NOT (label CONTAINS '主题') AND NOT (label CONTAINS '气泡')`,
+	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS 'Chats' AND NOT (label CONTAINS 'Theme')`,
 }
 
 var (
@@ -475,38 +487,129 @@ func gotoChatList(ctx context.Context, client *Client, sid string) error {
 	if dismissPicker(ctx, client, sid) {
 		return nil
 	}
-	if leaveChatTheme(ctx, client, sid) {
-		using, value := splitSelector(whatsappSelectors.messageInput)
-		if _, err := client.FindElement(ctx, sid, using, value); err != nil {
+	if leaveChatTheme(ctx, client, sid) && !composerPresent(ctx, client, sid) {
+		return nil
+	}
+	if !composerPresent(ctx, client, sid) {
+		return nil // 不在聊天页，也没有搜索取消键
+	}
+	if clickAnySelector(ctx, client, sid, whatsappBackToChats, 1500*time.Millisecond) {
+		// 误点进主题时先退出；确认消息输入框消失才算回到列表/非会话页。
+		_ = leaveChatTheme(ctx, client, sid)
+		if !composerPresent(ctx, client, sid) {
 			return nil
 		}
 	}
-	using, value := splitSelector(whatsappSelectors.messageInput)
-	if _, err := client.FindElement(ctx, sid, using, value); err != nil {
-		return nil // 不在聊天页，也没有搜索取消键
-	}
-	for _, sel := range whatsappBackToChats {
-		using, value := splitSelector(sel)
-		bid, err := client.FindElement(ctx, sid, using, value)
-		if err == nil && bid != "" {
-			if err := client.Click(ctx, sid, bid); err == nil {
-				time.Sleep(1500 * time.Millisecond)
+	// 导航栏左侧返回（会话页第一个按钮通常是回列表；主题页则是回会话）。
+	if tapNavBarLeading(ctx, client, sid) {
+		time.Sleep(1200 * time.Millisecond)
+		if leaveChatTheme(ctx, client, sid) {
+			time.Sleep(800 * time.Millisecond)
+		}
+		if !composerPresent(ctx, client, sid) {
+			return nil
+		}
+		// 仍在会话：再点一次导航栏返回。
+		if tapNavBarLeading(ctx, client, sid) {
+			time.Sleep(1200 * time.Millisecond)
+			if !composerPresent(ctx, client, sid) {
 				return nil
 			}
 		}
 	}
+	if clickAnySelector(ctx, client, sid, whatsappChatsTab, 1200*time.Millisecond) && !composerPresent(ctx, client, sid) {
+		return nil
+	}
+	if tapTopLeftBack(ctx, client, sid) && !composerPresent(ctx, client, sid) {
+		return nil
+	}
+	if edgeSwipeBack(ctx, client, sid) && !composerPresent(ctx, client, sid) {
+		return nil
+	}
 	return fmt.Errorf("back button not found")
+}
+
+func composerPresent(ctx context.Context, client *Client, sid string) bool {
+	using, value := splitSelector(whatsappSelectors.messageInput)
+	id, err := client.FindElement(ctx, sid, using, value)
+	return err == nil && id != ""
+}
+
+func clickAnySelector(ctx context.Context, client *Client, sid string, sels []string, wait time.Duration) bool {
+	for _, sel := range sels {
+		using, value := splitSelector(sel)
+		bid, err := client.FindElement(ctx, sid, using, value)
+		if err != nil || bid == "" {
+			continue
+		}
+		if client.Click(ctx, sid, bid) == nil {
+			if wait > 0 {
+				time.Sleep(wait)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func tapNavBarLeading(ctx context.Context, client *Client, sid string) bool {
+	id, err := findElementBySelector(ctx, client, sid, `class chain: **/XCUIElementTypeNavigationBar/XCUIElementTypeButton[1]`)
+	if err != nil || id == "" {
+		return false
+	}
+	return client.Click(ctx, sid, id) == nil
+}
+
+// tapTopLeftBack 点导航栏左侧空白/返回热区（无障碍名异常时的坐标兜底）。
+func tapTopLeftBack(ctx context.Context, client *Client, sid string) bool {
+	bar, err := findElementBySelector(ctx, client, sid, `class chain: **/XCUIElementTypeNavigationBar[1]`)
+	if err != nil || bar == "" {
+		return false
+	}
+	x, y, w, h, err := client.ElementRect(ctx, sid, bar)
+	if err != nil || w <= 0 || h <= 0 {
+		return false
+	}
+	tx := int(x + minFloat(44, w*0.12))
+	ty := int(y + h/2)
+	if client.CoordinateTap(ctx, sid, tx, ty) != nil {
+		return false
+	}
+	time.Sleep(1200 * time.Millisecond)
+	return true
+}
+
+// edgeSwipeBack 从屏幕左缘向右滑（iOS 返回手势兜底）。
+func edgeSwipeBack(ctx context.Context, client *Client, sid string) bool {
+	bar, err := findElementBySelector(ctx, client, sid, `class chain: **/XCUIElementTypeNavigationBar[1]`)
+	if err != nil || bar == "" {
+		return false
+	}
+	x, y, w, h, err := client.ElementRect(ctx, sid, bar)
+	if err != nil || w < 80 {
+		return false
+	}
+	fromX, fromY := int(x+3), int(y+h/2)
+	toX, toY := int(x+w*0.65), fromY
+	if client.Drag(ctx, sid, fromX, fromY, toX, toY, 0.25) != nil {
+		return false
+	}
+	time.Sleep(1200 * time.Millisecond)
+	return true
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func leaveChatTheme(ctx context.Context, client *Client, sid string) bool {
 	if !isChatThemeTitle(ChatTitle(ctx, client, sid)) {
 		return false
 	}
-	id, err := findElementBySelector(ctx, client, sid, `class chain: **/XCUIElementTypeNavigationBar/XCUIElementTypeButton[1]`)
-	if err != nil || id == "" {
-		return false
-	}
-	if client.Click(ctx, sid, id) != nil {
+	if !tapNavBarLeading(ctx, client, sid) {
 		return false
 	}
 	time.Sleep(1200 * time.Millisecond)
@@ -851,7 +954,32 @@ func isChatThemeTitle(s string) bool {
 		return false
 	}
 	return strings.Contains(t, "聊天主题") || strings.Contains(t, "chat theme") ||
-		strings.Contains(t, "聊天气泡") || strings.Contains(t, "chat bubble")
+		strings.Contains(t, "聊天气泡") || strings.Contains(t, "chat bubble") ||
+		strings.Contains(t, "wallpaper") || strings.Contains(t, "壁纸")
+}
+
+// isBackToChatsLabel 判断无障碍文案是否像「回聊天列表」而非「聊天主题」入口。
+func isBackToChatsLabel(s string) bool {
+	t := strings.ToLower(stripBidi(strings.TrimSpace(s)))
+	if t == "" || isChatThemeTitle(s) {
+		return false
+	}
+	for _, bad := range []string{"主题", "theme", "气泡", "bubble", "wallpaper", "壁纸", "设置", "settings"} {
+		if strings.Contains(t, bad) {
+			return false
+		}
+	}
+	switch t {
+	case "聊天", "chats", "对话", "back", "返回":
+		return true
+	}
+	if strings.Contains(t, "聊天") || strings.Contains(t, "chats") || strings.Contains(t, "对话") {
+		return true
+	}
+	if strings.Contains(t, "back") || strings.Contains(t, "返回") {
+		return true
+	}
+	return false
 }
 
 func looksLikeGroupChat(s string) bool {

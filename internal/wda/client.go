@@ -263,6 +263,20 @@ func (c *Client) CoordinateTap(ctx context.Context, sessionID string, x, y int) 
 	return err
 }
 
+// Drag 从 (fromX,fromY) 拖到 (toX,toY)，duration 为秒（WDA /wda/dragfromtoforduration）。
+func (c *Client) Drag(ctx context.Context, sessionID string, fromX, fromY, toX, toY int, duration float64) error {
+	if duration <= 0 {
+		duration = 0.2
+	}
+	_, err := c.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/wda/dragfromtoforduration",
+		map[string]any{
+			"fromX": fromX, "fromY": fromY,
+			"toX": toX, "toY": toY,
+			"duration": duration,
+		})
+	return err
+}
+
 // Screenshot 返回当前屏幕 PNG 原始字节（解码后的 base64）。
 func (c *Client) Screenshot(ctx context.Context, sessionID string) ([]byte, error) {
 	data, err := c.do(ctx, http.MethodGet, "/session/"+url.PathEscape(sessionID)+"/screenshot", nil)

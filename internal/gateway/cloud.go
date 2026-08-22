@@ -203,12 +203,21 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 		defer writeMu.Unlock()
 		return wsjson.Write(wctx, conn, newEnvelope(typ, payload))
 	}
-	if err := write("gateway:hello", map[string]string{"name": name, "version": "0.3.0"}); err != nil {
+	lanKey := lanFingerprint()
+	hello := map[string]string{"name": name, "version": "0.3.0"}
+	if lanKey != "" {
+		hello["lan_key"] = lanKey
+	}
+	if err := write("gateway:hello", hello); err != nil {
 		return err
 	}
 	// 重连先补报本地结果，再上报设备清单（平台随后补推 pending 任务）。
 	g.Exec.ResendPersisted()
-	if err := write("device_list", map[string]any{"devices": g.deviceListReport()}); err != nil {
+	listPayload := map[string]any{"devices": g.deviceListReport()}
+	if lanKey != "" {
+		listPayload["lan_key"] = lanKey
+	}
+	if err := write("device_list", listPayload); err != nil {
 		return err
 	}
 
@@ -347,6 +356,7 @@ func (g *Gateway) deviceListReport() []map[string]any {
 	for _, d := range usb {
 		usbSet[d.UDID] = true
 	}
+	lanKey := lanFingerprint()
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
@@ -362,11 +372,15 @@ func (g *Gateway) deviceListReport() []map[string]any {
 		if attached {
 			conn = "usb"
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
 			"conn_type": conn, "wda_status": status, "whatsapp_version": "",
-		})
+		}
+		if lanKey != "" {
+			row["lan_key"] = lanKey
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -430,6 +444,6 @@ func (g *Gateway) reportCloudStatusIfChanged(d *Device, usb bool, errMsg string)
 	}
 	g.statusMu.Unlock()
 	if changed {
-		g.Exec.status(DeviceStatus{UDID: d.UDID, WDAStatus: status, Error: errMsg, ConnType: conn})
+		g.Exec.status(DeviceStatus{UDID: d.UDID, WDAStatus: status, Error: errMsg, ConnType: conn, LanKey: lanFingerprint()})
 	}
 }

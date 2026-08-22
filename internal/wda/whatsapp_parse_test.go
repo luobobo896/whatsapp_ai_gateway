@@ -1,6 +1,9 @@
 package wda
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const sampleChatListXML = `<?xml version="1.0" encoding="UTF-8"?>
 <XCUIElementTypeApplication name="WA Business" bundleId="net.whatsapp.WhatsAppSMB">
@@ -311,7 +314,7 @@ func TestIsSelfChatTitle(t *testing.T) {
 }
 
 func TestIsChatThemeTitle(t *testing.T) {
-	for _, s := range []string{"聊天主题", "\u200e聊天主题", "Chat theme", "聊天气泡"} {
+	for _, s := range []string{"聊天主题", "\u200e聊天主题", "Chat theme", "聊天气泡", "Wallpaper", "壁纸"} {
 		if !isChatThemeTitle(s) {
 			t.Fatalf("%q should be chat theme", s)
 		}
@@ -331,6 +334,32 @@ func TestFriendChatTargetsSkipsChatTheme(t *testing.T) {
 		t.Fatalf("theme row must not be a send target: %+v", got)
 	}
 }
+func TestIsBackToChatsLabel(t *testing.T) {
+	for _, s := range []string{"聊天", "\u200e聊天", "Chats", "\u200eChats", "对话", "Back", "返回", "Back to Chats"} {
+		if !isBackToChatsLabel(s) {
+			t.Fatalf("%q should be back-to-chats", s)
+		}
+	}
+	for _, s := range []string{"", "聊天主题", "\u200e聊天主题", "Chat theme", "聊天气泡", "Wallpaper", "壁纸", "设置", "张三"} {
+		if isBackToChatsLabel(s) {
+			t.Fatalf("%q must not be back-to-chats", s)
+		}
+	}
+}
+
+func TestWhatsappBackToChatsPredicatesUseGroupedNot(t *testing.T) {
+	joined := strings.Join(whatsappBackToChats, "\n")
+	if strings.Contains(joined, "NOT label CONTAINS") || strings.Contains(joined, "NOT name CONTAINS") {
+		t.Fatalf("NSPredicate NOT must wrap CONTAINS in parentheses; got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "NOT (label CONTAINS") {
+		t.Fatalf("expected grouped NOT (label CONTAINS ...); got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "XCUIElementTypeNavigationBar") {
+		t.Fatalf("back selectors should prefer NavigationBar scope")
+	}
+}
+
 
 func TestLooksLikeGroupChat(t *testing.T) {
 	for _, s := range []string{"工作群", "Family Group", "广播列表", "My Channel"} {

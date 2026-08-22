@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,23 @@ func TestLooksLikeUDID(t *testing.T) {
 	for s, want := range cases {
 		if got := looksLikeUDID(s); got != want {
 			t.Errorf("looksLikeUDID(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+func TestLanFingerprintStableFormat(t *testing.T) {
+	got := lanFingerprint()
+	// 无网卡时允许空；有值时必须是排序后的 /24 列表。
+	if got == "" {
+		return
+	}
+	parts := strings.Split(got, ",")
+	for i, p := range parts {
+		if !strings.HasSuffix(p, "/24") {
+			t.Fatalf("part %d = %q, want /24 suffix", i, p)
+		}
+		if i > 0 && parts[i-1] > p {
+			t.Fatalf("not sorted: %q", got)
 		}
 	}
 }
