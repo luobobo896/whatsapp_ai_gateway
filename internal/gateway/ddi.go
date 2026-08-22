@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -148,9 +149,12 @@ func pickDDISource(supportDir string, deviceMajor int) (string, error) {
 // 设备需 USB 在线以便查询型号/版本；查询失败或 iOS 17+ 时静默跳过（不阻塞激活）。
 // 幂等：目录已含 DDI 则立即返回。
 func EnsureDeviceSupportDDI(udid string) error {
-	pt := ideviceInfoValue(udid, "ProductType")      // 如 iPhone9,2
-	ver := ideviceInfoValue(udid, "ProductVersion")  // 如 15.8.7
-	build := ideviceInfoValue(udid, "BuildVersion")  // 如 19H411
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	pt := ideviceInfoValue(udid, "ProductType")     // 如 iPhone9,2
+	ver := ideviceInfoValue(udid, "ProductVersion") // 如 15.8.7
+	build := ideviceInfoValue(udid, "BuildVersion") // 如 19H411
 	if pt == "" || ver == "" {
 		slog.Warn("EnsureDeviceSupportDDI: 无法读取设备型号/版本（可能未插 USB 或未配对），跳过", "udid", shortOf(udid))
 		return nil
@@ -185,7 +189,6 @@ func EnsureDeviceSupportDDI(udid string) error {
 	slog.Info("EnsureDeviceSupportDDI: 已补齐 DeveloperDiskImage", "udid", shortOf(udid), "ver", ver, "build", build, "src", filepath.Base(src))
 	return nil
 }
-
 
 // shortOf 截断 UDID 用于日志（前 8 位），防止超长串刷屏。
 func shortOf(udid string) string {

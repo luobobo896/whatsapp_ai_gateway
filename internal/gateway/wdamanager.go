@@ -24,11 +24,13 @@ type WDAManager struct {
 	processes   map[string]*wdaProc
 	startedAt   map[string]time.Time
 	crashUntil  map[string]time.Time // 启动后很快退出的冷却截止（避免签名/信任类故障重试风暴）
-	buildMu     sync.Mutex // 仅串行化 build-for-testing；构建耗时数分钟，绝不能拿 mu，否则期间 Running/Stop/激活全部被拖死
+	buildMu     sync.Mutex           // 仅串行化 build-for-testing；构建耗时数分钟，绝不能拿 mu，否则期间 Running/Stop/激活全部被拖死
 	xctestrun   string
 	projectRoot string
 	derivedData string
 	team        string // DEVELOPMENT_TEAM 透传（空=工程内默认值）
+	activator   string // auto|xcodebuild|goios|tidevice
+	bundleID    string // 已安装 WDA Runner 的 bundle id
 }
 
 // NewWDAManager 构造管理器；projectRoot 为 WhatsAppDeviceAgent 工程路径。
@@ -44,6 +46,21 @@ func NewWDAManager(projectRoot, derivedData, team string) *WDAManager {
 		projectRoot: projectRoot,
 		derivedData: derivedData,
 		team:        team,
+		activator:   "auto",
+		bundleID:    defaultWDABundleID,
+	}
+}
+
+// ConfigureSigning 应用签名/激活后端配置（启动时从 Config.Signing 注入）。
+func (m *WDAManager) ConfigureSigning(s SigningConfig) {
+	if s.Team != "" {
+		m.team = s.Team
+	}
+	if s.Activator != "" {
+		m.activator = s.Activator
+	}
+	if s.WDABundleID != "" {
+		m.bundleID = s.WDABundleID
 	}
 }
 
@@ -127,7 +144,8 @@ func destinationForUDID(udid string) string {
 	return "id=" + udid
 }
 
-// Activate 激活单台 WDA（xcodebuild test-without-building）。
+// Activate 激活单台 WDA。Mac 默认 xcodebuild test-without-building；
+// Windows（或 activator=goios/tidevice）走 testmanagerd 私有协议拉起已安装的 Runner。
 func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error {
 	if port == 0 {
 		port = 8100
@@ -138,17 +156,26 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 	if m.Running(udid) {
 		return nil // 已在运行
 	}
-	// 激活前确保 iOS ≤16 老设备（iPhone 7/8/X 等）的 DeveloperDiskImage 就绪：
-	// Xcode 的 DeviceSupport 目录通常缺 DDI，导致 xcodebuild 挂载/安装 WDA 失败。
-	// 幂等；失败仅告警不阻塞（iOS 17+ 走 CoreDevice 原生支持，会静默跳过）。
-	if err := EnsureDeviceSupportDDI(udid); err != nil {
-		slog.Warn("EnsureDeviceSupportDDI failed", "udid", shortOf(udid), "error", err)
-	}
 	m.mu.Lock()
 	cool := m.crashUntil[udid]
 	m.mu.Unlock()
 	if time.Now().Before(cool) {
 		return fmt.Errorf("WDA 上次启动后很快退出，%.0f 秒内暂停自动重激活（疑似签名/信任问题，需在设备上信任开发者后重试）", time.Until(cool).Seconds())
+	}
+
+	kind := resolveActivator(m.activator)
+	if kind == activatorGoIOS || kind == activatorTidevice {
+		return m.activateProtocol(udid, port, reportedUDID, kind)
+	}
+	return m.activateXcodebuild(udid, port, reportedUDID)
+}
+
+func (m *WDAManager) activateXcodebuild(udid string, port int, reportedUDID string) error {
+	// 激活前确保 iOS ≤16 老设备（iPhone 7/8/X 等）的 DeveloperDiskImage 就绪：
+	// Xcode 的 DeviceSupport 目录通常缺 DDI，导致 xcodebuild 挂载/安装 WDA 失败。
+	// 幂等；失败仅告警不阻塞（iOS 17+ 走 CoreDevice 原生支持，会静默跳过）。
+	if err := EnsureDeviceSupportDDI(udid); err != nil {
+		slog.Warn("EnsureDeviceSupportDDI failed", "udid", shortOf(udid), "error", err)
 	}
 
 	xctestrun, err := m.ensureBuilt()
@@ -180,14 +207,19 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	m.track(udid, cmd)
+	return nil
+}
+
+// track 登记激活进程：唯一 Wait 调用者。进程退出即关 done 并清理表项。
+// 没有它，ProcessState 永远是 nil，Running() 会对已死进程永远返回 true，
+// 看护循环也因此永远不会重激活（设备假在线、实际已挂）。
+func (m *WDAManager) track(udid string, cmd *exec.Cmd) {
 	p := &wdaProc{cmd: cmd, done: make(chan struct{})}
 	m.mu.Lock()
 	m.processes[udid] = p
 	m.startedAt[udid] = time.Now()
 	m.mu.Unlock()
-	// 唯一的 Wait 调用者：进程退出即关 done 并清理表项。
-	// 没有它，ProcessState 永远是 nil，Running() 会对已死进程永远返回 true，
-	// 看护循环也因此永远不会重激活（设备假在线、实际已挂）。
 	go func() {
 		err := cmd.Wait()
 		close(p.done)
@@ -198,7 +230,7 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 			delete(m.startedAt, udid)
 		}
 		// 启动 2 分钟内即退出：大概率是签名/信任类故障（exit 65），进入 5 分钟冷却，
-		// 避免看护循环每 30s 重新拉起 xcodebuild 的重试风暴。
+		// 避免看护循环每 30s 重新拉起激活进程的重试风暴。
 		if !started.IsZero() && time.Since(started) < 2*time.Minute {
 			m.crashUntil[udid] = time.Now().Add(5 * time.Minute)
 		}
@@ -207,7 +239,6 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error 
 			slog.Warn("WDA process exited", "udid", udid[:8], "error", err)
 		}
 	}()
-	return nil
 }
 
 // ResetCrashCooldown 清除某设备的崩溃冷却（管理页手动「激活」时调用，允许人工立即重试）。

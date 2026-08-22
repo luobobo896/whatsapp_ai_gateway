@@ -3,11 +3,15 @@ package wda
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 )
+
+// ErrSendToSelf 硬性规则：禁止给本机 WhatsApp「自己」会话发消息。
+var ErrSendToSelf = errors.New("禁止给自己发送")
 
 // WhatsApp App bundle id（普通版 + Business 版）。
 const (
@@ -22,7 +26,7 @@ var whatsappSelectors = struct {
 	messageInput string
 	sendButton   string
 }{
-	messageInput: `class chain: **/XCUIElementTypeTextView[1]`,
+	messageInput: `accessibility id: ChatBar_ComposerTextView`,
 	sendButton:   `accessibility id: ChatBar_SendButton`,
 }
 
@@ -32,6 +36,7 @@ var whatsappSendButtonFallbacks = []string{
 	`predicate string: name == 'Send'`,
 	`predicate string: name == '发送'`,
 	`predicate string: label == '发送'`,
+	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Send' OR label CONTAINS 'Send' OR name CONTAINS '发送' OR label CONTAINS '发送')`,
 }
 
 // whatsappBackToChats 返回聊天列表的返回键候选（label 带 RTL 不可见字符，用 CONTAINS；限定 Button）。
@@ -48,6 +53,13 @@ var (
 	whatsappContactCell   = "accessibility id: PickerView_ContactCell"
 )
 
+// whatsappLeavePicker 离开「新聊天/搜索」页的取消键（该页没有消息输入框，旧逻辑会当成已在列表）。
+var whatsappLeavePicker = []string{
+	`predicate string: type == 'XCUIElementTypeButton' AND (label == 'Cancel' OR name == 'Cancel' OR label == '取消' OR name == '取消')`,
+	`accessibility id: Cancel`,
+	`accessibility id: 取消`,
+}
+
 // SetMessageInputSelector / SetSendButtonSelector 供联调时覆盖默认选择器。
 func SetMessageInputSelector(using, value string) {
 	whatsappSelectors.messageInput = using + ": " + value
@@ -56,6 +68,9 @@ func SetSendButtonSelector(using, value string) { whatsappSelectors.sendButton =
 
 // whatsappChatTitleSelectors 聊天页标题（收件人姓名/号码）候选选择器；真机联调校准后固化。
 var whatsappChatTitleSelectors = []string{
+	`accessibility id: NavigationBar_ConversationHeader`,
+	`accessibility id: NavigationBar_TitleLabel`,
+	`accessibility id: NavigationBar_HeaderViewButton`,
 	`class chain: **/XCUIElementTypeNavigationBar[1]/XCUIElementTypeStaticText[1]`,
 	`accessibility id: ChatTitleView_Title`,
 }
@@ -83,13 +98,23 @@ func ChatTitle(ctx context.Context, client *Client, sid string) string {
 	return ""
 }
 
-// SendAssist 是发送链路的视觉/LLM 辅助：选择器找不到元素时，用截图让视觉模型
-// 定位坐标。未配置（nil）时全部走默认选择器逻辑，行为不变。
+// ScreenReport 是视觉模型对当前界面的结构化判断（不可信，调用方必须再校验）。
+type ScreenReport struct {
+	Kind    string `json:"kind"` // chat / list / search / unknown / dialog / other
+	Title   string `json:"title"`
+	Unknown bool   `json:"unknown"`
+	Action  string `json:"action"` // none / tap_back / tap_cancel / tap_input / tap_send / tap_xy
+	X       int    `json:"x"`
+	Y       int    `json:"y"`
+	Note    string `json:"note"`
+}
+
+// SendAssist 是发送链路的视觉/LLM 辅助：选择器找不到或会话校验失败时，
+// 用截图让模型定位坐标或判断当前界面。未配置（nil）时走选择器逻辑。
 type SendAssist interface {
-	// LocateSendButton 定位发送键坐标。
 	LocateSendButton(ctx context.Context, screenshotPNG []byte) (x, y int, err error)
-	// LocateTextInput 定位消息输入框坐标（输入框选择器找不到时的兜底）。
 	LocateTextInput(ctx context.Context, screenshotPNG []byte) (x, y int, err error)
+	DiagnoseScreen(ctx context.Context, screenshotPNG []byte) (ScreenReport, error)
 }
 
 // SendMessageToPhone 驱动 WDA 给指定手机号发送一条文本（保持原签名，供 runner 复用）。
@@ -107,7 +132,11 @@ func SendMessageWithAssist(ctx context.Context, client *Client, phone, content s
 // SendMessageToPhoneInfo 同 SendMessageToPhone，并返回该条是否为新会话
 // （新会话 = 聊天列表中无既有会话、经「新聊天→搜索」打开；用于新会话占比控制）。
 func SendMessageToPhoneInfo(ctx context.Context, client *Client, phone, content string, assist SendAssist) (isNew bool, err error) {
-	sid, isNew, err := OpenChatForSend(ctx, client, phone)
+	if strings.TrimSpace(phone) == "" {
+		_, _, err = SendToChatListFriends(ctx, client, content, assist, 0)
+		return false, err
+	}
+	sid, isNew, err := OpenChatForSendWithAssist(ctx, client, phone, assist)
 	if err != nil {
 		return false, err
 	}
@@ -129,7 +158,32 @@ func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid str
 		return "", false, fmt.Errorf("create wda session: %w", err)
 	}
 	if digits != "" {
-		isNew, err = openTargetChat(ctx, client, sid, bid, digits)
+		isNew, err = openTargetChat(ctx, client, sid, bid, digits, nil)
+		if err != nil {
+			return sid, false, err
+		}
+	} else {
+		if err := openDefaultChat(ctx, client, sid); err != nil {
+			return sid, false, err
+		}
+	}
+	return sid, isNew, nil
+}
+
+// OpenChatForSendWithAssist 同 OpenChatForSend，会话校验失败时用视觉模型判断界面并尝试恢复。
+func OpenChatForSendWithAssist(ctx context.Context, client *Client, phone string, assist SendAssist) (sid string, isNew bool, err error) {
+	digits := ""
+	if phone != "" {
+		if digits, err = normalizeMobilePhone(phone); err != nil {
+			return "", false, err
+		}
+	}
+	sid, bid, err := createWhatsAppSession(ctx, client)
+	if err != nil {
+		return "", false, fmt.Errorf("create wda session: %w", err)
+	}
+	if digits != "" {
+		isNew, err = openTargetChat(ctx, client, sid, bid, digits, assist)
 		if err != nil {
 			return sid, false, err
 		}
@@ -144,6 +198,9 @@ func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid str
 // TypeAndSend 在已打开的会话中输入内容并点发送（发送键找不到时可用视觉/LLM 兜底）。
 // 点击发送后校验输入框已清空，未清空说明点击未生效，返回错误避免误报 sent。
 func TypeAndSend(ctx context.Context, client *Client, sid, content string, assist SendAssist) error {
+	if title := ChatTitle(ctx, client, sid); isSelfChatTitle(title) {
+		return ErrSendToSelf
+	}
 	if err := ensureTyped(ctx, client, sid, content, assist); err != nil {
 		return err
 	}
@@ -152,13 +209,16 @@ func TypeAndSend(ctx context.Context, client *Client, sid, content string, assis
 	sendID, err := waitAnyElement(ctx, client, sid, sendSelectors, 10*time.Second)
 	if err != nil {
 		if assist != nil {
-			if png, serr := client.Screenshot(ctx, sid); serr == nil {
-				if x, y, lerr := assist.LocateSendButton(ctx, png); lerr == nil {
+			actx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			if png, serr := client.Screenshot(actx, sid); serr == nil {
+				if x, y, lerr := assist.LocateSendButton(actx, png); lerr == nil {
+					cancel()
 					if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
 						return confirmSent(ctx, client, sid, content)
 					}
 				}
 			}
+			cancel()
 		}
 		return fmt.Errorf("find send button: %w", err)
 	}
@@ -166,6 +226,34 @@ func TypeAndSend(ctx context.Context, client *Client, sid, content string, assis
 		return fmt.Errorf("tap send: %w", err)
 	}
 	return confirmSent(ctx, client, sid, content)
+}
+
+func applyScreenAssist(ctx context.Context, client *Client, sid string, assist SendAssist) ScreenReport {
+	if assist == nil {
+		return ScreenReport{}
+	}
+	actx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	png, err := client.Screenshot(actx, sid)
+	if err != nil || len(png) == 0 {
+		return ScreenReport{Note: "screenshot failed"}
+	}
+	r, err := assist.DiagnoseScreen(actx, png)
+	if err != nil {
+		return ScreenReport{Note: err.Error()}
+	}
+	kind := strings.ToLower(strings.TrimSpace(r.Kind))
+	act := strings.ToLower(strings.TrimSpace(r.Action))
+	if kind == "unknown" || r.Unknown || act == "tap_back" {
+		_ = gotoChatList(ctx, client, sid)
+	}
+	if kind == "search" || act == "tap_cancel" {
+		_ = dismissPicker(ctx, client, sid)
+	}
+	if (act == "tap_xy" || act == "tap_input" || act == "tap_send") && (r.X > 0 || r.Y > 0) {
+		_ = client.CoordinateTap(ctx, sid, r.X, r.Y)
+	}
+	return r
 }
 
 // transientCallErr 判定 WDA 请求是否为超时/连接类瞬时故障（页面过渡期元素
@@ -202,13 +290,15 @@ func ensureTyped(ctx context.Context, client *Client, sid, content string, assis
 		if err != nil {
 			// 视觉兜底：配置了 LLM 时截图定位输入框坐标点击，再短等一次输入框出现。
 			if assist != nil && attempt == 0 {
-				if png, serr := client.Screenshot(ctx, sid); serr == nil {
-					if x, y, lerr := assist.LocateTextInput(ctx, png); lerr == nil {
+				actx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				if png, serr := client.Screenshot(actx, sid); serr == nil {
+					if x, y, lerr := assist.LocateTextInput(actx, png); lerr == nil {
 						if terr := client.CoordinateTap(ctx, sid, x, y); terr == nil {
 							inputID, err = waitElement(ctx, client, sid, whatsappSelectors.messageInput, 5*time.Second)
 						}
 					}
 				}
+				cancel()
 			}
 			if err != nil {
 				return fmt.Errorf("find message input: %w", err)
@@ -284,13 +374,19 @@ func createWhatsAppSession(ctx context.Context, client *Client) (sid, bid string
 
 // openTargetChat 打开指定号码的会话：优先深链（iOS 16.4+）；失败则聊天列表按号码匹配，再走新聊天搜索。
 // 返回 isNew 表示是否经「新聊天→搜索」路径打开（即该号码此前无既有会话）。
-func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string) (isNew bool, err error) {
+func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string, assist SendAssist) (isNew bool, err error) {
+	// 已经在目标会话（深链刚打开、或上次停在此人聊天页）就直接发，不要先点返回把页面关掉。
+	if chatOpenedFor(ctx, client, sid, digits, 1500*time.Millisecond, "") {
+		return false, nil
+	}
+	// 不在目标会话：回到列表再深链，避免停在上一条会话里发错人。
+	_ = gotoChatList(ctx, client, sid)
+	prevTitle := ChatTitle(ctx, client, sid)
 	deeplink := "whatsapp://send?phone=" + digits
 	if err := client.OpenDeepLink(ctx, sid, deeplink, bid); err == nil {
 		// 深链 HTTP 成功 ≠ 会话已打开（老 iOS 不跳转/号码无效只弹窗）。
-		// 必须等到输入框出现且标题号码匹配才视为命中，否则继续走兜底，
-		// 避免停留在上一条明细的会话里把消息发给错误的收件人。
-		if chatOpenedFor(ctx, client, sid, digits, 8*time.Second) {
+		// 必须等到输入框出现且标题通过校验才视为命中，否则继续走兜底。
+		if chatOpenedFor(ctx, client, sid, digits, 8*time.Second, prevTitle) {
 			return false, nil
 		}
 	}
@@ -298,25 +394,52 @@ func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string
 		return false, err
 	}
 	if idx, err := chatIndexByPhone(ctx, client, sid, digits); err == nil {
-		return false, tapCell(ctx, client, sid, idx)
+		if err := tapCell(ctx, client, sid, idx); err == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, prevTitle) {
+			return false, nil
+		}
 	}
 	if openNewChatByPhone(ctx, client, sid, digits) {
 		return true, nil
 	}
+	// 模型只作最后兜底：欠费/超时立刻放弃，不挡选择器主路径。
+	if assist != nil {
+		applyScreenAssist(ctx, client, sid, assist)
+		if chatOpenedFor(ctx, client, sid, digits, 3*time.Second, prevTitle) {
+			return false, nil
+		}
+	}
 	return false, fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
 }
 
-// chatOpenedFor 等待聊天页打开并校验归属：输入框出现且（标题含号码时）号码
-// 与目标一致才算命中；标题是联系人姓名（无号码可比）时输入框出现即视为打开。
-func chatOpenedFor(ctx context.Context, client *Client, sid, digits string, timeout time.Duration) bool {
+// chatOpenedFor 等待聊天页打开并校验归属。
+//   - 标题含号码：必须与目标匹配（86+11 或国内 11 位均可）
+//   - 标题是「未知/Unknown」：不算命中（深链常把已有联系人打开成未保存会话）
+//   - 标题为空：页面未就绪，继续等，不能当联系人名放行
+//   - 标题是联系人名：必须相对深链前发生变化，避免停在上一条会话
+func chatOpenedFor(ctx context.Context, client *Client, sid, digits string, timeout time.Duration, prevTitle string) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return false
 		}
 		if id, err := findElementBySelector(ctx, client, sid, whatsappSelectors.messageInput); err == nil && id != "" {
-			if t := digitsOf(ChatTitle(ctx, client, sid)); t != "" {
-				return t == digits
+			title := strings.TrimSpace(ChatTitle(ctx, client, sid))
+			if title == "" {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			if isUnknownChatTitle(title) {
+				return false
+			}
+			if phoneDigitsMatch(title, digits) {
+				return true
+			}
+			if digitsOf(title) != "" {
+				return false
+			}
+			if prevTitle != "" && title == prevTitle {
+				time.Sleep(500 * time.Millisecond)
+				continue
 			}
 			return true
 		}
@@ -335,6 +458,9 @@ func openDefaultChat(ctx context.Context, client *Client, sid string) error {
 		return fmt.Errorf("no chat available to send to: %w", err)
 	}
 	for i, c := range cells {
+		if isSelfChatTitle(c.name) || isSelfChatTitle(c.label) {
+			continue
+		}
 		if digitsOf(c.name) != "" || c.hasMessage {
 			return tapCell(ctx, client, sid, i+1)
 		}
@@ -342,11 +468,14 @@ func openDefaultChat(ctx context.Context, client *Client, sid string) error {
 	return fmt.Errorf("no chat available to send to")
 }
 
-// gotoChatList 若当前停在聊天页（输入框可见）则点返回回到聊天列表。
+// gotoChatList 回到聊天列表：先关搜索/新聊天页，再从会话页点返回。
 func gotoChatList(ctx context.Context, client *Client, sid string) error {
+	if dismissPicker(ctx, client, sid) {
+		return nil
+	}
 	using, value := splitSelector(whatsappSelectors.messageInput)
 	if _, err := client.FindElement(ctx, sid, using, value); err != nil {
-		return nil // 不在聊天页
+		return nil // 不在聊天页，也没有搜索取消键
 	}
 	for _, sel := range whatsappBackToChats {
 		using, value := splitSelector(sel)
@@ -359,6 +488,21 @@ func gotoChatList(ctx context.Context, client *Client, sid string) error {
 		}
 	}
 	return fmt.Errorf("back button not found")
+}
+
+func dismissPicker(ctx context.Context, client *Client, sid string) bool {
+	for _, sel := range whatsappLeavePicker {
+		using, value := splitSelector(sel)
+		id, err := client.FindElement(ctx, sid, using, value)
+		if err != nil || id == "" {
+			continue
+		}
+		if client.Click(ctx, sid, id) == nil {
+			time.Sleep(800 * time.Millisecond)
+			return true
+		}
+	}
+	return false
 }
 
 // openNewChatByPhone 新聊天 -> 搜索号码 -> 点联系人动作，成功后输入框出现即返回 true。
@@ -380,7 +524,12 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		return false
 	}
 	time.Sleep(800 * time.Millisecond)
-	if err := client.TypeText(ctx, sid, sf, digits); err != nil {
+	// 联系人通常按国内 11 位保存；用 86+11 搜索会排到「未保存/未知」行。
+	query := nationalDigits(digits)
+	if query == "" {
+		query = digits
+	}
+	if err := client.TypeText(ctx, sid, sf, query); err != nil {
 		return false
 	}
 	// 老设备（iPhone 7 / iOS 15）搜索结果出得慢：先等 4s，未命中再补等 2s 重试一次。
@@ -393,35 +542,26 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		}
 	}
 	if cellID == "" {
+		_ = dismissPicker(ctx, client, sid)
 		return false
 	}
-	// 动作在 cell 右侧：先坐标点击，再尝试 cell 内动作文本。
+	// 点 cell 中部（联系人本体）。右侧动作常是「发消息给未保存号码」，会进未知会话。
 	if x, y, w, h, err := client.ElementRect(ctx, sid, cellID); err == nil {
-		tx, ty := int(x+w-30), int(y+h/2)
-		if client.CoordinateTap(ctx, sid, tx, ty) == nil && chatOpened(ctx, client, sid, 6*time.Second) {
+		tx, ty := int(x+w/2), int(y+h/2)
+		if client.CoordinateTap(ctx, sid, tx, ty) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
 			return true
 		}
 	}
-	for _, name := range []string{"PickerView_ContactCell_PhoneNumber", "聊天"} {
+	for _, name := range []string{"PickerView_ContactCell_Name", "PickerView_ContactCell_PhoneNumber", "聊天"} {
 		sel := "class chain: **/XCUIElementTypeCell[`name == 'PickerView_ContactCell'`]/**/XCUIElementTypeStaticText[`name == '" + name + "'`]"
 		act, err := findElementBySelector(ctx, client, sid, sel)
 		if err == nil && act != "" {
-			if client.Click(ctx, sid, act) == nil && chatOpened(ctx, client, sid, 6*time.Second) {
+			if client.Click(ctx, sid, act) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
 				return true
 			}
 		}
 	}
-	return false
-}
-
-func chatOpened(ctx context.Context, client *Client, sid string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := findElementBySelector(ctx, client, sid, whatsappSelectors.messageInput); err == nil {
-			return true
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	_ = dismissPicker(ctx, client, sid)
 	return false
 }
 
@@ -429,6 +569,7 @@ func chatOpened(ctx context.Context, client *Client, sid string, timeout time.Du
 
 type sourceCell struct {
 	name       string
+	label      string
 	hasMessage bool
 }
 
@@ -458,7 +599,7 @@ func parseSourceCells(src string) ([]sourceCell, error) {
 		case xml.StartElement:
 			if t.Name.Local == "XCUIElementTypeCell" {
 				if cur == nil {
-					cur = &sourceCell{name: xmlAttr(t, "name")}
+					cur = &sourceCell{name: xmlAttr(t, "name"), label: xmlAttr(t, "label")}
 					curDepth = depth
 				}
 			} else if cur != nil && t.Name.Local == "XCUIElementTypeStaticText" && xmlAttr(t, "name") == "WAChatSessionCell_Message" {
@@ -495,13 +636,228 @@ func digitsOf(s string) string {
 	return b.String()
 }
 
+func nationalDigits(digits string) string {
+	d := digitsOf(digits)
+	if len(d) >= 11 {
+		return d[len(d)-11:]
+	}
+	return d
+}
+
+func phoneDigitsMatch(got, want string) bool {
+	g, w := digitsOf(got), digitsOf(want)
+	if g == "" || w == "" {
+		return false
+	}
+	if g == w {
+		return true
+	}
+	gn, wn := nationalDigits(g), nationalDigits(w)
+	return len(gn) == 11 && gn == wn
+}
+
+func isUnknownChatTitle(title string) bool {
+	t := strings.TrimSpace(title)
+	if t == "" {
+		return false
+	}
+	low := strings.ToLower(t)
+	switch low {
+	case "unknown", "unsaved", "未知", "未知联系人", "陌生人":
+		return true
+	}
+	return strings.HasPrefix(low, "unknown") || strings.HasPrefix(t, "未知")
+}
+
+func cellMatchesPhone(c sourceCell, digits string) bool {
+	return phoneDigitsMatch(c.name, digits) || phoneDigitsMatch(c.label, digits)
+}
+
+func chatDisplayTitle(c sourceCell) string {
+	if s := strings.TrimSpace(c.name); s != "" && s != "filter" {
+		return s
+	}
+	return strings.TrimSpace(c.label)
+}
+
+func looksLikeGroupChat(s string) bool {
+	if s == "" {
+		return false
+	}
+	low := strings.ToLower(s)
+	keys := []string{"群", "group", "broadcast", "广播", "频道", "channel", "community", "社区"}
+	for _, k := range keys {
+		if strings.Contains(low, k) || strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSelfChatTitle(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return false
+	}
+	low := strings.ToLower(t)
+	switch low {
+	case "you", "me", "myself", "你", "我", "自己":
+		return true
+	}
+	for _, p := range []string{"message yourself", "messaging yourself", "(you)", "（you）", "给自己发", "发给自己", "发送给自己"} {
+		if strings.Contains(low, p) || strings.Contains(t, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFriendChatCell 聊天列表里可群发的 1:1 好友会话：排除筛选条、群、未知、自己。
+func isFriendChatCell(c sourceCell) bool {
+	title := chatDisplayTitle(c)
+	if title == "" || title == "filter" {
+		return false
+	}
+	if isSelfChatTitle(title) || isSelfChatTitle(c.label) || isSelfChatTitle(c.name) {
+		return false
+	}
+	if looksLikeGroupChat(title) || looksLikeGroupChat(c.label) {
+		return false
+	}
+	if isUnknownChatTitle(title) || isUnknownChatTitle(c.label) {
+		return false
+	}
+	return c.hasMessage || digitsOf(c.name) != "" || digitsOf(c.label) != ""
+}
+
+type chatTarget struct {
+	title  string
+	digits string
+}
+
+func friendChatTargets(cells []sourceCell) []chatTarget {
+	var out []chatTarget
+	seen := map[string]bool{}
+	for _, c := range cells {
+		if !isFriendChatCell(c) {
+			continue
+		}
+		t := chatTarget{title: chatDisplayTitle(c)}
+		d := digitsOf(c.name)
+		if d == "" {
+			d = digitsOf(c.label)
+		}
+		t.digits = d
+		key := t.title
+		if n := nationalDigits(t.digits); len(n) == 11 {
+			key = n
+		}
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+func openChatByTarget(ctx context.Context, client *Client, sid string, t chatTarget) error {
+	cells, err := sourceCells(ctx, client, sid)
+	if err != nil {
+		return err
+	}
+	for i, c := range cells {
+		if t.digits != "" && cellMatchesPhone(c, t.digits) {
+			return tapCell(ctx, client, sid, i+1)
+		}
+		if chatDisplayTitle(c) == t.title {
+			return tapCell(ctx, client, sid, i+1)
+		}
+	}
+	return fmt.Errorf("chat list missing %q", t.title)
+}
+
+const (
+	DefaultChatListMaxFriends = 30
+	HardChatListMaxFriends    = 100
+)
+
+func ClampChatListMax(n int) int {
+	if n <= 0 {
+		return DefaultChatListMaxFriends
+	}
+	if n > HardChatListMaxFriends {
+		return HardChatListMaxFriends
+	}
+	return n
+}
+
+func capChatTargets(ts []chatTarget, max int) []chatTarget {
+	max = ClampChatListMax(max)
+	if len(ts) > max {
+		return ts[:max]
+	}
+	return ts
+}
+
+// SendToChatListFriends 无指定号码时：打开聊天列表，向当前能看到的 1:1 好友会话逐条发送。
+// maxFriends≤0 按 30；超过 100 按 100。不滚动加载更早的会话；群/筛选条/未知/自己跳过。
+func SendToChatListFriends(ctx context.Context, client *Client, content string, assist SendAssist, maxFriends int) (sent int, names []string, err error) {
+	sid, _, err := createWhatsAppSession(ctx, client)
+	if err != nil {
+		return 0, nil, fmt.Errorf("create wda session: %w", err)
+	}
+	defer func() { _ = client.DeleteSession(context.WithoutCancel(ctx), sid) }()
+	if err := gotoChatList(ctx, client, sid); err != nil {
+		return 0, nil, err
+	}
+	cells, err := sourceCells(ctx, client, sid)
+	if err != nil {
+		return 0, nil, err
+	}
+	targets := capChatTargets(friendChatTargets(cells), maxFriends)
+	if len(targets) == 0 {
+		return 0, nil, fmt.Errorf("聊天列表未找到好友会话")
+	}
+	var lastErr error
+	for _, tgt := range targets {
+		if ctx.Err() != nil {
+			return sent, names, ctx.Err()
+		}
+		if err := gotoChatList(ctx, client, sid); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := openChatByTarget(ctx, client, sid, tgt); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := TypeAndSend(ctx, client, sid, content, assist); err != nil {
+			lastErr = err
+			continue
+		}
+		sent++
+		names = append(names, tgt.title)
+	}
+	if sent == 0 {
+		if lastErr != nil {
+			return 0, nil, lastErr
+		}
+		return 0, nil, fmt.Errorf("聊天列表未找到好友会话")
+	}
+	if lastErr != nil {
+		return sent, names, fmt.Errorf("已发送 %d/%d，部分失败: %w", sent, len(targets), lastErr)
+	}
+	return sent, names, nil
+}
+
 func chatIndexByPhone(ctx context.Context, client *Client, sid, digits string) (int, error) {
 	cells, err := sourceCells(ctx, client, sid)
 	if err != nil {
 		return 0, err
 	}
 	for i, c := range cells {
-		if digitsOf(c.name) == digits {
+		if cellMatchesPhone(c, digits) {
 			return i + 1, nil
 		}
 	}

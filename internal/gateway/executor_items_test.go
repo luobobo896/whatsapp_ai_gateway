@@ -53,14 +53,14 @@ func TestDeviceItemsGrouping(t *testing.T) {
 	}
 }
 
-// TestEmptyPhoneRejected 明细缺手机号（含纯空白）直接标记失败、绝不进入 WDA 发送链路。
-// 设备地址指向不可达端口：若守卫失效会得到连接类错误而非「缺少手机号」。
-func TestEmptyPhoneRejected(t *testing.T) {
+// TestEmptyPhoneOfflineStillFailsUnreachable 无号码明细在设备离线时按离线失败收口，
+// 不再用「缺少手机号」提前结束；在线时会走聊天列表好友群发。
+func TestEmptyPhoneOfflineStillFailsUnreachable(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{Devices: []Device{{UDID: "udid-e", IP: "127.0.0.1", Port: 1}}}
 	e := NewExecutor(cfg, nil, nil, dir)
 	e.Submit(TaskDispatch{
-		TaskID: "task-e", UDID: "udid-e",
+		TaskID: "task-e", UDID: "udid-e", Content: "hello",
 		Items: []TaskItem{{ItemID: "i1", Phone: ""}, {ItemID: "i2", Phone: "  "}},
 	})
 
@@ -73,7 +73,7 @@ func TestEmptyPhoneRejected(t *testing.T) {
 			t.Fatal("task did not finish")
 		}
 	}
-	if s.SentFail != 2 || s.Status != taskDone {
+	if s.SentFail != 2 || s.Status != taskStopUnreach {
 		t.Fatalf("summary wrong: %+v", s)
 	}
 	items := e.readItems("task-e")
@@ -82,11 +82,32 @@ func TestEmptyPhoneRejected(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s not persisted", id)
 		}
-		if r.Status != "failed" || !strings.Contains(r.Error, "缺少手机号") {
-			t.Fatalf("%s should be rejected as failed: %+v", id, r)
+		if r.Status != "failed" || !strings.Contains(r.Error, "设备离线") {
+			t.Fatalf("%s should fail as offline: %+v", id, r)
 		}
 	}
-	if m := e.Metrics("udid-e"); m.SentFail != 2 || m.Total != 2 {
-		t.Fatalf("metrics wrong: %+v", m)
+}
+
+func TestEmptyItemsWithContentBecomesChatListJob(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{Devices: []Device{{UDID: "udid-e", IP: "127.0.0.1", Port: 1}}}
+	e := NewExecutor(cfg, nil, nil, dir)
+	e.Submit(TaskDispatch{TaskID: "task-cl", UDID: "udid-e", Content: "hello"})
+
+	var s TaskSummary
+	deadline := time.After(5 * time.Second)
+	for s.TaskID == "" {
+		select {
+		case s = <-e.SummaryQ:
+		case <-deadline:
+			t.Fatal("task did not finish")
+		}
+	}
+	if s.Total != 1 || s.SentFail != 1 {
+		t.Fatalf("empty items should expand to one chat-list job: %+v", s)
+	}
+	items := e.readItems("task-cl")
+	if _, ok := items["chat-list"]; !ok {
+		t.Fatalf("synthetic chat-list item missing: %+v", items)
 	}
 }

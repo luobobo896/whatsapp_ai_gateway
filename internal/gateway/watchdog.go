@@ -39,7 +39,7 @@ func wifiReachable(dev *Device) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "ping", "-c", "1", "-t", "2", dev.IP).Run() == nil
+	return exec.CommandContext(ctx, "ping", pingArgs(dev.IP)...).Run() == nil
 }
 
 // reactivateDecision 是否应重激活：健康失败 + 允许自动重激活 + 未在运行 + USB 在线。

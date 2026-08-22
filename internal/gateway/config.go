@@ -25,22 +25,28 @@ import (
 type Config struct {
 	mu             sync.Mutex
 	db             *sql.DB
-	dir            string // state 目录（gateway.db、data/ 的锚点）
-	Cloud          CloudConfig `json:"cloud"`
-	Devices        []Device    `json:"devices"`
-	HealthInterval float64     `json:"health_interval"`
-	LLM            LLMConfig   `json:"llm,omitempty"`
-	Web            WebConfig   `json:"web,omitempty"`
+	dir            string        // state 目录（gateway.db、data/ 的锚点）
+	Cloud          CloudConfig   `json:"cloud"`
+	Devices        []Device      `json:"devices"`
+	HealthInterval float64       `json:"health_interval"`
+	LLM            LLMConfig     `json:"llm,omitempty"`
+	Web            WebConfig     `json:"web,omitempty"`
 	Signing        SigningConfig `json:"signing,omitempty"`
 	// Ignored 手动删除（隐藏）的设备 UDID：删除后即使 USB 仍连接也不在列表出现，
 	// 直到用户显式恢复（unignore）或重新激活。防误删的同时满足"删除要真正生效"。
-	Ignored        []string    `json:"ignored,omitempty"`
+	Ignored []string `json:"ignored,omitempty"`
 }
 
 // SigningConfig 构建/签名配置（打包交付用）。
 type SigningConfig struct {
 	// Team 透传给 xcodebuild 的 DEVELOPMENT_TEAM；空=工程内写死值（现状）。
 	Team string `json:"team,omitempty"`
+	// Activator 激活后端：auto（默认）| xcodebuild | goios | tidevice。
+	// auto 在 Windows 走 goios，其余平台走 xcodebuild。
+	Activator string `json:"activator,omitempty"`
+	// WDABundleID 已安装到手机上的 WDA Runner bundle id，供 goios/tidevice 拉起 XCTest。
+	// 空则用工程默认 com.wda.WebRunner.xctrunner。
+	WDABundleID string `json:"wda_bundle_id,omitempty"`
 }
 
 // WebConfig 管理页与发送行为配置。
@@ -49,6 +55,9 @@ type WebConfig struct {
 	CookieSecure bool `json:"cookie_secure,omitempty"`
 	// SendTimezone 发送时间窗使用的 IANA 时区名（如 Asia/Shanghai）；空=网关本机时区。
 	SendTimezone string `json:"send_timezone,omitempty"`
+	// ChatListMaxFriends 未指定号码时，聊天列表最多发送多少个 1:1 好友。
+	// 0 或负数按默认 30；超过硬顶 100 按 100，避免名单过长转圈发不完。
+	ChatListMaxFriends int `json:"chat_list_max_friends,omitempty"`
 }
 
 // CloudConfig 云通道（平台网关 WSS）。
@@ -83,6 +92,27 @@ type LLMConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
+}
+
+// UnmarshalJSON 同时接受 snake_case 与平台可能下发的 camelCase。
+func (c *LLMConfig) UnmarshalJSON(b []byte) error {
+	type plain LLMConfig
+	var a struct {
+		plain
+		BaseURLCamel string `json:"baseUrl"`
+		APIKeyCamel  string `json:"apiKey"`
+	}
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*c = LLMConfig(a.plain)
+	if c.BaseURL == "" {
+		c.BaseURL = a.BaseURLCamel
+	}
+	if c.APIKey == "" {
+		c.APIKey = a.APIKeyCamel
+	}
+	return nil
 }
 
 const configSchemaVersion = "1"

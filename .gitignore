@@ -13,4 +13,5 @@ devices.json
 # 桌面壳构建与打包产物
 desktop/.build/
 build/
+dist/
 *.dmg

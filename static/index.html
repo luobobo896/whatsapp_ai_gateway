@@ -300,7 +300,7 @@
     </div>
     <div class="panel" style="margin-top:14px">
       <div class="panel-body">
-        <span class="muted">说明：升级前落盘的历史明细没有设备上下文，已按网关统计尽力归因，仍无法归因的归入「未知设备」；历史记录中手机号为空却显示「成功」的条目，是升级前「无号码发送到默认会话」的行为，升级后此类明细一律拒绝发送并标记失败。</span>
+        <span class="muted">说明：升级前落盘的历史明细没有设备上下文，已按网关统计尽力归因，仍无法归因的归入「未知设备」。未指定手机号时，网关会向聊天列表里当前可见的 1:1 好友逐个发送（跳过群、筛选条、未知、自己；默认最多 30 人，web.chat_list_max_friends 可改，硬顶 100）。</span>
       </div>
     </div>
   </div>
@@ -817,7 +817,7 @@ async function loadLlm(){
     const txt = document.getElementById('llmText');
     if(txt){ txt.textContent = on ? c.model : '未配置'; }
     const detail = document.getElementById('llmDetail');
-    if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置')) : '由平台「模型管理」页下发，用于发送键视觉定位兜底'; }
+    if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置') + ' · 开会话失败/未知页会调用模型判断并写 bug 日志') : '由平台「模型管理」页下发；未配置则发送只走选择器，不会调用模型'; }
   }catch(e){}
 }
 async function act(udid){

@@ -3,6 +3,7 @@ package wda
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,26 @@ func (f *fakeWDA) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func TestPhoneDigitsMatchWhatsAppNavTitle(t *testing.T) {
+	// 真机 NavigationBar_ConversationHeader：带 LTR isolate / NBSP。
+	title := "\u202a+86\u00a0152\u00a01347\u00a02085\u202c"
+	if !phoneDigitsMatch(title, "8615213472085") {
+		t.Fatalf("real nav title should match, digits=%q", digitsOf(title))
+	}
+}
+
+func TestTypeAndSendRefusesSelfChat(t *testing.T) {
+	f := &fakeWDA{}
+	f.text.Store("You")
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	defer srv.Close()
+	c := NewClient(srv.URL, 5*time.Second)
+	err := TypeAndSend(context.Background(), c, "s1", "hello", nil)
+	if !errors.Is(err, ErrSendToSelf) {
+		t.Fatalf("want ErrSendToSelf, got %v", err)
+	}
+}
+
 // TestConfirmSentCleared 发送后输入框被清空 → 确认通过。
 func TestConfirmSentCleared(t *testing.T) {
 	f := &fakeWDA{}
@@ -78,26 +99,58 @@ func TestConfirmSentResidual(t *testing.T) {
 
 // TestChatOpenedForTitleMatch 标题含号码时必须与目标一致；无号码（联系人名）视为打开。
 func TestChatOpenedForTitleMatch(t *testing.T) {
-	mk := func(title string) (*fakeWDA, *Client) {
+	mk := func(title string) (*httptest.Server, *Client) {
 		f := &fakeWDA{}
 		f.text.Store(title)
 		srv := httptest.NewServer(http.HandlerFunc(f.handler))
-		return f, NewClient(srv.URL, 5*time.Second)
+		return srv, NewClient(srv.URL, 5*time.Second)
 	}
 	// 标题是格式化号码（+86 152 1347 2085），与目标 digits 匹配 → true
-	_, c := mk("+86 152 1347 2085")
-	if !chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second) {
+	srv, c := mk("+86 152 1347 2085")
+	defer srv.Close()
+	if !chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second, "") {
 		t.Fatal("title digits match should open")
 	}
+	// 标题只有国内 11 位（联系人按本地号码存）→ 也应命中
+	srv2, c := mk("152 1347 2085")
+	defer srv2.Close()
+	if !chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second, "") {
+		t.Fatal("national 11-digit title should match 86+11 target")
+	}
 	// 标题是别的号码（停留在上一会话）→ false，必须走兜底
-	_, c = mk("+86 138 0000 0001")
-	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second) {
+	srv3, c := mk("+86 138 0000 0001")
+	defer srv3.Close()
+	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second, "") {
 		t.Fatal("title digits mismatch should not open")
 	}
-	// 标题是联系人姓名（无号码可比）→ 输入框出现即 true
-	_, c = mk("张三")
-	if !chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second) {
-		t.Fatal("contact-name title should open")
+	// 深链从聊天列表打开：标题变成联系人姓名（与深链前不同）→ true
+	srv4, c := mk("张三")
+	defer srv4.Close()
+	if !chatOpenedFor(context.Background(), c, "s1", "8615213472085", time.Second, "") {
+		t.Fatal("new contact-name title should open")
+	}
+	// 深链没跳转：标题仍是上一会话姓名 → false
+	srv5, c := mk("张三")
+	defer srv5.Close()
+	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", 400*time.Millisecond, "张三") {
+		t.Fatal("unchanged previous contact title should not count as opened")
+	}
+	// WhatsApp「未知」会话：有输入框但不能当命中
+	srv6, c := mk("未知")
+	defer srv6.Close()
+	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", 400*time.Millisecond, "") {
+		t.Fatal("unknown title should not open")
+	}
+	srv7, c := mk("Unknown")
+	defer srv7.Close()
+	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", 400*time.Millisecond, "") {
+		t.Fatal("Unknown title should not open")
+	}
+	// 标题还没出来：不能把空标题当成联系人
+	srv8, c := mk("")
+	defer srv8.Close()
+	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", 400*time.Millisecond, "") {
+		t.Fatal("empty title should wait and fail, not accept")
 	}
 }
 

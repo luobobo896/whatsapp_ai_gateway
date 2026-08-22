@@ -212,6 +212,15 @@ func (e *Executor) llmClient() *LLMClient {
 	return e.llm
 }
 
+// llmAssist 仅在模型真正可用时交给发送链路；只配了名字没配地址的不算启用。
+func (e *Executor) llmAssist() wda.SendAssist {
+	c := e.llmClient()
+	if c == nil || !c.Enabled() {
+		return nil
+	}
+	return c
+}
+
 // loadMetrics 读入历史统计（SQLite results.db metrics 表）。
 // 落盘数据标注的日期保持原样（跨天归档由下次 recordMetric 惰性完成），
 // 避免启动时刻与数据日期不一致时误归档。
@@ -493,6 +502,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	if dev != nil {
 		env.Serial, env.DeviceName = dev.Serial, dev.Name
 	}
+	// 整单没有明细但有任务文案：视为「未指定号码」，按聊天列表好友群发一条。
+	if len(t.Items) == 0 && strings.TrimSpace(t.Content) != "" {
+		t.Items = []TaskItem{{ItemID: "chat-list", Content: t.Content}}
+	}
 	// 任务收口：无论正常结束/熔断/失联/预热截止，统一统计并上行 task:summary。
 	stopStatus, stopReason := taskDone, ""
 	defer func() { e.finishTask(env, t, start, stopStatus, stopReason) }()
@@ -530,15 +543,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 
 	// 离线设备直接剔除：任务下发时 WDA 探活失败（隧道与 Wi-Fi 均不可达），
 	// 可发明细立即标记失败上报，平台可马上转派在线设备；不进逐条执行空耗超时。
-	// 缺号码属数据校验（与设备状态无关），仍按「缺少手机号」收口。
 	if !e.deviceReachable(udid, ip, port) {
 		reason := "设备离线（WDA 不可达），任务被网关拒绝，请转派在线设备后重试"
 		offline := false
 		for _, it := range t.Items {
-			if strings.TrimSpace(it.Phone) == "" {
-				e.rejectEmptyPhone(env, t, it, udid)
-				continue
-			}
 			e.finishItem(e.cancelledEnv(env, t, it, "failed", reason))
 			offline = true
 		}
@@ -592,30 +600,82 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		t0 := time.Now()
 		status, errMsg := "sent", ""
 		contactName := ""
-		assist := e.llmClient()
-		if assist != nil && assist.Model == "" {
-			assist = nil
-		}
+		assist := e.llmAssist()
 		// 模板变量：明细有逐条渲染内容时优先使用（兼容旧平台任务）。
 		content := itemContent(t, it)
-		// 手机号缺失：禁止无号码发送——旧逻辑会落到「默认会话」把消息发给
-		// 当前打开的任意聊天，造成明细显示发送成功却无手机号。此类明细直接标记失败。
+		// 未指定号码：扫描聊天列表里当前可见的 1:1 好友并逐个发送。
 		if strings.TrimSpace(it.Phone) == "" {
-			e.rejectEmptyPhone(env, t, it, udid)
+			maxFriends := 0
+			if e.cfg != nil {
+				maxFriends = e.cfg.Web.ChatListMaxFriends
+			}
+			n, names, serr := wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+			if serr != nil && n == 0 && transientWDAError(serr) {
+				slog.Warn("chat-list send transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", serr.Error())
+				time.Sleep(2 * time.Second)
+				n, names, serr = wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+			}
+			status, errMsg = "sent", ""
+			contactName = strings.Join(names, "、")
+			if n == 0 {
+				status = "failed"
+				if serr != nil {
+					errMsg = serr.Error()
+				} else {
+					errMsg = "聊天列表未找到好友会话"
+				}
+				e.recordBug(t, it, "chat_list", fmt.Errorf("%s", errMsg), assist, client, "")
+			} else if serr != nil {
+				errMsg = serr.Error()
+			} else {
+				errMsg = fmt.Sprintf("聊天列表已发送 %d 人", n)
+			}
+			dur := time.Since(t0).Milliseconds()
+			e.finishItem(ItemResult{
+				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339),
+			})
+			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
+				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
+			if status == "failed" {
+				if containsAny(errMsg, "not reachable", "connection", "timed out") {
+					slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
+					stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
+					return
+				}
+				consecFails++
+				if consecFails >= maxFails {
+					reason := "熔断:连续失败 " + strconv.Itoa(consecFails) + " 条"
+					e.cancelRemainingReason(env, t, t.Items[idx+1:], reason)
+					e.status(DeviceStatus{UDID: udid, WDAStatus: "online", Error: reason, ConnType: env.ConnType})
+					slog.Warn("circuit breaker triggered", "task", t.TaskID, "udid", udid, "consecutive_fails", consecFails)
+					stopStatus, stopReason = taskStopBreaker, reason
+					return
+				}
+			} else {
+				consecFails = 0
+			}
+			if wait := nextInterval(sched, t.IntervalSec); wait > 0 {
+				if interrupted(cancelCh, wait) {
+					continue
+				}
+			}
 			continue
 		}
 		// 打开会话（返回是否为新会话），新会话占比控制：超额则该条标记失败待次日，
 		// 存量会话不受影响继续发送。
 		// 可达性类瞬时故障（WDA 500/超时/连接抖动）先原地重试一次再判失败——
 		// 打开会话本身幂等（未发送任何内容），重试无重复发送风险。
-		sid, isNew, oerr := wda.OpenChatForSend(context.Background(), client, it.Phone)
+		sid, isNew, oerr := wda.OpenChatForSendWithAssist(context.Background(), client, it.Phone, assist)
 		if oerr != nil && transientWDAError(oerr) {
 			slog.Warn("open chat transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", oerr.Error())
 			time.Sleep(2 * time.Second)
-			sid, isNew, oerr = wda.OpenChatForSend(context.Background(), client, it.Phone)
+			sid, isNew, oerr = wda.OpenChatForSendWithAssist(context.Background(), client, it.Phone, assist)
 		}
 		if oerr != nil {
 			status, errMsg = "failed", oerr.Error()
+			e.recordBug(t, it, "open_chat", oerr, assist, client, sid)
 		} else {
 			// 收件人姓名：聊天页已打开，尽力读标题（联系人名/号码），失败为空不影响发送。
 			contactName = wda.ChatTitle(context.Background(), client, sid)
@@ -636,10 +696,11 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			} else {
 				serr = wda.TypeAndSend(context.Background(), client, sid, content, assist)
 			}
-			_ = client.DeleteSession(context.Background(), sid)
 			if serr != nil {
 				status, errMsg = "failed", serr.Error()
+				e.recordBug(t, it, "type_send", serr, assist, client, sid)
 			}
+			_ = client.DeleteSession(context.Background(), sid)
 		}
 		dur := time.Since(t0).Milliseconds()
 		e.finishItem(ItemResult{
@@ -651,8 +712,8 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			"new_session", isNew, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
 
 		if status == "failed" {
-			// 占比控制的失败不计入连续失败熔断（非设备异常）。
-			if strings.Contains(errMsg, "占比控制") {
+			// 占比控制、禁止发给自己：业务规则拒绝，不是设备故障，不计入熔断。
+			if strings.Contains(errMsg, "占比控制") || strings.Contains(errMsg, "禁止给自己发送") {
 				continue
 			}
 			if containsAny(errMsg, "not reachable", "connection", "timed out") {
@@ -698,13 +759,6 @@ func (e *Executor) deviceReachable(udid, ip string, port int) bool {
 		p = 8100
 	}
 	return CheckWDA(u.Hostname(), p, 4*time.Second).OK
-}
-
-// rejectEmptyPhone 无号码明细直接标记失败（数据校验不依赖设备状态，
-// 离线剔除时同样先按此收口，保证平台看到的失败原因一致）。
-func (e *Executor) rejectEmptyPhone(env taskEnv, t TaskDispatch, it TaskItem, udid string) {
-	e.finishItem(e.cancelledEnv(env, t, it, "failed", "明细缺少手机号，已拒绝发送（无号码禁止发送到默认会话）"))
-	slog.Warn("item rejected: empty phone", "task", t.TaskID, "item", it.ItemID)
 }
 
 // itemContent 返回单条明细的实际发送内容：明细有逐条渲染内容（平台模板变量）

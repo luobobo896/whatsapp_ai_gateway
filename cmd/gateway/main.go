@@ -65,6 +65,7 @@ func main() {
 		*derived = filepath.Join(state, "derived")
 	}
 	wdaMgr := gateway.NewWDAManager(*projectRoot, *derived, cfg.Signing.Team)
+	wdaMgr.ConfigureSigning(cfg.Signing)
 	llm := gateway.NewLLMClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
 	resultsDir := filepath.Join(state, "data", "results")
 	exec := gateway.NewExecutor(cfg, wdaMgr, llm, resultsDir)
