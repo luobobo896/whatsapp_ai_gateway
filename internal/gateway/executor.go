@@ -615,7 +615,18 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		_ = client.DeleteSession(context.Background(), sid)
 		sid, bid = "", ""
 	}
-	defer dropSession()
+	// 整单结束（含熔断/取消/失联提前 return）必须回到聊天列表再拆会话，
+	// 避免 UI 停在最后一条聊天窗口（产品规则：群发完成后停留聊天列表）。
+	defer func() {
+		if sid != "" {
+			gctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if err := wda.GotoChatList(gctx, client, sid); err != nil {
+				slog.Warn("return to chat list after task", "task", t.TaskID, "udid", udid, "error", err)
+			}
+			cancel()
+		}
+		dropSession()
+	}()
 	ensureSession := func() error {
 		if sid != "" {
 			return nil

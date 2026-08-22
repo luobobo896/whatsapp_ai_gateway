@@ -384,45 +384,137 @@ func createWhatsAppSession(ctx context.Context, client *Client) (sid, bid string
 	return "", "", fmt.Errorf("whatsapp not installed (tried %s): %w", strings.Join(whatsappBundleIDs, ", "), lastErr)
 }
 
-// openTargetChat 打开指定号码的会话：优先深链（iOS 16.4+）；失败则聊天列表按号码匹配，再走新聊天搜索。
+// openTargetChat 打开指定号码的会话。
+// 高版本 iOS（≥16.4）优先深链（whatsapp:// 与 https://wa.me）；老系统先聊天列表匹配再深链。
+// 仅指定号码失败后才走「新聊天→搜索」；空号/列表好友路径禁止搜索。
 // 返回 isNew 表示是否经「新聊天→搜索」路径打开（即该号码此前无既有会话）。
 func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string, assist SendAssist) (isNew bool, err error) {
 	// 已经在目标会话（深链刚打开、或上次停在此人聊天页）就直接发，不要先点返回把页面关掉。
 	if chatOpenedFor(ctx, client, sid, digits, 1500*time.Millisecond, "") {
 		return false, nil
 	}
-	// 不在目标会话：回到列表再深链，避免停在上一条会话里发错人。
+	// 不在目标会话：回到列表再打开，避免停在上一条会话里发错人。
 	_ = gotoChatList(ctx, client, sid)
 	prevTitle := ChatTitle(ctx, client, sid)
-	deeplink := "whatsapp://send?phone=" + digits
-	if err := client.OpenDeepLink(ctx, sid, deeplink, bid); err == nil {
-		// 深链 HTTP 成功 ≠ 会话已打开（老 iOS 不跳转/号码无效只弹窗）。
-		// 必须等到输入框出现且标题通过校验才视为命中，否则继续走兜底。
-		if chatOpenedFor(ctx, client, sid, digits, 8*time.Second, prevTitle) {
-			return false, nil
+	iosVer := ""
+	if st, serr := client.Status(ctx); serr == nil && st != nil {
+		iosVer = st.OSVersion
+	}
+	preferDeep := PreferDeepLink(iosVer)
+
+	tryDeep := func() bool {
+		for _, link := range whatsAppSendDeepLinks(digits) {
+			if client.OpenDeepLink(ctx, sid, link, bid) != nil {
+				continue
+			}
+			// 深链 HTTP 成功 ≠ 会话已打开（老 iOS 不跳转/号码无效只弹窗）。
+			if chatOpenedFor(ctx, client, sid, digits, 8*time.Second, prevTitle) {
+				return true
+			}
+			_ = gotoChatList(ctx, client, sid)
+			prevTitle = ChatTitle(ctx, client, sid)
 		}
+		return false
 	}
-	if err := gotoChatList(ctx, client, sid); err != nil {
-		return false, err
-	}
-	if idx, err := chatIndexByPhone(ctx, client, sid, digits); err == nil {
+	tryList := func() bool {
+		if err := gotoChatList(ctx, client, sid); err != nil {
+			return false
+		}
+		prevTitle = ChatTitle(ctx, client, sid)
+		idx, err := chatIndexByPhone(ctx, client, sid, digits)
+		if err != nil {
+			return false
+		}
 		if err := tapCell(ctx, client, sid, idx); err == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, prevTitle) {
+			return true
+		}
+		return false
+	}
+
+	if preferDeep {
+		if tryDeep() {
 			return false, nil
 		}
+		if tryList() {
+			return false, nil
+		}
+	} else {
+		if tryList() {
+			return false, nil
+		}
+		if tryDeep() {
+			return false, nil
+		}
+	}
+
+	// 仅明确指定号码时才允许搜索；未指定号/列表好友群发不得进入此分支。
+	if !ShouldSearchContact(digits) {
+		return false, fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
 	}
 	if err := openNewChatByPhone(ctx, client, sid, digits); err == nil {
 		return true, nil
 	} else if errors.Is(err, ErrSendToSelf) {
 		return false, err
-	}
-	// 模型只作最后兜底：欠费/超时立刻放弃，不挡选择器主路径。
-	if assist != nil {
-		applyScreenAssist(ctx, client, sid, assist)
-		if chatOpenedFor(ctx, client, sid, digits, 3*time.Second, prevTitle) {
-			return false, nil
+	} else {
+		// 保留搜索失败的明确错误（禁止输入后静默挂起）；模型仅作最后界面恢复尝试。
+		searchErr := err
+		if assist != nil {
+			applyScreenAssist(ctx, client, sid, assist)
+			if chatOpenedFor(ctx, client, sid, digits, 3*time.Second, prevTitle) {
+				return false, nil
+			}
 		}
+		return false, searchErr
 	}
-	return false, fmt.Errorf("deep link unsupported and no chat/contact for %s", digits)
+}
+
+// ShouldSearchContact 仅当明确提供了手机号时才允许「新聊天→搜索」。
+// 空号/未指定收件人必须走聊天列表好友，禁止进搜索框。
+func ShouldSearchContact(phone string) bool {
+	return strings.TrimSpace(phone) != ""
+}
+
+// PreferDeepLink 高版本 iOS（≥16.4）优先用深链打开会话；版本未知时也先试深链再兜底。
+func PreferDeepLink(iosVersion string) bool {
+	maj, min, ok := parseIOSVersion(iosVersion)
+	if !ok {
+		return true
+	}
+	if maj > 16 {
+		return true
+	}
+	return maj == 16 && min >= 4
+}
+
+func parseIOSVersion(v string) (major, minor int, ok bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, 0, false
+	}
+	// 形如 16.4 / 16.4.1 / 15.8.8
+	parts := strings.Split(v, ".")
+	if len(parts) == 0 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[0], "%d", &major); err != nil {
+		return 0, 0, false
+	}
+	if len(parts) > 1 {
+		_, _ = fmt.Sscanf(parts[1], "%d", &minor)
+	}
+	return major, minor, true
+}
+
+// whatsAppSendDeepLinks 指定号码深链候选（先原生 scheme，再 https://wa.me）。
+func whatsAppSendDeepLinks(digits string) []string {
+	d := digitsOf(digits)
+	if d == "" {
+		return nil
+	}
+	return []string{
+		"whatsapp://send?phone=" + d,
+		"https://wa.me/" + d,
+	}
 }
 
 // chatOpenedFor 等待聊天页打开并校验归属。
@@ -480,6 +572,11 @@ func openDefaultChat(ctx context.Context, client *Client, sid string) error {
 		}
 	}
 	return fmt.Errorf("no chat available to send to")
+}
+
+// GotoChatList 回到并尽量停留在聊天列表页（群发整单结束后必须调用，避免停在最后一条会话）。
+func GotoChatList(ctx context.Context, client *Client, sid string) error {
+	return gotoChatList(ctx, client, sid)
 }
 
 // gotoChatList 回到聊天列表：先关搜索/新聊天页，再从会话页点返回。
@@ -632,35 +729,50 @@ func dismissPicker(ctx context.Context, client *Client, sid string) bool {
 }
 
 // openNewChatByPhone 新聊天 -> 搜索号码 -> 点非自己的联系人。搜到本机号返回 ErrSendToSelf。
+// 硬性规则：搜索框输入号码后禁止「什么都不做」——必须选中打开会话，或关闭搜索并返回明确错误。
 func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string) error {
+	query := nationalDigits(digits)
+	if query == "" {
+		query = digitsOf(digits)
+	}
+	if query == "" {
+		return fmt.Errorf("%w: 搜索号码为空", errOpenChatMiss)
+	}
+
+	typed, opened := false, false
+	defer func() {
+		// 已输入搜索词却未打开会话：必须关掉搜索/新聊天页，禁止停在搜索页静默挂起。
+		if typed && !opened {
+			_ = dismissPicker(ctx, client, sid)
+		}
+	}()
+
 	using, value := splitSelector(whatsappNewChatButton)
 	nc, err := client.FindElement(ctx, sid, using, value)
 	if err != nil || nc == "" {
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 未找到新聊天入口", errOpenChatMiss)
 	}
 	if err := client.Click(ctx, sid, nc); err != nil {
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 打开新聊天失败", errOpenChatMiss)
 	}
 	time.Sleep(1500 * time.Millisecond)
 	sf, err := waitAnyElement(ctx, client, sid, whatsappSearchFieldFallbacks, 4*time.Second)
 	if err != nil || sf == "" {
 		_ = dismissPicker(ctx, client, sid)
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 未找到搜索框", errOpenChatMiss)
 	}
 	if err := client.Click(ctx, sid, sf); err != nil {
 		_ = dismissPicker(ctx, client, sid)
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 点击搜索框失败", errOpenChatMiss)
 	}
 	time.Sleep(800 * time.Millisecond)
 	// 联系人通常按国内 11 位保存；用 86+11 搜索会排到「未保存/未知」行。
-	query := nationalDigits(digits)
-	if query == "" {
-		query = digits
-	}
 	if err := client.TypeText(ctx, sid, sf, query); err != nil {
 		_ = dismissPicker(ctx, client, sid)
-		return errOpenChatMiss
+		return fmt.Errorf("搜索框输入号码失败(%s): %w", query, err)
 	}
+	typed = true
+
 	// 老设备（iPhone 7 / iOS 15）搜索结果出得慢：先等 4s，未命中再补等 2s 重试一次。
 	var decision pickerDecision
 	for _, wait := range []time.Duration{4 * time.Second, 2 * time.Second} {
@@ -675,25 +787,23 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		}
 	}
 	if decision == pickerSelf {
-		_ = dismissPicker(ctx, client, sid)
 		return ErrSendToSelf
 	}
 	if decision != pickerHit {
-		_ = dismissPicker(ctx, client, sid)
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 搜索号码 %s 后未找到可发送联系人", errOpenChatMiss, query)
 	}
 	cellID := ""
 	if id, ferr := findElementBySelector(ctx, client, sid, whatsappContactCell); ferr == nil {
 		cellID = id
 	}
 	if cellID == "" {
-		_ = dismissPicker(ctx, client, sid)
-		return errOpenChatMiss
+		return fmt.Errorf("%w: 搜索命中但联系人单元格不可点(%s)", errOpenChatMiss, query)
 	}
 	// 点 cell 中部（联系人本体）。右侧动作常是「发消息给未保存号码」，会进未知会话。
 	if x, y, w, h, err := client.ElementRect(ctx, sid, cellID); err == nil {
 		tx, ty := int(x+w/2), int(y+h/2)
 		if client.CoordinateTap(ctx, sid, tx, ty) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
+			opened = true
 			return nil
 		}
 	}
@@ -702,12 +812,12 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		act, err := findElementBySelector(ctx, client, sid, sel)
 		if err == nil && act != "" {
 			if client.Click(ctx, sid, act) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
+				opened = true
 				return nil
 			}
 		}
 	}
-	_ = dismissPicker(ctx, client, sid)
-	return errOpenChatMiss
+	return fmt.Errorf("%w: 搜索命中但无法打开会话(%s)", errOpenChatMiss, query)
 }
 
 // ---- 源码树解析（用于聊天列表定位）----

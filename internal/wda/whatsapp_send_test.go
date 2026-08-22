@@ -271,3 +271,108 @@ func TestEnsureTypedClearsDraft(t *testing.T) {
 		t.Fatalf("应打入新内容, value=%d text=%v", f.valueCnt.Load(), f.text.Load())
 	}
 }
+
+
+func TestPreferDeepLink(t *testing.T) {
+	cases := []struct {
+		ver  string
+		want bool
+	}{
+		{"", true}, // 未知版本：先试深链再兜底
+		{"16.4", true},
+		{"16.4.1", true},
+		{"17.0", true},
+		{"18.1", true},
+		{"16.3", false},
+		{"16.3.1", false},
+		{"15.8.8", false},
+		{"15.0", false},
+		{"bogus", true}, // 无法解析时先试深链
+	}
+	for _, c := range cases {
+		if got := PreferDeepLink(c.ver); got != c.want {
+			t.Fatalf("PreferDeepLink(%q)=%v want %v", c.ver, got, c.want)
+		}
+	}
+}
+
+func TestWhatsAppSendDeepLinks(t *testing.T) {
+	got := whatsAppSendDeepLinks("8615213472085")
+	if len(got) != 2 {
+		t.Fatalf("len=%d %+v", len(got), got)
+	}
+	if got[0] != "whatsapp://send?phone=8615213472085" {
+		t.Fatalf("scheme link: %s", got[0])
+	}
+	if got[1] != "https://wa.me/8615213472085" {
+		t.Fatalf("wa.me link: %s", got[1])
+	}
+	if whatsAppSendDeepLinks("") != nil || whatsAppSendDeepLinks("abc") != nil {
+		t.Fatal("empty digits must yield nil links")
+	}
+}
+
+func TestShouldSearchContact(t *testing.T) {
+	if ShouldSearchContact("") || ShouldSearchContact("   ") {
+		t.Fatal("empty phone must not search")
+	}
+	if !ShouldSearchContact("15213472085") || !ShouldSearchContact("8615213472085") {
+		t.Fatal("specified phone must allow search")
+	}
+}
+
+func TestSearchMissErrorIsClear(t *testing.T) {
+	// 模拟：能点开新聊天与搜索框并输入，但 source 无联系人 → 必须返回含「未找到」的明确错误，且会关搜索页。
+	var dismiss atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/element") && r.Method == http.MethodPost:
+			var body struct {
+				Using string `json:"using"`
+				Value string `json:"value"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id := ""
+			switch {
+			case strings.Contains(body.Value, "NewChat"):
+				id = "nc"
+			case strings.Contains(body.Value, "SearchBar") || body.Using == "class chain" && strings.Contains(body.Value, "SearchField"):
+				id = "sf"
+			case strings.Contains(body.Value, "Close") || strings.Contains(body.Value, "Cancel") || strings.Contains(body.Value, "取消"):
+				id = "cancel"
+			}
+			if id == "" {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{"value": map[string]any{"error": "no such element"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": map[string]any{"ELEMENT": id}})
+		case strings.HasSuffix(r.URL.Path, "/click"):
+			if strings.Contains(r.URL.Path, "cancel") {
+				dismiss.Add(1)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": nil})
+		case strings.HasSuffix(r.URL.Path, "/value") && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": nil})
+		case strings.HasSuffix(r.URL.Path, "/source"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": `<?xml version="1.0"?><XCUIElementTypeApplication></XCUIElementTypeApplication>`})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, 5*time.Second)
+	err := openNewChatByPhone(context.Background(), c, "s1", "8615213472085")
+	if err == nil {
+		t.Fatal("expected search miss error")
+	}
+	if !errors.Is(err, errOpenChatMiss) {
+		t.Fatalf("want errOpenChatMiss wrap, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "未找到可发送联系人") {
+		t.Fatalf("error should be clear after search input, got %v", err)
+	}
+	if dismiss.Load() == 0 {
+		t.Fatal("search miss must dismiss picker (no silent hang on search page)")
+	}
+}
