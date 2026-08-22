@@ -31,6 +31,7 @@ type WDAManager struct {
 	team        string // DEVELOPMENT_TEAM 透传（空=工程内默认值）
 	activator   string // auto|xcodebuild|goios|tidevice
 	bundleID    string // 已安装 WDA Runner 的 bundle id
+	ipaPath     string // 已签名 IPA；协议激活时未装 Runner 会先 install
 }
 
 // NewWDAManager 构造管理器；projectRoot 为 WhatsAppDeviceAgent 工程路径。
@@ -61,6 +62,9 @@ func (m *WDAManager) ConfigureSigning(s SigningConfig) {
 	}
 	if s.WDABundleID != "" {
 		m.bundleID = s.WDABundleID
+	}
+	if strings.TrimSpace(s.IPAPath) != "" {
+		m.ipaPath = strings.TrimSpace(s.IPAPath)
 	}
 }
 
@@ -166,8 +170,8 @@ func destinationForUDID(udid string) string {
 	return "id=" + udid
 }
 
-// Activate 激活单台 WDA。Mac 默认 xcodebuild test-without-building；
-// Windows（或 activator=goios/tidevice）走 testmanagerd 私有协议拉起已安装的 Runner。
+// Activate 激活单台 WDA。日常路径是 IPA：缺 Runner 就 install，再 tidevice/go-ios 拉起。
+// 只有 auto 找不到协议工具时，Mac 才回退 xcodebuild。
 func (m *WDAManager) Activate(udid string, port int, reportedUDID string) error {
 	if port == 0 {
 		port = 8100

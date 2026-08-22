@@ -53,16 +53,23 @@ WDA Farm Gateway ${VERSION} (Windows ${ARCH})
 把 ios.exe（或 tidevice.exe）以及 Windows 版 idevice_id / ideviceinfo / iproxy
 放到 PATH，或放到 WDA_GATEWAY_RESOURCES\\bin。
 
+把 Mac 上 scripts/package-wda-ipa.sh 打好的 wda.ipa 放到本目录（或 -state 目录）。
+点激活时若手机还没装 Runner，网关会先 install 再拉起。
+
 本机还需要：
   1. Apple Devices 或 iTunes（提供 usbmux）
   2. iPhone 已配对、已开开发者模式、已信任开发者证书
-  3. 手机上已安装签过名的 WebDriverAgentRunner（bundle 默认 com.wda.WebRunner.xctrunner）
+  3. wda.ipa（或手机上已装着同一签名的 WebDriverAgentRunner，bundle 默认 com.wda.WebRunner.xctrunner）
   4. iOS 17+ 需要 wintun.dll（go-ios 隧道）
 
 连发探针（WDA 已在 127.0.0.1:18100 ready 时）：
   wda-probe.exe -wda http://127.0.0.1:18100 -phone 15213472085 -text "hello nice to see you" -send -count 3 -interval 1
 
 当晚步骤见仓库 docs/deployment/windows-night-runbook.md。
+
+easytier（可选，默认关）：平时发消息不用管理员。
+只有平台要开虚拟网卡时，才右键「以管理员身份运行」gateway.exe。
+Mac 上那套 sudo sh scripts/install.sh 是苹果电脑专用，Windows 不要跑。
 
 不要把 gateway.db、devices.json、云凭证打进分发包。
 EOF

@@ -18,8 +18,9 @@ func main() {
 	var (
 		stateDir    = flag.String("state", "", "状态目录（gateway.db、data/、static 的锚点；默认当前目录，或 GATEWAY_STATE_DIR）")
 		configPath  = flag.String("config", "", "兼容旧参数：devices.json 路径（取其目录作为状态目录，并触发一次性迁移）")
-		projectRoot = flag.String("project", "", "WhatsAppDeviceAgent 工程路径")
-		derived     = flag.String("derived", "", "xcodebuild derivedDataPath（默认 <state>/derived，兼容 /tmp/WebDriverAgentFarmDerived）")
+		projectRoot = flag.String("project", "", "仅 xcodebuild 回退：WhatsAppDeviceAgent 工程路径")
+		derived     = flag.String("derived", "", "仅 xcodebuild 回退：derivedDataPath（默认 <state>/derived）")
+		ipaPath     = flag.String("ipa", "", "已签名 WDA IPA（默认 <state>/wda.ipa；手机未装 Runner 时自动安装）")
 		listen      = flag.String("listen", "0.0.0.0:8300", "HTTP 监听地址")
 		staticDir   = flag.String("static", "", "静态文件目录（默认 <state>/static）")
 	)
@@ -47,7 +48,10 @@ func main() {
 	}
 	defer cfg.Close()
 	if *projectRoot == "" {
-		*projectRoot = filepath.Join(state, "..", "whatsapp_ai_ios", "WhatsAppDeviceAgent")
+		guess := filepath.Join(state, "..", "whatsapp_ai_ios", "WhatsAppDeviceAgent")
+		if _, err := os.Stat(filepath.Join(guess, "WebDriverAgent.xcodeproj")); err == nil {
+			*projectRoot = guess
+		}
 	}
 	static := *staticDir
 	if static == "" {
@@ -65,7 +69,14 @@ func main() {
 		*derived = filepath.Join(state, "derived")
 	}
 	wdaMgr := gateway.NewWDAManager(*projectRoot, *derived, cfg.Signing.Team)
-	wdaMgr.ConfigureSigning(cfg.Signing)
+	sign := cfg.Signing
+	if *ipaPath != "" {
+		sign.IPAPath = *ipaPath
+	}
+	if sign.IPAPath == "" {
+		sign.IPAPath = filepath.Join(state, "wda.ipa")
+	}
+	wdaMgr.ConfigureSigning(sign)
 	llm := gateway.NewLLMClient(cfg.LLM.BaseURL, cfg.LLM.APIKey, cfg.LLM.Model)
 	resultsDir := filepath.Join(state, "data", "results")
 	exec := gateway.NewExecutor(cfg, wdaMgr, llm, resultsDir)
@@ -93,7 +104,7 @@ func main() {
 	srv := &http.Server{Addr: *listen, Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("gateway listening", "addr", *listen, "project", *projectRoot)
+	slog.Info("gateway listening", "addr", *listen, "ipa", sign.IPAPath, "project", *projectRoot)
 	select {
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {

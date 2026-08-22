@@ -49,12 +49,26 @@ func TestResolveActivator(t *testing.T) {
 	if auto != empty {
 		t.Fatalf("auto vs empty: %q vs %q", auto, empty)
 	}
+	want := autoActivator(lookTool("ios", "ios.exe") != "", lookTool("tidevice", "tidevice.exe") != "")
+	if auto != want {
+		t.Fatalf("auto: got %q want %q", auto, want)
+	}
+}
+
+func TestAutoActivator(t *testing.T) {
+	if got := autoActivator(true, true); got != activatorGoIOS {
+		t.Fatalf("prefer goios when both exist: %q", got)
+	}
+	if got := autoActivator(false, true); got != activatorTidevice {
+		t.Fatalf("tidevice when no goios: %q", got)
+	}
+	none := autoActivator(false, false)
 	if runtime.GOOS == "windows" {
-		if auto != activatorGoIOS {
-			t.Fatalf("windows auto want goios, got %q", auto)
+		if none != activatorGoIOS {
+			t.Fatalf("windows no tools want goios, got %q", none)
 		}
-	} else if auto != activatorXcodebuild {
-		t.Fatalf("non-windows auto want xcodebuild, got %q", auto)
+	} else if none != activatorXcodebuild {
+		t.Fatalf("mac no tools want xcodebuild, got %q", none)
 	}
 }
 
@@ -111,12 +125,116 @@ func TestWDABundleIDDefault(t *testing.T) {
 	if m.wdaBundleID() != defaultWDABundleID {
 		t.Fatalf("default bundle id: %q", m.wdaBundleID())
 	}
-	m.ConfigureSigning(SigningConfig{WDABundleID: "com.example.wda.xctrunner", Activator: "goios"})
+	m.ConfigureSigning(SigningConfig{WDABundleID: "com.example.wda.xctrunner", Activator: "goios", IPAPath: "/tmp/wda.ipa"})
 	if m.wdaBundleID() != "com.example.wda.xctrunner" {
 		t.Fatalf("configured bundle id: %q", m.wdaBundleID())
 	}
 	if resolveActivator(m.activator) != activatorGoIOS {
 		t.Fatalf("configured activator: %q", m.activator)
+	}
+	if m.ipaPath != "/tmp/wda.ipa" {
+		t.Fatalf("configured ipa: %q", m.ipaPath)
+	}
+}
+
+func TestGoiosInstallAndAppsArgs(t *testing.T) {
+	udid := "00008120-000865D90A10C01E"
+	ipa := `/data/wda.ipa`
+	got := goiosInstallArgs(udid, ipa)
+	want := []string{"--udid=" + udid, "install", "--path=" + ipa}
+	if len(got) != len(want) {
+		t.Fatalf("install args %#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("install[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+	apps := goiosAppsArgs(udid)
+	if !containsExact(apps, "--udid="+udid) || !containsExact(apps, "apps") {
+		t.Fatalf("apps args %#v", apps)
+	}
+}
+
+func TestTideviceInstallAndAppsArgs(t *testing.T) {
+	udid := "5060c403af00112233445566778899aabbccddee"
+	ipa := `C:\wda\wda.ipa`
+	got := tideviceInstallArgs(udid, ipa)
+	want := []string{"-u", udid, "install", ipa}
+	if len(got) != len(want) {
+		t.Fatalf("install args %#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("install[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+	apps := tideviceAppsArgs(udid)
+	if !containsExact(apps, "-u") || !containsExact(apps, udid) || !containsExact(apps, "applist") {
+		t.Fatalf("applist args %#v", apps)
+	}
+}
+
+func TestAppListContains(t *testing.T) {
+	out := "com.apple.mobilesafari Safari 1.0\ncom.wda.WebRunner.xctrunner WebDriverAgentRunner-Runner 1.0\n"
+	if !appListContains(out, defaultWDABundleID) {
+		t.Fatal("should find runner")
+	}
+	if appListContains(out, "com.wda.Other") {
+		t.Fatal("should not match other bundle")
+	}
+	if appListContains("", defaultWDABundleID) {
+		t.Fatal("empty list is not installed")
+	}
+}
+
+func TestResolvedIPAPrefersExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	ipa := filepath.Join(dir, "wda.ipa")
+	if err := os.WriteFile(ipa, []byte("ipa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := NewWDAManager("", "", "")
+	m.ConfigureSigning(SigningConfig{IPAPath: ipa})
+	if got := m.resolvedIPA(); got != ipa {
+		t.Fatalf("got %q want %q", got, ipa)
+	}
+}
+
+func TestResolvedIPAFallsBackToResources(t *testing.T) {
+	dir := t.TempDir()
+	ipa := filepath.Join(dir, "wda.ipa")
+	if err := os.WriteFile(ipa, []byte("ipa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WDA_GATEWAY_RESOURCES", dir)
+	m := NewWDAManager("", "", "")
+	m.ipaPath = filepath.Join(dir, "missing.ipa")
+	if got := m.resolvedIPA(); got != ipa {
+		t.Fatalf("got %q want %q", got, ipa)
+	}
+}
+
+func TestEnsureRunnerInstalledDefersWhenListFails(t *testing.T) {
+	m := NewWDAManager("", "", "")
+	m.ConfigureSigning(SigningConfig{Activator: "goios", IPAPath: filepath.Join(t.TempDir(), "no-such.ipa")})
+	// 本机没有 ios 时 list 失败：不能断定「没装」，缺 IPA 也不硬失败，交给后续 start。
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
+	if err := m.ensureRunnerInstalled("00008120-000865D90A10C01E", activatorGoIOS); err != nil {
+		t.Fatalf("list-failed + missing ipa should defer to start, got %v", err)
+	}
+}
+
+func TestInstallCmdMissingBinary(t *testing.T) {
+	m := NewWDAManager("", "", "")
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
+	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorGoIOS, "/tmp/wda.ipa"); err == nil {
+		t.Fatal("expected error when ios binary is missing")
+	}
+	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorTidevice, "/tmp/wda.ipa"); err == nil {
+		t.Fatal("expected error when tidevice binary is missing")
 	}
 }
 

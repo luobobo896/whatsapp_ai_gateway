@@ -42,11 +42,14 @@ type SigningConfig struct {
 	// Team 透传给 xcodebuild 的 DEVELOPMENT_TEAM；空=工程内写死值（现状）。
 	Team string `json:"team,omitempty"`
 	// Activator 激活后端：auto（默认）| xcodebuild | goios | tidevice。
-	// auto 在 Windows 走 goios，其余平台走 xcodebuild。
+	// auto：有 ios/tidevice 就走 IPA 安装+拉起；都没有时 Windows 仍报 goios，Mac 才回退 xcodebuild。
 	Activator string `json:"activator,omitempty"`
 	// WDABundleID 已安装到手机上的 WDA Runner bundle id，供 goios/tidevice 拉起 XCTest。
 	// 空则用工程默认 com.wda.WebRunner.xctrunner。
 	WDABundleID string `json:"wda_bundle_id,omitempty"`
+	// IPAPath 已签名的 WDA Runner IPA。激活时若手机还没装 Runner，会用 tidevice/go-ios 安装这份包。
+	// 空则由启动参数落到 <state>/wda.ipa。
+	IPAPath string `json:"ipa_path,omitempty"`
 }
 
 // WebConfig 管理页与发送行为配置。

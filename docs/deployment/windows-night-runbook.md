@@ -10,11 +10,14 @@
 
 ```text
 [一次，需要 Mac]
-  Xcode 把 WebDriverAgentRunner 装到 iPhone 并信任证书
+  sh scripts/package-wda-ipa.sh  →  dist/wda.ipa
+  个人账号：目标手机 UDID 已登记，并已用登记后的描述文件签过新 IPA（旧包装不上新机）
+  企业账号：只给本公司员工装同一份内部总包；不是给外面客户用的
 
 [每次，Windows 就能做]
+  把 wda.ipa 放到 gateway.exe 的 -state 目录
   Apple Devices / iTunes 提供 usbmux
-  tidevice xctest 或 ios.exe runwda 拉起已安装的 Runner
+  点激活：未装则 install IPA，再 tidevice xctest / ios.exe runwda
   iproxy 把本机端口转到手机 8100
   gateway.exe 打开会话 → 输入 → 发送 → 回传
 ```
@@ -28,6 +31,7 @@
 - [tidevice + Airtest](https://hiyongz.github.io/posts/app-testing-for-ios-app-testing-on-windows-with-airtest/)
 - 设计说明：[windows-wda-activation.md](../design/windows-wda-activation.md)
 - 全流程图：[wda-end-to-end-flow.md](../design/wda-end-to-end-flow.md)
+- Mac 出包（独立章节）：[mac-wda-ipa-package.md](../design/mac-wda-ipa-package.md)
 
 ## 1. 今晚出门前在 Mac 上确认
 
@@ -40,9 +44,9 @@
 | 单条发送 | `hello nice to see you` 发出，输入框清空 |
 | 连发 3 条 | 整单复用会话，约 6s/条，见 [smooth-batch-mac](../testing/2026-08-22-smooth-batch-mac.md) |
 | `gateway.exe` | `sh scripts/build-windows-exe.sh` → `dist/windows-amd64/gateway.exe` |
-| 手机上的 Runner | 本仓库 `com.wda.WebRunner.xctrunner`（Mac 上 `xcodebuild test-without-building` 已装过） |
+| 手机上的 Runner | 本仓库 `com.wda.WebRunner.xctrunner`；也可只带 `dist/wda.ipa`，Windows 上点激活会装 |
 
-回家带上：这台已经信任过开发者证书的 iPhone、数据线、`dist/windows-amd64/` 整个目录。
+回家带上：这台已经信任过开发者证书的 iPhone、数据线、`dist/windows-amd64/` 整个目录、`dist/wda.ipa`。
 
 ## 2. Windows 电脑要装的东西
 
@@ -55,8 +59,8 @@
 5. iOS 17+ 才需要 `wintun.dll`。今晚这台 iPhone 7 是 **iOS 15.8.8，不需要**。
 6. 把 `dist/windows-amd64/gateway.exe` 和 `static\` 拷到 Windows。不要拷 `devices.json` / `gateway.db` / 云凭证。
 
-网关默认：Windows 上 `signing.activator=auto` → `ios.exe runwda`。  
-没有 `ios.exe`、只有 tidevice 时，在管理页或配置里把激活后端改成 `tidevice`。
+网关默认：Windows 上 `signing.activator=auto` → 有 `ios.exe` 就用它，否则用 `tidevice`。  
+把 `wda.ipa` 放到网关 `-state` 目录（默认当前目录下的 `wda.ipa`）。点激活时若 applist 没有 Runner，会先 install 再拉起。
 
 ## 3. 插上手机后的核验顺序
 
@@ -67,7 +71,7 @@ tidevice list
 tidevice applist
 ```
 
-`list` 必须打出 UDID。`applist` 里必须有 `com.wda.WebRunner.xctrunner`（或你改过的 bundle）。没有 Runner = 回家用 Mac 再装一次，Windows 编不了。
+`list` 必须打出 UDID。`applist` 里最好已有 `com.wda.WebRunner.xctrunner`。没有也没关系：把 `wda.ipa` 放进网关目录后点激活会自动装。没有 IPA、手机上也没 Runner = 回 Mac 重新 `package-wda-ipa.sh`，Windows 编不了。
 
 然后二选一拉起 WDA（不要用 `wdaproxy`）：
 
@@ -124,7 +128,7 @@ wda-probe.exe -wda http://127.0.0.1:18100 -phone 15213472085 -text "hello nice t
 | 现象 | 先查 |
 |---|---|
 | `tidevice list` 空 | 没装 Apple Devices/iTunes，或没点「信任此电脑」 |
-| applist 没有 xctrunner | Runner 没装或证书过期，回 Mac 重装 |
+| applist 没有 xctrunner | 确认 `wda.ipa` 在 `-state` 目录后重新点激活；仍失败则回 Mac 重新打包（UDID 是否已登记） |
 | `/status` connection reset | WDA 没在跑，或 iproxy 指错 UDID |
 | Appium / 脚本连 `192.168.x:8100` 超时 | 改连 `127.0.0.1:<iproxy口>` |
 | `More than 2 devices` | 必须加 `-u <UDID>`，每台一个本地端口 |

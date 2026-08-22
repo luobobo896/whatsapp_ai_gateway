@@ -1,164 +1,160 @@
 # WDA Farm Gateway（本地网关）
 
-> 独立 Go 项目，与手机应用（WebDriverAgent / agent）代码无关，仅通过 xcodebuild 构建依赖
-> 引用的 WDA 工程（默认同级 `WhatsAppDeviceAgent/`，可用 `-project` 覆盖）。
+Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、经 WSS 接云平台收群发任务。  
+手机不直连平台，全部由本机中转。
 
-Mac mini 上常驻的本地网关：发现 USB 真机、按 UDID 激活/看护 WDA、Web 页面管理、
-通过 WSS 向云平台上报设备列表并接收任务（三端串联 v6：手机零直连，全部由网关中转）。
+**日常用的电脑主机是 Windows。** 苹果电脑只负责编译做出并签好签名的 WDA「控制器」安装包，见独立章节 [docs/design/mac-wda-ipa-package.md](docs/design/mac-wda-ipa-package.md)。整条链路通俗说明见 [docs/design/wda-end-to-end-flow.md](docs/design/wda-end-to-end-flow.md)。
 
 ## 架构
 
 ```
-云平台 ◀── WSS（网关凭证登录 / device_list / task:dispatch / item:result）── 本地网关（本应用）
-                                              │ USB 扩展坞
-                                              ▼
-                                    iPhone 1..N（各 Wi-Fi IP:8100）
+云平台  ◀── WSS（登录 / 设备列表 / 下发任务 / 回传结果）──  本机网关
+                                                          │ USB（iproxy 隧道优先）
+                                                          ▼
+                                                    iPhone 上的 WDA :8100
+                                                          │
+                                                          ▼
+                                                    WhatsApp 打开聊天 → 输入 → 发送
 ```
 
-## 机型/系统兼容
+## 机型 / 系统
 
-- **机型**：iPhone 7 及以上（A10 及以后；构建产物为 arm64，兼容 arm64/arm64e 设备）。
-- **系统**：iOS 15 及以上。
-  - iOS 16+ 需在设备「设置 → 隐私与安全性」开启「开发者模式」；
-  - iOS 15/16 老设备激活时网关自动从本机 Xcode 复制匹配版本的 DeveloperDiskImage
-    到设备支持目录（`~/Library/Developer/Xcode/iOS DeviceSupport/`，幂等）；
-    若本机 Xcode 不含 iOS 15 镜像（建议 Xcode 16.x），请手动放置对应 DDI。
-- **识别/激活**：老机型（40 位 UDID，iOS ≤15）用无前缀 `id=` destination，
-  新款（连字符 UDID，iOS 16+）用 `platform=iOS,id=`+大写，网关自动区分。
+- iPhone 7 及以上，iOS 15+。iOS 16+ 需打开开发者模式。
+- 老机型（40 位 UDID）激活用 `id=<udid>`；带连字符的新 UDID 用 `platform=iOS,id=` 且大写。
+- 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点激活。未装 Runner 会 `install`，再 `ios runwda` / `tidevice xctest`（不要 `wdaproxy`）。
+- 只有 Mac 上没有 `ios`/`tidevice` 时才回退 `xcodebuild`。不要在缺 iOS Platform 时反复 `build-for-testing`（会报 exit 70）。
 
-## 快速开始
+## 快速开始（按系统分开）
+
+日常发消息用 **Windows**。苹果电脑只做编译和签名，不是每天开机发消息的那台。
+
+**Windows（日常主机）**
+
+装 Apple Devices 或 iTunes，插 iPhone，点信任。普通权限即可发消息；只有开 easytier 虚拟网卡时才右键 **以管理员身份运行**。
+
+源码启动（本机已装 Go）：
+
+```bat
+go build -o gateway.exe .\cmd\gateway
+gateway.exe -state . -listen 0.0.0.0:8300
+```
+
+也可以直接 `go run .\cmd\gateway -state . -listen 0.0.0.0:8300`。  
+Windows 走 `ios.exe runwda` / `tidevice`，**不跑 xcodebuild**，不必准备 WDA 工程源码。  
+把 Mac 打好的 `wda.ipa` 放到 `-state` 目录（或 `-ipa` 指定）。手机还没装控制器时，点激活会先安装再启动。
+
+打包启动：把 `dist/windows-amd64/gateway.exe` 拷过来双击（可在 Mac 上 `sh scripts/build-windows-exe.sh` 交叉编译）。  
+当晚步骤：[docs/deployment/windows-night-runbook.md](docs/deployment/windows-night-runbook.md)。
+
+**Mac（出包 / 开发）**
+
+桌面端：打开 `WDAFarmGateway.app`。配置在  
+`~/Library/Application Support/WDAFarmGateway/gateway.db`。
+
+打控制器安装包（只需在有 Xcode、且目标手机 UDID 已登记的苹果电脑上做）。完整步骤见 [Mac 出包独立章节](docs/design/mac-wda-ipa-package.md)：
+
+```bash
+sh scripts/package-wda-ipa.sh
+# 产出 dist/wda.ipa
+```
+
+日常启动网关（Mac 和 Windows 一样，装 IPA + 拉起，不打开 Xcode 工程）：
 
 ```bash
 go build -o gateway ./cmd/gateway
-./gateway -config devices.json -listen 0.0.0.0:8300
-# Web 页面:  http://localhost:8300/
-# API:       http://localhost:8300/api/devices  |  /api/cloud
+./gateway -state . -listen 0.0.0.0:8300
+# 或：./gateway -state . -ipa /path/to/wda.ipa
 ```
 
-- `-project`：WhatsAppDeviceAgent 工程路径（默认 `../whatsapp_ai_ios/WhatsAppDeviceAgent`）。
-- `-derived`：xcodebuild derivedDataPath（默认 `/tmp/WebDriverAgentFarmDerived`）。
+把 `dist/wda.ipa` 拷到 `-state` 目录并命名为 `wda.ipa`。本机有 `ios` 或 `tidevice` 时，`auto` 会走这条 IPA 路径。  
+`-project` / `-derived` 只在没有协议工具、必须回退 `xcodebuild` 时才用。
 
-## 配置（devices.json）
+常用参数：
 
-```json
-{
-  "cloud": {
-    "ws_url": "wss://<平台域名>/api/ios-agent/v1/gateway/ws",
-    "token": "<平台签发的网关凭证>",
-    "gateway_name": "macmini-01",
-    "enabled": true
-  },
-  "health_interval": 30,
-  "llm": {
-    "base_url": "https://api.example.com/v1",
-    "api_key": "<密钥>",
-    "model": "<视觉模型名>"
-  },
-  "devices": [
-    { "udid": "40位UDID", "ip": "手机Wi-FiIP", "port": 8100, "auto_reactivate": true }
-  ]
-}
+| 参数 | 含义 |
+|---|---|
+| `-state` | 状态目录（`gateway.db`、`data/`、默认 `wda.ipa`）。默认当前目录或 `GATEWAY_STATE_DIR` |
+| `-ipa` | 已签名 WDA IPA。默认 `<state>/wda.ipa` |
+| `-project` | 仅 xcodebuild 回退：WDA 的 `.xcodeproj` 所在目录 |
+| `-derived` | 仅 xcodebuild 回退：编译产物目录，默认 `<state>/derived` |
+| `-listen` | HTTP 地址，默认 `0.0.0.0:8300` |
+| `-config` | 旧参数，只取其**目录**当 `-state`，不再读写 `devices.json` |
+
+## 配置存在哪
+
+全部在 `<state>/gateway.db`（SQLite）：云地址、凭证、设备、LLM、easytier。首次启动自动建库；管理页登录成功后写入凭证。
+
+不要再使用仓库根的 `devices.json`（含密钥，已被 gitignore）。若某目录里还有这份旧文件且该目录的库是空的，启动会导入一次并改名为 `devices.json.bak`。
+
+LLM 是可选视觉兜底：选择器找不到发送键时截图定位。欠费/401 冷却 10 分钟，不挡主路径。
+
+## 发送
+
+收到 `task:dispatch` 后按 UDID 串行：
+
+1. 整单共用一条 WDA 会话（不要每条都 CreateSession）
+2. 打开目标聊天（已在该会话则直接发）
+3. 输入 → 点发送 → 确认输入框已清空
+4. 先写入 `data/results/results.db`，再 `item:result` 上报（至少一次）
+
+探针（WDA 已 ready）：
+
+```bash
+go run ./cmd/wda-probe -wda http://127.0.0.1:18100 \
+  -phone 15213472085 -text 'hello nice to see you' -send -count 3 -interval 1
 ```
 
-- 网关凭证在平台「组网」页签发，凭证明文仅展示一次，请保存到 `cloud.token`。
-- `llm` 为可选视觉兜底：配置后，发送键选择器找不到时用截图 + 视觉模型定位坐标点击；不配置则保持默认选择器发送。
-- 设备列表由 USB 与 Wi-Fi 实时发现：USB 直连（ioreg/devicectl）或 Wi-Fi 上 WDA 健康可达才在线，
-  不在线就不出现在列表里；插上 USB 即可直接「激活」，手机 Wi-Fi IP 由网关局域网扫描自动发现，无需手动设置。
-
-## 云通道协议（三端串联 v6，JSON 文本帧）
-
-上行（`Authorization: Bearer <gateway_token>`）：
-```json
-{"v":1,"type":"gateway:hello","msgId":"g:1","sentAt":"...","payload":{"name":"macmini-01","version":"0.2.0"}}
-{"v":1,"type":"gateway:heartbeat","msgId":"g:2","sentAt":"...","payload":{}}
-{"v":1,"type":"device_list","msgId":"g:3","sentAt":"...","payload":{"devices":[
-  {"udid":"5060c403...","name":"iPhone","model":"iPhone9,2","ios_version":"15.8.7",
-   "wda_ip":"192.168.20.33","wda_port":8100,"wda_status":"online","whatsapp_version":""}]}}
-{"v":1,"type":"item:result","msgId":"g:4","sentAt":"...","payload":{"task_id":"t1","item_id":"i1","phone":"+8613800000000","status":"sent","error":"","duration_ms":3200}}
-{"v":1,"type":"device:status","msgId":"g:5","sentAt":"...","payload":{"udid":"5060c403...","wda_status":"online","error":""}}
-```
-下行：
-```json
-{"v":1,"type":"task:dispatch","msgId":"srv:1","sentAt":"...","payload":{"task_id":"t1","device_id":"d1","udid":"5060c403...","content":"你好","interval_sec":20,"items":[{"item_id":"i1","phone":"+8613800000000","seq":1}]}}
-{"v":1,"type":"task:cancel","msgId":"srv:2","sentAt":"...","payload":{"task_id":"t1"}}
-```
-
-- 网关收到 `task:dispatch` 后按 UDID 串行执行：WDA 建会话 → `whatsapp://send?phone=` 深链 →
-  输入内容 → 点发送；每条 item **先本地持久化再上报**（`data/results/<task_id>.json`，at-least-once）。
-- 重连后先补报本地已持久化结果，再上报 device_list；平台随后补推 pending 任务。
-- 收到 `task:cancel` 停止循环，未执行 items 标 cancelled 上报。
-- 平台「组网」页吊销凭证后本网关会被踢出（关闭码 4005）且重连被拒。
-- 断线自愈：会话断开后按指数退避重连（1s→30s，封顶），稳定会话（>60s）断开则直接快速重连；
-  凭证被吊销（4005）时改为 60s 慢速重试。
-- 常见告警「failed to read JSON message: … frame header: EOF」表示平台侧 TCP 直接断开（未发关闭帧），
-  通常是平台重启/部署或网络抖动，网关会自动重连，并非 JSON 解析错误；每 20s 心跳含协议层
-  ping + 应用层 `gateway:heartbeat`，同时有写超时与会话级上下文兜底，不会卡死或向旧连接写数据。
-- 拨号告警「…handshake response status code 101 but got 502/503/504」表示连接握手时平台暂不可用
-  （正在重启/部署），401/403 表示凭证无效或被吊销；两类都会自动重试（后者慢速），无需干预，
-  平台恢复后网关自行重连。
+选择器与禁令：[docs/testing/whatsapp-send-playbook.md](docs/testing/whatsapp-send-playbook.md)。
 
 ## REST API
 
+管理页接口需登录（云通道已配置时）。公开：`/api/login`、`/api/session`、`/api/cloud/config`。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET  | /api/cloud | 云通道状态（连接/网关名/执行中任务） |
-| GET  | /api/devices | 设备列表（USB/Wi-Fi 实时发现，含 WDA 进程/健康/忙碌状态） |
-| POST | /api/devices/{udid}/activate?port=8100 | 激活该设备 WDA（USB 直连即可） |
-| POST | /api/devices/{udid}/stop | 停止该设备 WDA |
-| GET  | /api/devices/{udid}/health | 健康检查（需已发现 IP） |
-| POST | /api/devices/{udid}/report | 本地/调试结果上报（旧协议，兼容保留） |
-| GET  | /api/devices/{udid}/metrics | 本地发送指标 |
+| POST | /api/login | 登录（成功可签发网关凭证） |
+| GET  | /api/session | 登录状态 |
+| GET  | /api/cloud | 云通道状态 |
+| GET/PUT | /api/cloud/config | 云地址等（脱敏读） |
+| GET  | /api/devices | USB/Wi‑Fi 发现的设备 |
+| POST | /api/devices/{udid}/activate | 拉起该机 WDA |
+| POST | /api/devices/{udid}/stop | 停止该机 WDA |
+| GET  | /api/devices/{udid}/health | 健康检查 |
+| GET  | /api/metrics | 发送统计 |
+| GET  | /api/tasks | 本地任务列表 |
+| GET  | /api/llm | 模型配置（不回传明文 key） |
+| GET/PUT | /api/easytier/config | easytier 脱敏配置 |
+| GET  | /api/easytier/status | easytier 运行状态 |
+| POST | /api/easytier/action | start / stop / restart |
 
-## 说明
+看护按 `health_interval`（默认 30s）探活；WDA 掉了且允许自动激活则重拉。USB 隧道优先于手机 Wi‑Fi。
 
-- `wda.py` 首次激活前会 `build-for-testing` 一次（产物放 `derived_data`），之后每台只跑
-  `test-without-building`，按 UDID 后台进程独立管理；`send_message` 为 WhatsApp 发送流程
-  （选择器与平台 `internal/wda/whatsapp.go` 对齐，真机联调时按需覆盖）。
-- `watchdog.py` 每 `health_interval` 秒逐台健康检查，WDA 挂了且未在激活则自动重新激活；
-  健康状态变化通过 `device:status` 上报平台。
-- 激活用 `USE_PORT` 指定端口（默认 8100）；多台走各自 IP 时无需改端口。
-- easytier 为可选后备能力、默认关闭：仅当平台下发 `easytier:config`（v1 默认不启用）时按需集成。
+## 云通道（摘要）
 
-## 新 Mac 一键安装
+上行：`gateway:hello` / `heartbeat` / `device_list` / `item:result` / `device:status` / `task:summary`。  
+下行：`task:dispatch` / `task:cancel`。凭证放请求头 `Authorization: Bearer <token>`。
 
-```bash
-sudo sh scripts/install.sh   # 安装 easytier 二进制 + 权限组授权（sudoers），首次执行输一次密码
-cd gateway && ./run.sh       # 启动网关（Web http://localhost:8300）
-```
+断线按指数退避重连。关闭码 4005 表示平台吊销凭证。握手 502/503/504 是平台暂不可用，会自动重试。
 
-`scripts/install.sh` 幂等，做四件事：
-1. 安装 `tools/easytier/easytier-core|cli`（v2.6.4 macOS aarch64，缺省自动下载，记录 sha256）
-2. 创建权限组 `wda-gateway` 并把当前用户加入组
-3. 写 sudoers：`%wda-gateway` 组规则（长期管理）+ 当前用户规则（当前会话立即生效，
-   规避 macOS 组缓存需重登的问题）；新增网关用户只需
-   `sudo dscl . -append /Groups/wda-gateway GroupMembership <用户名>`
-4. 验证免密：`sudo -n easytier-core --version`
+## easytier（可选，默认关）
 
-授权（开启虚拟网卡 TUN 所需 root）仅在首次安装时配置一次，之后 Web 启动 / 平台下发
-easytier:config 触发的重启均 `sudo -n` 免密，不再弹窗。
+只有平台下发 `easytier:config`、要开虚拟网卡时才需要。平时发 WhatsApp **不用开**。
 
-## easytier 后备通道（可选，默认关闭）
+| | Mac | Windows |
+|---|---|---|
+| 做什么 | 首次 `sudo sh scripts/install.sh`：装 easytier 二进制，并配好免密 sudo | **没有**这套 install.sh。需要组网时，**右键以管理员身份运行** `gateway.exe` |
+| 做几次 | 一台 Mac 做一次，以后管理页点启动不再输密码 | 每次要开虚拟网卡，用管理员启动网关即可 |
+| 不做会怎样 | 开 TUN 会要管理员授权或失败 | 普通权限启动时，开 TUN 会失败；不影响只发消息 |
 
-平台「组网」页可向在线网关下发 `easytier:config`（WSS 下行）；网关收到后保存配置并启动本机
-集成的 easytier 服务加入 mesh，作为 WSS 之外的后备链路（v6 §5.1/§7.2）。
+不要把云 token 打进安装包。Windows 版 easytier 二进制需另备，当前 exe 打包不附带。
 
-- 二进制（项目内，不入库）：下载 easytier v2.6.4 macOS aarch64 到 `tools/easytier/`：
-  ```bash
-  curl -fsSL -o /tmp/et.zip https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-macos-aarch64-v2.6.4.zip
-  mkdir -p tools/easytier
-  python3 -c "import zipfile; zipfile.ZipFile('/tmp/et.zip').extractall('/tmp/et')"
-  install -m 0700 /tmp/et/easytier-macos-aarch64/easytier-core tools/easytier/easytier-core
-  install -m 0700 /tmp/et/easytier-macos-aarch64/easytier-cli tools/easytier/easytier-cli
-  ```
-- 查询复用 easytier RPC 门户（`easytier-cli -p 127.0.0.1:15888`），与平台 `internal/easytierrpc` 同源语义。
-- **虚 IP 由平台动态下发**：平台「组网」页下发 easytier:config 时为网关自动分配虚 IP（10.168.1.0/24，
-  固定复用），网关据此以 root 运行 easytier-core（bind_device=true 建 TUN），节点在 mesh 内
-  拥有完整虚 IP，peer 列表本机行完整显示（hostname/ipv4/cost/lat/nat/version）。
-- **root 一次性授权**：macOS 上 ipv4 非空即创建 TUN，需要 root；执行一次
-  `sudo sh scripts/setup-easytier-sudo.sh`（首次输密码），为当前用户放行免密运行 easytier-core
-  与 `pkill -f easytier-core*`（最小权限，仅这两个命令）。
-- 本地 REST：`GET /api/easytier/status`（运行/节点/peers）、`GET /api/easytier/config`（脱敏）、
-  `PUT /api/easytier/config`（编辑）、`POST /api/easytier/action {start|stop|restart}`。
-- Web 页底部「组网（easytier 后备通道）」区块可查看配置/状态/peer 并启停。
-- 默认无 TUN 模式（`ipv4=""`，普通用户可运行，纯转发节点）；配置 `tun=true` 且填 `gateway_ipv4`
-  时以 TUN 模式运行并绑定虚 IP（需 root 权限）。
+## 文档
+
+| 文档 | 给谁看 |
+|---|---|
+| [docs/design/mac-wda-ipa-package.md](docs/design/mac-wda-ipa-package.md) | 独立章节：苹果电脑编出并签好 `wda.ipa` |
+| [docs/design/wda-end-to-end-flow.md](docs/design/wda-end-to-end-flow.md) | 不懂技术：编译签名 → 安装启动 → 自动发送 |
+| [docs/deployment/windows-night-runbook.md](docs/deployment/windows-night-runbook.md) | Windows 当晚逐步命令 |
+| [docs/design/windows-wda-activation.md](docs/design/windows-wda-activation.md) | 激活后端与 tidevice 参数 |
+| [docs/deployment/windows-exe打包.md](docs/deployment/windows-exe打包.md) | 交叉编译 exe |
+| [docs/deployment/macos-dmg打包操作手册.md](docs/deployment/macos-dmg打包操作手册.md) | Mac 桌面端打包 |

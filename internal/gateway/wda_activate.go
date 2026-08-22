@@ -1,13 +1,16 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,7 +25,8 @@ const (
 	defaultXCTestConfig = "WebDriverAgentRunner.xctest"
 )
 
-// resolveActivator 把配置值收成实际后端。auto：Windows 走 goios，其余走 xcodebuild。
+// resolveActivator 把配置值收成实际后端。
+// auto：有 go-ios 用 goios，否则有 tidevice 用 tidevice；都没有时 Windows 仍选 goios（启动时报缺二进制），Mac 才回退 xcodebuild。
 func resolveActivator(configured string) string {
 	switch strings.ToLower(strings.TrimSpace(configured)) {
 	case activatorGoIOS:
@@ -32,11 +36,21 @@ func resolveActivator(configured string) string {
 	case activatorXcodebuild:
 		return activatorXcodebuild
 	default:
-		if runtime.GOOS == "windows" {
-			return activatorGoIOS
-		}
-		return activatorXcodebuild
+		return autoActivator(lookTool("ios", "ios.exe") != "", lookTool("tidevice", "tidevice.exe") != "")
 	}
+}
+
+func autoActivator(hasGoIOS, hasTidevice bool) string {
+	if hasGoIOS {
+		return activatorGoIOS
+	}
+	if hasTidevice {
+		return activatorTidevice
+	}
+	if runtime.GOOS == "windows" {
+		return activatorGoIOS
+	}
+	return activatorXcodebuild
 }
 
 func (m *WDAManager) wdaBundleID() string {
@@ -47,6 +61,9 @@ func (m *WDAManager) wdaBundleID() string {
 }
 
 func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind string) error {
+	if err := m.ensureRunnerInstalled(udid, kind); err != nil {
+		return err
+	}
 	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind)
 	if err != nil {
 		return err
@@ -70,7 +87,7 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind strin
 	case activatorGoIOS:
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
-			return "", nil, fmt.Errorf("未找到 go-ios（ios）：Windows 激活需要把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
+			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
 		}
 		return bin, goiosArgs(udid, bundle, port, reportedUDID), nil
 	case activatorTidevice:
@@ -115,6 +132,152 @@ func tideviceArgs(udid, bundleID string, port int, reportedUDID string) []string
 		"-e", "USE_PORT:" + strconv.Itoa(port),
 		"-e", "WDA_DEVICE_UDID:" + reportedUDID,
 	}
+}
+
+func goiosInstallArgs(udid, ipa string) []string {
+	return []string{"--udid=" + udid, "install", "--path=" + ipa}
+}
+
+func goiosAppsArgs(udid string) []string {
+	return []string{"--udid=" + udid, "apps"}
+}
+
+func tideviceInstallArgs(udid, ipa string) []string {
+	return []string{"-u", udid, "install", ipa}
+}
+
+func tideviceAppsArgs(udid string) []string {
+	return []string{"-u", udid, "applist"}
+}
+
+func appListContains(out, bundleID string) bool {
+	bundleID = strings.TrimSpace(bundleID)
+	return bundleID != "" && strings.Contains(out, bundleID)
+}
+
+func (m *WDAManager) resolvedIPA() string {
+	p := ""
+	if m != nil {
+		p = strings.TrimSpace(m.ipaPath)
+	}
+	if p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if res := os.Getenv("WDA_GATEWAY_RESOURCES"); res != "" {
+		cand := filepath.Join(res, "wda.ipa")
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return p
+}
+
+func (m *WDAManager) installCmd(udid, kind, ipa string) (string, []string, error) {
+	switch kind {
+	case activatorGoIOS:
+		bin := lookTool("ios", "ios.exe")
+		if bin == "" {
+			return "", nil, fmt.Errorf("未找到 go-ios（ios）：安装 IPA 需要把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
+		}
+		return bin, goiosInstallArgs(udid, ipa), nil
+	case activatorTidevice:
+		bin := lookTool("tidevice", "tidevice.exe")
+		if bin == "" {
+			return "", nil, fmt.Errorf("未找到 tidevice：安装 IPA 需要把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
+		}
+		return bin, tideviceInstallArgs(udid, ipa), nil
+	default:
+		return "", nil, fmt.Errorf("未知激活后端 %q", kind)
+	}
+}
+
+func (m *WDAManager) listAppsCmd(udid, kind string) (string, []string, error) {
+	switch kind {
+	case activatorGoIOS:
+		bin := lookTool("ios", "ios.exe")
+		if bin == "" {
+			return "", nil, fmt.Errorf("未找到 go-ios（ios）")
+		}
+		return bin, goiosAppsArgs(udid), nil
+	case activatorTidevice:
+		bin := lookTool("tidevice", "tidevice.exe")
+		if bin == "" {
+			return "", nil, fmt.Errorf("未找到 tidevice")
+		}
+		return bin, tideviceAppsArgs(udid), nil
+	default:
+		return "", nil, fmt.Errorf("未知激活后端 %q", kind)
+	}
+}
+
+func (m *WDAManager) ensureRunnerInstalled(udid, kind string) error {
+	installed, listErr := m.runnerInstalled(udid, kind)
+	if listErr != nil {
+		slog.Warn("list installed apps failed", "udid", shortOf(udid), "error", listErr)
+	}
+	if installed {
+		return nil
+	}
+	ipa := m.resolvedIPA()
+	if ipa == "" {
+		if listErr != nil {
+			return nil
+		}
+		return fmt.Errorf("手机未安装 %s，且未配置 IPA。请先在 Mac 上运行 scripts/package-wda-ipa.sh，把 wda.ipa 放到网关状态目录或用 -ipa 指定", m.wdaBundleID())
+	}
+	if _, err := os.Stat(ipa); err != nil {
+		if listErr != nil {
+			return nil
+		}
+		return fmt.Errorf("手机未安装 %s，且找不到 IPA %s。请先在 Mac 上运行 scripts/package-wda-ipa.sh，把打好的包放到该路径", m.wdaBundleID(), ipa)
+	}
+	return m.installIPA(udid, kind, ipa)
+}
+
+func (m *WDAManager) runnerInstalled(udid, kind string) (bool, error) {
+	bin, args, err := m.listAppsCmd(udid, kind)
+	if err != nil {
+		return false, err
+	}
+	out, err := runTool(bin, args, 20*time.Second)
+	if err != nil {
+		return false, err
+	}
+	return appListContains(out, m.wdaBundleID()), nil
+}
+
+func (m *WDAManager) installIPA(udid, kind, ipa string) error {
+	bin, args, err := m.installCmd(udid, kind, ipa)
+	if err != nil {
+		return err
+	}
+	slog.Info("install WDA IPA", "kind", kind, "ipa", ipa, "udid", shortOf(udid))
+	if _, err := runTool(bin, args, 2*time.Minute); err != nil {
+		return fmt.Errorf("安装 IPA 失败（%s）：%w", kind, err)
+	}
+	slog.Info("WDA IPA installed", "udid", shortOf(udid))
+	return nil
+}
+
+func runTool(bin string, args []string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(os.Environ(), bundleLibFallback()...)
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		if len(text) > 800 {
+			text = text[:800] + "…"
+		}
+		if text == "" {
+			return "", err
+		}
+		return text, fmt.Errorf("%w: %s", err, text)
+	}
+	return text, nil
 }
 
 // lookTool 与 libiDeviceBin 同策略：PATH → bundle Resources/bin → 常见绝对路径。

@@ -3,6 +3,7 @@
 - 状态：命令构造与后端分发已实现；Mac 发送/连发已核验；Windows 真机激活未核验
 - 日期：2026-08-22
 - 全流程图：[wda-end-to-end-flow.md](./wda-end-to-end-flow.md)
+- Mac 出包（独立章节）：[mac-wda-ipa-package.md](./mac-wda-ipa-package.md)
 - 当晚操作步骤：[windows-night-runbook.md](../deployment/windows-night-runbook.md)
 - 来源：竞品 25 秒视频 + 下列公开笔记
   - https://github.com/hiyongz/DevTest-Notes/blob/main/docs/app/app-testing-for-ios-app-on-windows.md
@@ -43,26 +44,27 @@
 
 对方 Windows 机做的是右边这件事。左边在更早的时候已经做完：Runner 已经在手机上，开发者模式已开，证书已信任，USB 已配对。
 
-本仓库激活已经按平台分开，不再绑死 Xcode：
+本仓库日常激活按 **IPA** 走，不再绑死 Xcode：
 
-- Windows / `signing.activator=goios|tidevice`：`ios runwda` 或 `tidevice xctest` 拉起**已安装**的 Runner
-- Darwin 默认：`xcodebuild test-without-building`（开发机方便）
+- Mac 上 `scripts/package-wda-ipa.sh` 打出已签名 `wda.ipa`
+- Windows / Mac 网关：手机还没装 Runner 就 `ios install --path=` / `tidevice install`，再 `ios runwda` 或 `tidevice xctest`
+- `signing.activator=auto`：有 `ios` 用 goios，否则有 `tidevice` 用 tidevice；都没有时 Windows 仍报 goios，Mac 才回退 `xcodebuild`
 - USB 发现走 `idevice_id -l`（跨平台），`ioreg` / `devicectl` 只是 Darwin 回退
 - DDI 补齐只在 Darwin 读 Xcode `DeviceSupport`；Windows 直接跳过
 
-所以「Windows 不能激活」不是 usbmux 做不到，是 **Runner 必须先在 Mac 上装进手机**。装好之后，Windows 只负责右边。
+所以「Windows 不能激活」不是 usbmux 做不到，是 **必须先有一份签好名的 IPA**。装好之后，Windows 只负责右边。
 
 ## 3. 正确的 Windows 链路
 
 ```text
-[一次，Mac 或带 p12 的任意机器]
-  签好 WebDriverAgentRunner-Runner.app / .ipa
-  装到手机（tidevice/go-ios install 或 Xcode 首次装）
-  手机：开发者模式 + 信任开发者 + 信任此电脑
+[一次，Mac]
+  sh scripts/package-wda-ipa.sh  →  dist/wda.ipa
+  拷到网关 -state 目录（或 -ipa 指定）
 
-[每次，Windows 网关]
+[每次，Windows / Mac 网关]
   Apple Mobile Device Support（iTunes / Apple Devices）提供 usbmux
-  go-ios `ios runwda` 或 tidevice `xctest` 经 testmanagerd 拉起已安装 Runner
+  点激活：未装则 install IPA，再 ios runwda / tidevice xctest
+  手机：开发者模式 + 信任开发者 + 信任此电脑
   iproxy / go-ios forward：本机端口 → 手机 8100
   网关原有 WDA HTTP 客户端照旧发会话 / 深链 / 点击
 ```
@@ -86,33 +88,35 @@ iOS 版本差异：
 
 | 配置 | 行为 |
 |---|---|
-| `signing.activator=auto`（默认） | Windows → `goios`，其它 → `xcodebuild` |
-| `goios` | `ios --udid=… runwda --bundleid=com.wda.WebRunner.xctrunner …` |
-| `tidevice` | `tidevice -u … xctest -B …`（不用 `wdaproxy`，避免和现有 iproxy 双转发） |
-| `xcodebuild` | 原路径，不变 |
+| `signing.activator=auto`（默认） | 有 `ios` → `goios`；否则有 `tidevice` → `tidevice`；都没有时 Windows 仍选 `goios`，Mac 回退 `xcodebuild` |
+| `goios` | 未装 Runner 则 `ios install --path=<ipa>`，再 `ios --udid=… runwda --bundleid=com.wda.WebRunner.xctrunner …` |
+| `tidevice` | 未装则 `tidevice -u … install <ipa>`，再 `tidevice -u … xctest -B …`（不用 `wdaproxy`） |
+| `xcodebuild` | 原路径，仅作 Mac 回退 |
 
-`signing.wda_bundle_id` 可覆盖默认 bundle id。
+`signing.wda_bundle_id` 可覆盖默认 bundle id。  
+`signing.ipa_path` 或启动参数 `-ipa` 指定 IPA；默认 `<state>/wda.ipa`。也可放在 `WDA_GATEWAY_RESOURCES/wda.ipa`。
 
-Mac 默认行为不变。Windows 上 `EnsureDeviceSupportDDI` 直接跳过；`ping` 改用 `-n 1 -w 2000`。
+Windows 上 `EnsureDeviceSupportDDI` 直接跳过；`ping` 改用 `-n 1 -w 2000`。
 
 ## 5. Windows 主机还缺什么（未在本机交付）
 
-代码只解决「激活命令怎么拼、进程怎么看护」。要把一台 Windows 变成可运营的机房主机，还要：
+代码只解决「激活命令怎么拼、进程怎么看护」。要把一台日常 Windows 电脑跑起来，还要：
 
 1. 安装 Apple Devices / iTunes，确认 USB 枚举（`idevice_id -l` 有 UDID）。
 2. 把 `ios.exe`（或 `tidevice.exe`）和 Windows 版 `iproxy`/`idevice_id`/`ideviceinfo` 放到 `PATH` 或 `WDA_GATEWAY_RESOURCES/bin`。
 3. iOS 17+ 把 `wintun.dll` 放到系统目录，并拉起 go-ios tunnel。
-4. 手机上已经装着本仓库签过的 Runner，且信任了同一张开发者证书。
+4. 把 `wda.ipa` 放到网关状态目录（或 `-ipa`），手机信任同一张开发者证书。
 5. 交叉编译网关：`GOOS=windows GOARCH=amd64 go build -o gateway.exe ./cmd/gateway`。
 
 没有以上前置，只改 Go 代码无法在本机「演示 Windows 激活成功」。
 
 ## 6. 验收
 
-- [x] `resolveActivator`：auto 在非 Windows 仍是 xcodebuild；显式 goios/tidevice 生效
+- [x] `resolveActivator`：auto 优先 goios/tidevice；显式值生效
 - [x] `goiosArgs` / `tideviceArgs` 含 UDID、bundle、USE_PORT、WDA_DEVICE_UDID
+- [x] `goiosInstallArgs` / `tideviceInstallArgs` 与 applist 参数
 - [x] 缺 `ios`/`tidevice` 二进制时 Activate 返回明确错误，不假装成功
-- [ ] Windows 真机：`POST /api/devices/{udid}/activate` 后 `/status` ready
-- [ ] 原 Mac `xcodebuild` 激活回归（默认路径未改命令）
+- [ ] Windows 真机：放好 `wda.ipa` 后 `POST /api/devices/{udid}/activate`，未装会 install，然后 `/status` ready
+- [ ] Mac 有 `ios`/`tidevice` 时走 IPA，不再默认 xcodebuild
 
-回滚：把 `signing.activator` 设回 `xcodebuild`，或不配该项（Mac 默认原路径）。
+回滚：把 `signing.activator` 设为 `xcodebuild`（仅 Mac）。
