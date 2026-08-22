@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"sync"
 )
 
@@ -124,7 +126,15 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 		if err != nil {
 			continue
 		}
-		cmd := exec.Command(bin, "-u", udid, fmt.Sprintf("%d:%d", local, devPort))
+		args := []string{"-u", udid}
+		if runtime.GOOS == "windows" {
+			// Windows 版 libimobiledevice iproxy 只认两个独立参数，
+			// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
+			args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
+		} else {
+			args = append(args, fmt.Sprintf("%d:%d", local, devPort))
+		}
+		cmd := exec.Command(bin, args...)
 		cmd.Env = append(os.Environ(), bundleLibFallback()...)
 		if err := cmd.Start(); err != nil {
 			continue

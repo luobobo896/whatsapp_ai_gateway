@@ -85,7 +85,8 @@ ios --udid=<UDID> runwda --bundleid=com.wda.WebRunner.xctrunner --testrunnerbund
 另开一个窗口做 USB 转发：
 
 ```bat
-iproxy -u <UDID> 18100:8100
+REM Windows 版 iproxy 用两个独立参数（"18100:8100" 单参数会打印 usage 后退出）
+iproxy -u <UDID> 18100 8100
 curl http://127.0.0.1:18100/status
 ```
 
