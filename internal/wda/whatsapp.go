@@ -39,12 +39,12 @@ var whatsappSendButtonFallbacks = []string{
 	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Send' OR label CONTAINS 'Send' OR name CONTAINS '发送' OR label CONTAINS '发送')`,
 }
 
-// whatsappBackToChats 返回聊天列表的返回键候选（label 带 RTL 不可见字符，用 CONTAINS；限定 Button）。
+// whatsappBackToChats 返回聊天列表的返回键。不能用单纯 CONTAINS '聊天'：
+// 会话页上的「聊天主题」也会命中，一点就进壁纸/气泡设置，群发卡死。
 var whatsappBackToChats = []string{
-	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS '聊天'`,
-	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS 'Chats'`,
-	`predicate string: type == 'XCUIElementTypeButton' AND name CONTAINS 'Back'`,
-	`predicate string: type == 'XCUIElementTypeButton' AND name CONTAINS '返回'`,
+	`predicate string: type == 'XCUIElementTypeButton' AND label CONTAINS '聊天' AND NOT label CONTAINS '主题' AND NOT name CONTAINS '主题'`,
+	`predicate string: type == 'XCUIElementTypeButton' AND (label == 'Chats' OR name == 'Chats')`,
+	`predicate string: type == 'XCUIElementTypeButton' AND (name CONTAINS 'Back' OR name CONTAINS '返回' OR label CONTAINS '返回')`,
 }
 
 var (
@@ -475,6 +475,12 @@ func gotoChatList(ctx context.Context, client *Client, sid string) error {
 	if dismissPicker(ctx, client, sid) {
 		return nil
 	}
+	if leaveChatTheme(ctx, client, sid) {
+		using, value := splitSelector(whatsappSelectors.messageInput)
+		if _, err := client.FindElement(ctx, sid, using, value); err != nil {
+			return nil
+		}
+	}
 	using, value := splitSelector(whatsappSelectors.messageInput)
 	if _, err := client.FindElement(ctx, sid, using, value); err != nil {
 		return nil // 不在聊天页，也没有搜索取消键
@@ -490,6 +496,21 @@ func gotoChatList(ctx context.Context, client *Client, sid string) error {
 		}
 	}
 	return fmt.Errorf("back button not found")
+}
+
+func leaveChatTheme(ctx context.Context, client *Client, sid string) bool {
+	if !isChatThemeTitle(ChatTitle(ctx, client, sid)) {
+		return false
+	}
+	id, err := findElementBySelector(ctx, client, sid, `class chain: **/XCUIElementTypeNavigationBar/XCUIElementTypeButton[1]`)
+	if err != nil || id == "" {
+		return false
+	}
+	if client.Click(ctx, sid, id) != nil {
+		return false
+	}
+	time.Sleep(1200 * time.Millisecond)
+	return true
 }
 
 func dismissPicker(ctx context.Context, client *Client, sid string) bool {
@@ -824,6 +845,15 @@ func compactChatTitle(s string) string {
 	return d
 }
 
+func isChatThemeTitle(s string) bool {
+	t := strings.ToLower(stripBidi(strings.TrimSpace(s)))
+	if t == "" {
+		return false
+	}
+	return strings.Contains(t, "聊天主题") || strings.Contains(t, "chat theme") ||
+		strings.Contains(t, "聊天气泡") || strings.Contains(t, "chat bubble")
+}
+
 func looksLikeGroupChat(s string) bool {
 	if s == "" {
 		return false
@@ -865,6 +895,9 @@ func isFriendChatCell(c sourceCell) bool {
 		return false
 	}
 	if isSelfChatCell(c) || isSelfChatTitle(title) || isSelfChatTitle(c.label) || isSelfChatTitle(c.name) {
+		return false
+	}
+	if isChatThemeTitle(title) || isChatThemeTitle(c.label) || isChatThemeTitle(c.name) {
 		return false
 	}
 	if looksLikeGroupChat(title) || looksLikeGroupChat(c.label) {
@@ -1011,6 +1044,9 @@ func waitForComposer(ctx context.Context, client *Client, sid string, timeout ti
 func sendOneChatListFriend(ctx context.Context, client *Client, sid string, tgt chatTarget, content string, assist SendAssist) error {
 	if err := openChatByTarget(ctx, client, sid, tgt); err != nil {
 		return err
+	}
+	if leaveChatTheme(ctx, client, sid) {
+		return fmt.Errorf("打开 %q 后误入聊天主题", tgt.title)
 	}
 	if !waitForComposer(ctx, client, sid, 5*time.Second) {
 		if assist != nil {

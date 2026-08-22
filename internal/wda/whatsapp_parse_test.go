@@ -310,6 +310,28 @@ func TestIsSelfChatTitle(t *testing.T) {
 	}
 }
 
+func TestIsChatThemeTitle(t *testing.T) {
+	for _, s := range []string{"聊天主题", "\u200e聊天主题", "Chat theme", "聊天气泡"} {
+		if !isChatThemeTitle(s) {
+			t.Fatalf("%q should be chat theme", s)
+		}
+	}
+	for _, s := range []string{"", "张三", "聊天", "Chats", "+86 152 1347 2085"} {
+		if isChatThemeTitle(s) {
+			t.Fatalf("%q should not be chat theme", s)
+		}
+	}
+}
+
+func TestFriendChatTargetsSkipsChatTheme(t *testing.T) {
+	cells := []sourceCell{{
+		name: "聊天主题", label: "聊天主题", hasMessage: true, visible: true,
+	}}
+	if got := friendChatTargets(cells); len(got) != 0 {
+		t.Fatalf("theme row must not be a send target: %+v", got)
+	}
+}
+
 func TestLooksLikeGroupChat(t *testing.T) {
 	for _, s := range []string{"工作群", "Family Group", "广播列表", "My Channel"} {
 		if !looksLikeGroupChat(s) {
