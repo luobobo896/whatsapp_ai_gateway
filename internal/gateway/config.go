@@ -421,7 +421,8 @@ func (c *Config) Device(udid string) *Device {
 }
 
 // RemoveDevice 从配置移除设备并落盘；返回设备是否原本存在。
-// USB 仍连接的设备删除后会以「未配置」身份重新出现在列表（发现层自动恢复，防误删）。
+// 只删配置、不隐藏：USB 仍连接的设备会以「未配置」身份重新出现。
+// 管理页「删除」请用 RemoveAndIgnoreDevice。
 func (c *Config) RemoveDevice(udid string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -437,6 +438,31 @@ func (c *Config) RemoveDevice(udid string) bool {
 		_, _ = c.db.Exec(`DELETE FROM devices WHERE udid=?`, udid)
 	}
 	return found
+}
+
+// RemoveAndIgnoreDevice 删除配置并加入隐藏列表，一次落盘。
+// 隐藏后即使 USB 仍连接也不出现在设备列表，直到恢复或重新激活。
+func (c *Config) RemoveAndIgnoreDevice(udid string) (removed bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.Devices {
+		if c.Devices[i].UDID == udid {
+			c.Devices = append(c.Devices[:i], c.Devices[i+1:]...)
+			removed = true
+			break
+		}
+	}
+	found := false
+	for _, u := range c.Ignored {
+		if strings.EqualFold(u, udid) {
+			found = true
+			break
+		}
+	}
+	if !found && udid != "" {
+		c.Ignored = append(c.Ignored, udid)
+	}
+	return removed, c.saveLocked()
 }
 
 // IsIgnored 判断 UDID 是否处于手动删除（隐藏）状态。

@@ -343,17 +343,18 @@ func (g *Gateway) deviceListReport() []map[string]any {
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
-		if d.UDID == "" {
+		if d.UDID == "" || g.Cfg.IsIgnored(d.UDID) {
 			continue
 		}
+		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
 		conn := "wifi"
-		if usbSet[d.UDID] {
+		if attached {
 			conn = "usb"
 		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
-			"conn_type": conn, "wda_status": g.deviceCloudStatus(d, usbSet[d.UDID]), "whatsapp_version": "",
+			"conn_type": conn, "wda_status": g.deviceCloudStatus(d, attached), "whatsapp_version": "",
 		})
 	}
 	return out
@@ -362,15 +363,27 @@ func (g *Gateway) deviceListReport() []map[string]any {
 // deviceCloudStatus 返回与设备列表 UI 一致的云上行状态：
 // busy > online（WDA 进程运行且健康/USB 直连/激活宽限期内）> offline。
 func (g *Gateway) deviceCloudStatus(d *Device, usb bool) string {
-	if g.Exec.IsBusy(d.UDID) {
+	attached := usb || TunnelAddr(d.UDID) != ""
+	inGrace := g.WDA.Running(d.UDID) && g.WDA.StartedSecondsAgo(d.UDID) < wdaStartGrace.Seconds()
+	return wdaCloudStatus(g.Exec.IsBusy(d.UDID), g.WDA.Running(d.UDID), healthOK(d.LastHealth), attached, inGrace)
+}
+
+// attachedUSB：idevice 枚举到，或 USB 隧道仍在。枚举空但 iproxy 还在时不能报 Wi-Fi/离线。
+func attachedUSB(udid string, usbSet map[string]bool, tunnelUp bool) bool {
+	if usbSet[udid] {
+		return true
+	}
+	return tunnelUp
+}
+
+func wdaCloudStatus(busy, running, healthy, attached, inGrace bool) string {
+	if busy {
 		return "busy"
 	}
-	if g.WDA.Running(d.UDID) && (healthOK(d.LastHealth) || usb) {
+	if running && (healthy || attached) {
 		return "online"
 	}
-	// 激活宽限期内 WDA 监听/隧道路由可能尚未就绪：仍视为 online，
-	// 避免「激活成功→短暂 offline→又 online」的状态抖动。
-	if g.WDA.Running(d.UDID) && g.WDA.StartedSecondsAgo(d.UDID) < wdaStartGrace.Seconds() {
+	if running && inGrace {
 		return "online"
 	}
 	return "offline"

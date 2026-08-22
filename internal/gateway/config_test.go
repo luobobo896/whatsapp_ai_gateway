@@ -178,6 +178,50 @@ func TestConfigAtomicUpdates(t *testing.T) {
 	// SetCloudToken/SetLLM 不应清掉设备（只写各自 key）
 }
 
+func TestRemoveAndIgnoreDevicePersists(t *testing.T) {
+	dir := t.TempDir()
+	c, err := OpenConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Devices = []Device{
+		{UDID: "00008120-000865d90a10c01e", IP: "192.168.10.237", Name: "ghost"},
+		{UDID: "4886579a97a96bad83b527862bab409b5a07c741", IP: "192.168.10.237", Name: "plus-2"},
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := c.RemoveAndIgnoreDevice("00008120-000865d90a10c01e")
+	if err != nil || !removed {
+		t.Fatalf("RemoveAndIgnoreDevice: removed=%v err=%v", removed, err)
+	}
+	if c.Device("00008120-000865d90a10c01e") != nil {
+		t.Fatal("deleted device still in memory")
+	}
+	if !c.IsIgnored("00008120-000865d90a10c01e") {
+		t.Fatal("deleted device must be ignored")
+	}
+	if c.Device("4886579a97a96bad83b527862bab409b5a07c741") == nil {
+		t.Fatal("other device must stay")
+	}
+
+	c2, err := OpenConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if c2.Device("00008120-000865d90a10c01e") != nil {
+		t.Fatal("deleted device came back after reopen")
+	}
+	if !c2.IsIgnored("00008120-000865d90a10c01e") {
+		t.Fatal("ignored list lost after reopen")
+	}
+	if len(c2.Devices) != 1 || c2.Devices[0].UDID != "4886579a97a96bad83b527862bab409b5a07c741" {
+		t.Fatalf("remaining devices = %+v", c2.Devices)
+	}
+}
+
 func TestConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	c, err := OpenConfig(dir)
@@ -223,14 +267,14 @@ func TestSetCloudKeepsTokenWhenEmpty(t *testing.T) {
 
 func TestNormalizeCloudWSURL(t *testing.T) {
 	cases := map[string]string{
-		"wss://hk.hsddns.com":                          "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
-		"wss://hk.hsddns.com/":                         "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
-		"hk.hsddns.com":                                "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
-		"https://hk.hsddns.com":                        "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
-		"  wss://p.example.com  ":                      "wss://p.example.com/api/ios-agent/v1/gateway/ws",
+		"wss://hk.hsddns.com":                             "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
+		"wss://hk.hsddns.com/":                            "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
+		"hk.hsddns.com":                                   "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
+		"https://hk.hsddns.com":                           "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
+		"  wss://p.example.com  ":                         "wss://p.example.com/api/ios-agent/v1/gateway/ws",
 		"wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws": "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws",
-		"wss://other.com/custom/ws":                    "wss://other.com/custom/ws",
-		"":                                             "",
+		"wss://other.com/custom/ws":                       "wss://other.com/custom/ws",
+		"":                                                "",
 	}
 	for in, want := range cases {
 		if got := normalizeCloudWSURL(in); got != want {

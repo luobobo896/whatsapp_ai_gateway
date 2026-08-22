@@ -49,15 +49,22 @@ var whatsappBackToChats = []string{
 
 var (
 	whatsappNewChatButton = "accessibility id: NavigationBar_NewChatButton"
-	whatsappSearchField   = "class chain: **/XCUIElementTypeSearchField"
+	whatsappSearchField   = "accessibility id: PickerView_SearchBar"
 	whatsappContactCell   = "accessibility id: PickerView_ContactCell"
 )
 
+var whatsappSearchFieldFallbacks = []string{
+	`accessibility id: PickerView_SearchBar`,
+	`class chain: **/XCUIElementTypeSearchField`,
+}
+
 // whatsappLeavePicker 离开「新聊天/搜索」页的取消键（该页没有消息输入框，旧逻辑会当成已在列表）。
 var whatsappLeavePicker = []string{
-	`predicate string: type == 'XCUIElementTypeButton' AND (label == 'Cancel' OR name == 'Cancel' OR label == '取消' OR name == '取消')`,
+	`accessibility id: PickerView_CloseButton`,
+	`predicate string: type == 'XCUIElementTypeButton' AND (label == 'Cancel' OR name == 'Cancel' OR label == '取消' OR name == '取消' OR label == '关闭' OR name == '关闭')`,
 	`accessibility id: Cancel`,
 	`accessibility id: 取消`,
+	`accessibility id: 关闭`,
 }
 
 // SetMessageInputSelector / SetSendButtonSelector 供联调时覆盖默认选择器。
@@ -275,7 +282,11 @@ func ensureTyped(ctx context.Context, client *Client, sid, content string, assis
 			case <-time.After(1500 * time.Millisecond):
 			}
 		}
-		inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, 15*time.Second)
+		inputWait := 8 * time.Second
+		if assist != nil && attempt == 0 {
+			inputWait = 4 * time.Second
+		}
+		inputID, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, inputWait)
 		if err != nil {
 			// 视觉兜底：配置了 LLM 时截图定位输入框坐标点击，再短等一次输入框出现。
 			if assist != nil && attempt == 0 {
@@ -387,8 +398,10 @@ func openTargetChat(ctx context.Context, client *Client, sid, bid, digits string
 			return false, nil
 		}
 	}
-	if openNewChatByPhone(ctx, client, sid, digits) {
+	if err := openNewChatByPhone(ctx, client, sid, digits); err == nil {
 		return true, nil
+	} else if errors.Is(err, ErrSendToSelf) {
+		return false, err
 	}
 	// 模型只作最后兜底：欠费/超时立刻放弃，不挡选择器主路径。
 	if assist != nil {
@@ -494,23 +507,25 @@ func dismissPicker(ctx context.Context, client *Client, sid string) bool {
 	return false
 }
 
-// openNewChatByPhone 新聊天 -> 搜索号码 -> 点联系人动作，成功后输入框出现即返回 true。
-func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string) bool {
+// openNewChatByPhone 新聊天 -> 搜索号码 -> 点非自己的联系人。搜到本机号返回 ErrSendToSelf。
+func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string) error {
 	using, value := splitSelector(whatsappNewChatButton)
 	nc, err := client.FindElement(ctx, sid, using, value)
 	if err != nil || nc == "" {
-		return false
+		return errOpenChatMiss
 	}
 	if err := client.Click(ctx, sid, nc); err != nil {
-		return false
+		return errOpenChatMiss
 	}
 	time.Sleep(1500 * time.Millisecond)
-	sf, err := findElementBySelector(ctx, client, sid, whatsappSearchField)
+	sf, err := waitAnyElement(ctx, client, sid, whatsappSearchFieldFallbacks, 4*time.Second)
 	if err != nil || sf == "" {
-		return false
+		_ = dismissPicker(ctx, client, sid)
+		return errOpenChatMiss
 	}
 	if err := client.Click(ctx, sid, sf); err != nil {
-		return false
+		_ = dismissPicker(ctx, client, sid)
+		return errOpenChatMiss
 	}
 	time.Sleep(800 * time.Millisecond)
 	// 联系人通常按国内 11 位保存；用 86+11 搜索会排到「未保存/未知」行。
@@ -519,26 +534,43 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		query = digits
 	}
 	if err := client.TypeText(ctx, sid, sf, query); err != nil {
-		return false
+		_ = dismissPicker(ctx, client, sid)
+		return errOpenChatMiss
 	}
 	// 老设备（iPhone 7 / iOS 15）搜索结果出得慢：先等 4s，未命中再补等 2s 重试一次。
-	cellID := ""
+	var decision pickerDecision
 	for _, wait := range []time.Duration{4 * time.Second, 2 * time.Second} {
 		time.Sleep(wait)
-		if id, err := findElementBySelector(ctx, client, sid, whatsappContactCell); err == nil && id != "" {
-			cellID = id
+		cells, serr := sourceCells(ctx, client, sid)
+		if serr != nil {
+			continue
+		}
+		decision = decidePickerResult(cells, digits)
+		if decision != pickerNone {
 			break
 		}
 	}
+	if decision == pickerSelf {
+		_ = dismissPicker(ctx, client, sid)
+		return ErrSendToSelf
+	}
+	if decision != pickerHit {
+		_ = dismissPicker(ctx, client, sid)
+		return errOpenChatMiss
+	}
+	cellID := ""
+	if id, ferr := findElementBySelector(ctx, client, sid, whatsappContactCell); ferr == nil {
+		cellID = id
+	}
 	if cellID == "" {
 		_ = dismissPicker(ctx, client, sid)
-		return false
+		return errOpenChatMiss
 	}
 	// 点 cell 中部（联系人本体）。右侧动作常是「发消息给未保存号码」，会进未知会话。
 	if x, y, w, h, err := client.ElementRect(ctx, sid, cellID); err == nil {
 		tx, ty := int(x+w/2), int(y+h/2)
 		if client.CoordinateTap(ctx, sid, tx, ty) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
-			return true
+			return nil
 		}
 	}
 	for _, name := range []string{"PickerView_ContactCell_Name", "PickerView_ContactCell_PhoneNumber", "聊天"} {
@@ -546,12 +578,12 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 		act, err := findElementBySelector(ctx, client, sid, sel)
 		if err == nil && act != "" {
 			if client.Click(ctx, sid, act) == nil && chatOpenedFor(ctx, client, sid, digits, 6*time.Second, "") {
-				return true
+				return nil
 			}
 		}
 	}
 	_ = dismissPicker(ctx, client, sid)
-	return false
+	return errOpenChatMiss
 }
 
 // ---- 源码树解析（用于聊天列表定位）----
@@ -559,8 +591,26 @@ func openNewChatByPhone(ctx context.Context, client *Client, sid, digits string)
 type sourceCell struct {
 	name       string
 	label      string
+	value      string
+	titleHint  string // ChatSessionCell_Name / 联系人名，优先于无障碍拆开的号码
 	hasMessage bool
+	visible    bool
 }
+
+var errOpenChatMiss = errors.New("chat or contact not found")
+
+// ShouldFallbackChatList 指定号码其实是本机号时，改走聊天列表好友，不要在「新聊天」搜号卡住。
+func ShouldFallbackChatList(err error) bool {
+	return errors.Is(err, ErrSendToSelf)
+}
+
+type pickerDecision int
+
+const (
+	pickerNone pickerDecision = iota
+	pickerSelf
+	pickerHit
+)
 
 func sourceCells(ctx context.Context, client *Client, sid string) ([]sourceCell, error) {
 	src, err := client.Source(ctx, sid)
@@ -588,11 +638,30 @@ func parseSourceCells(src string) ([]sourceCell, error) {
 		case xml.StartElement:
 			if t.Name.Local == "XCUIElementTypeCell" {
 				if cur == nil {
-					cur = &sourceCell{name: xmlAttr(t, "name"), label: xmlAttr(t, "label")}
+					cur = &sourceCell{
+						name:    xmlAttr(t, "name"),
+						label:   xmlAttr(t, "label"),
+						value:   xmlAttr(t, "value"),
+						visible: xmlAttr(t, "visible") != "false",
+					}
 					curDepth = depth
 				}
-			} else if cur != nil && t.Name.Local == "XCUIElementTypeStaticText" && xmlAttr(t, "name") == "WAChatSessionCell_Message" {
-				cur.hasMessage = true
+			} else if cur != nil {
+				childName := xmlAttr(t, "name")
+				if t.Name.Local == "XCUIElementTypeStaticText" && childName == "WAChatSessionCell_Message" {
+					cur.hasMessage = true
+				}
+				if childName == "ChatSessionCell_Name" || childName == "PickerView_ContactCell_Name" {
+					if lab := strings.TrimSpace(xmlAttr(t, "label")); lab != "" {
+						cur.titleHint = lab
+					}
+				}
+				if (childName == "ChatSessionCell_Name" || childName == "PickerView_ContactCell_Name" ||
+					childName == "PickerView_ContactCell_PhoneNumber") && digitsOf(cur.label) == "" && digitsOf(cur.name) == "" {
+					if lab := xmlAttr(t, "label"); lab != "" {
+						cur.label = lab
+					}
+				}
 			}
 			depth++
 		case xml.EndElement:
@@ -659,14 +728,100 @@ func isUnknownChatTitle(title string) bool {
 }
 
 func cellMatchesPhone(c sourceCell, digits string) bool {
-	return phoneDigitsMatch(c.name, digits) || phoneDigitsMatch(c.label, digits)
+	return phoneDigitsMatch(c.name, digits) || phoneDigitsMatch(c.label, digits) || phoneDigitsMatch(c.value, digits)
+}
+
+func stripBidi(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u2066', '\u2067', '\u2068', '\u2069':
+			return -1
+		default:
+			return r
+		}
+	}, s)
+}
+
+func isSelfChatCell(c sourceCell) bool {
+	for _, s := range []string{c.name, c.label, c.value} {
+		plain := stripBidi(s)
+		if isSelfChatTitle(plain) || strings.Contains(plain, "已发送到你") || strings.Contains(plain, "给自己发消息") {
+			return true
+		}
+	}
+	return false
+}
+
+func decidePickerResult(cells []sourceCell, digits string) pickerDecision {
+	sawSelf := false
+	for _, c := range cells {
+		if c.name != "PickerView_ContactCell" || !c.visible {
+			continue
+		}
+		if isSelfChatCell(c) {
+			sawSelf = true
+			continue
+		}
+		if cellMatchesPhone(c, digits) {
+			return pickerHit
+		}
+	}
+	if sawSelf {
+		return pickerSelf
+	}
+	return pickerNone
 }
 
 func chatDisplayTitle(c sourceCell) string {
-	if s := strings.TrimSpace(c.name); s != "" && s != "filter" {
+	// 联系人名优先于无障碍拆开的号码；没有名字时再把号码收成可读格式。
+	if t := compactChatTitle(c.name); t != "" && !isSpacedDigitTitle(c.name) {
+		return t
+	}
+	if t := compactChatTitle(c.titleHint); t != "" {
+		return t
+	}
+	if t := compactChatTitle(c.label); t != "" {
+		return t
+	}
+	return compactChatTitle(c.name)
+}
+
+func isSpacedDigitTitle(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	d := digitsOf(s)
+	if len(d) < 8 {
+		return false
+	}
+	other := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' || r == ' ' || r == ',' || r == '+' || r == '-' || r == '\u00a0' {
+			continue
+		}
+		other++
+	}
+	return other == 0
+}
+
+// compactChatTitle 把无障碍树里拆开的 "+ 8 6,1 5 2,..." 收成可读号码，普通名字原样返回。
+func compactChatTitle(s string) string {
+	s = strings.TrimSpace(stripBidi(s))
+	if s == "" || s == "filter" {
+		return ""
+	}
+	if !isSpacedDigitTitle(s) {
 		return s
 	}
-	return strings.TrimSpace(c.label)
+	d := digitsOf(s)
+	if len(d) == 13 && strings.HasPrefix(d, "86") {
+		return "+86 " + d[2:5] + " " + d[5:9] + " " + d[9:]
+	}
+	if len(d) == 11 {
+		return d[:3] + " " + d[3:7] + " " + d[7:]
+	}
+	return d
 }
 
 func looksLikeGroupChat(s string) bool {
@@ -693,8 +848,10 @@ func isSelfChatTitle(s string) bool {
 	case "you", "me", "myself", "你", "我", "自己":
 		return true
 	}
-	for _, p := range []string{"message yourself", "messaging yourself", "(you)", "（you）", "给自己发", "发给自己", "发送给自己"} {
-		if strings.Contains(low, p) || strings.Contains(t, p) {
+	plain := stripBidi(t)
+	lowPlain := strings.ToLower(plain)
+	for _, p := range []string{"message yourself", "messaging yourself", "(you)", "（you）", "(你)", "（你）", "给自己发", "发给自己", "发送给自己"} {
+		if strings.Contains(low, p) || strings.Contains(t, p) || strings.Contains(lowPlain, p) || strings.Contains(plain, p) {
 			return true
 		}
 	}
@@ -707,7 +864,7 @@ func isFriendChatCell(c sourceCell) bool {
 	if title == "" || title == "filter" {
 		return false
 	}
-	if isSelfChatTitle(title) || isSelfChatTitle(c.label) || isSelfChatTitle(c.name) {
+	if isSelfChatCell(c) || isSelfChatTitle(title) || isSelfChatTitle(c.label) || isSelfChatTitle(c.name) {
 		return false
 	}
 	if looksLikeGroupChat(title) || looksLikeGroupChat(c.label) {
@@ -817,16 +974,20 @@ func SendToChatListFriends(ctx context.Context, client *Client, content string, 
 			lastErr = err
 			continue
 		}
-		if err := openChatByTarget(ctx, client, sid, tgt); err != nil {
-			lastErr = err
-			continue
-		}
-		if err := TypeAndSend(ctx, client, sid, content, assist); err != nil {
+		if err := sendOneChatListFriend(ctx, client, sid, tgt, content, assist); err != nil {
 			lastErr = err
 			continue
 		}
 		sent++
-		names = append(names, tgt.title)
+		name := compactChatTitle(ChatTitle(ctx, client, sid))
+		if name == "" {
+			name = tgt.title
+		}
+		names = append(names, name)
+	}
+	// 整单结束后回到聊天列表，用户能看到刚发出的最后一条预览。
+	if err := gotoChatList(ctx, client, sid); err != nil && lastErr == nil {
+		lastErr = err
 	}
 	if sent == 0 {
 		if lastErr != nil {
@@ -840,12 +1001,51 @@ func SendToChatListFriends(ctx context.Context, client *Client, content string, 
 	return sent, names, nil
 }
 
+func waitForComposer(ctx context.Context, client *Client, sid string, timeout time.Duration) bool {
+	_, err := waitElement(ctx, client, sid, whatsappSelectors.messageInput, timeout)
+	return err == nil
+}
+
+// sendOneChatListFriend 打开目标会话，确认已在聊天页再发送。
+// 点进列表后仍停在列表/搜索时，先让视觉模型判断界面再重试一次。
+func sendOneChatListFriend(ctx context.Context, client *Client, sid string, tgt chatTarget, content string, assist SendAssist) error {
+	if err := openChatByTarget(ctx, client, sid, tgt); err != nil {
+		return err
+	}
+	if !waitForComposer(ctx, client, sid, 5*time.Second) {
+		if assist != nil {
+			r := applyScreenAssist(ctx, client, sid, assist)
+			if strings.EqualFold(r.Kind, "list") {
+				if err := openChatByTarget(ctx, client, sid, tgt); err != nil {
+					return err
+				}
+			}
+		}
+		if !waitForComposer(ctx, client, sid, 5*time.Second) {
+			return fmt.Errorf("打开 %q 后未进入聊天页", tgt.title)
+		}
+	}
+	if err := TypeAndSend(ctx, client, sid, content, assist); err != nil {
+		if assist != nil && strings.Contains(err.Error(), "find message input") {
+			_ = applyScreenAssist(ctx, client, sid, assist)
+			if waitForComposer(ctx, client, sid, 5*time.Second) {
+				return TypeAndSend(ctx, client, sid, content, assist)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 func chatIndexByPhone(ctx context.Context, client *Client, sid, digits string) (int, error) {
 	cells, err := sourceCells(ctx, client, sid)
 	if err != nil {
 		return 0, err
 	}
 	for i, c := range cells {
+		if isSelfChatCell(c) {
+			continue
+		}
 		if cellMatchesPhone(c, digits) {
 			return i + 1, nil
 		}

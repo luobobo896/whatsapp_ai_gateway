@@ -274,6 +274,27 @@ func isPrivateIPv4(ip net.IP) bool {
 	return false
 }
 
+func privateIPv4String(s string) bool {
+	ip := net.ParseIP(strings.TrimSpace(s))
+	if ip == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	return ip4 != nil && isPrivateIPv4(ip4)
+}
+
+// preferredWifiIP 选手机 Wi-Fi IP：WDA /status 自报优先于扫描 host。
+// EasyTier 会代理 192.168.20.0/24，扫描到的地址可能是叠加网，不是手机真实网卡。
+func preferredWifiIP(scanHost, reported string) string {
+	if privateIPv4String(reported) {
+		return reported
+	}
+	if privateIPv4String(scanHost) {
+		return scanHost
+	}
+	return ""
+}
+
 // FoundWDA 是局域网扫描到的 WDA 实例。
 type FoundWDA struct {
 	IP         string

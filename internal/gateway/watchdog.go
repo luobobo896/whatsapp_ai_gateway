@@ -105,9 +105,23 @@ func (g *Gateway) watchOnce() {
 		h := g.checkWDA(dev)
 		prevOK := healthOK(dev.LastHealth)
 		applyHealth(dev, h)
+		// USB 隧道探活成功时，ios.ip 是这台手机自报的 Wi-Fi，覆盖 EasyTier 扫到的叠加网地址。
+		if h.OK && h.IP != "" && TunnelAddr(dev.UDID) != "" {
+			old := dev.IP
+			if syncStoredWifiIP(dev, h.IP) {
+				n := evictWifiIP(cfg.Devices, dev.UDID, dev.IP)
+				slog.Info("wifi IP refreshed from USB WDA", "udid", dev.UDID[:8], "old", old, "new", dev.IP, "evicted", n)
+			}
+		}
 		// 在线时记录 WDA identifierForVendor(uuid) 与设备名（如 iPhone Plus-2），供识别与网络变化后按 uuid 重新匹配。
 		if h.OK && (dev.VendorUUID == "" || dev.Name == "") {
-			uuid, name := g.deviceIdentity(dev.IP, dev.Port)
+			idHost, idPort := dev.IP, dev.Port
+			if a := TunnelAddr(dev.UDID); a != "" {
+				if host, portStr, err := net.SplitHostPort(a); err == nil {
+					idHost, idPort = host, atoiPort(portStr)
+				}
+			}
+			uuid, name := g.deviceIdentity(idHost, idPort)
 			dirty := false
 			if dev.VendorUUID == "" && uuid != "" {
 				dev.VendorUUID = uuid
@@ -122,8 +136,13 @@ func (g *Gateway) watchOnce() {
 				_ = cfg.Save()
 			}
 		}
+		if h.OK && dev.VendorUUID != "" && TunnelAddr(dev.UDID) != "" {
+			if n := evictVendorUUID(cfg.Devices, dev.UDID, dev.VendorUUID); n > 0 {
+				slog.Info("cleared stolen vendor_uuid", "udid", dev.UDID[:8], "evicted", n)
+			}
+		}
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
-		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID), errText(h.Error))
+		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID) || TunnelAddr(dev.UDID) != "", errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
 			// 老机型（40 位 UDID，iPhone X 及以前，A11 及更早）不支持 WiFi 启动 WDA：
 			// xcodebuild 激活必须 USB 连接（无 CoreDevice WiFi 开发配对），拔线后 WDA
@@ -406,6 +425,10 @@ func (g *Gateway) followNetworkChange() error {
 			byUUID[f.UUID] = f
 		}
 	}
+	usbSet := map[string]bool{}
+	for _, u := range USBUDIDs() {
+		usbSet[u] = true
+	}
 	for _, dev := range stale {
 		old := dev.IP
 		hit, ok := byUUID[dev.VendorUUID]
@@ -430,22 +453,27 @@ func (g *Gateway) followNetworkChange() error {
 				continue
 			}
 		}
-		if hit.IP == "" || hit.IP == old {
+		newIP := preferredWifiIP(hit.IP, hit.IOSIP)
+		if newIP == "" || newIP == old {
 			continue
 		}
-		dev.IP = hit.IP
+		if ipOwnedByOtherUSB(cfg.Devices, usbSet, dev.UDID, newIP) {
+			slog.Warn("skip follow onto USB-owned wifi IP", "udid", dev.UDID[:8], "ip", newIP)
+			continue
+		}
+		dev.IP = newIP
 		if hit.UUID != "" && dev.VendorUUID == "" {
 			// 只在无 uuid 时记录；避免把别的手机的 uuid 覆盖进来污染设备身份
 			dev.VendorUUID = hit.UUID
 		}
-		owner[hit.IP] = dev.UDID // 本轮内占用，后续设备不会再匹配到同一 IP
+		owner[newIP] = dev.UDID // 本轮内占用，后续设备不会再匹配到同一 IP
 		// 换 IP 后先对新 IP 做一次真实探活，就绪才报 online；未就绪交给下一轮 watchOnce 修正。
 		h := CheckWDA(dev.IP, dev.Port, 3*time.Second)
 		applyHealth(dev, h)
 		_ = cfg.Save()
-		slog.Info("device followed network change", "udid", dev.UDID[:8], "old", old, "new", hit.IP, "ok", h.OK)
+		slog.Info("device followed network change", "udid", dev.UDID[:8], "old", old, "new", newIP, "ok", h.OK)
 		if h.OK {
-			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + hit.IP})
+			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "online", Error: "ip updated " + old + " -> " + newIP})
 		}
 	}
 	return nil
@@ -473,4 +501,62 @@ func errText(err string) string {
 		return ""
 	}
 	return err
+}
+
+func atoiPort(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+func syncStoredWifiIP(dev *Device, reported string) bool {
+	if dev == nil || !privateIPv4String(reported) || reported == dev.IP {
+		return false
+	}
+	dev.IP = reported
+	return true
+}
+
+func evictWifiIP(devs []Device, keepUDID, ip string) int {
+	if ip == "" {
+		return 0
+	}
+	n := 0
+	for i := range devs {
+		if devs[i].UDID == keepUDID || devs[i].IP != ip {
+			continue
+		}
+		devs[i].IP = ""
+		n++
+	}
+	return n
+}
+
+func evictVendorUUID(devs []Device, keepUDID, uuid string) int {
+	if uuid == "" {
+		return 0
+	}
+	n := 0
+	for i := range devs {
+		if devs[i].UDID == keepUDID || devs[i].VendorUUID != uuid {
+			continue
+		}
+		devs[i].VendorUUID = ""
+		n++
+	}
+	return n
+}
+
+func ipOwnedByOtherUSB(devs []Device, usb map[string]bool, selfUDID, ip string) bool {
+	if ip == "" {
+		return false
+	}
+	for i := range devs {
+		if devs[i].UDID == selfUDID || devs[i].IP != ip {
+			continue
+		}
+		if usb[devs[i].UDID] {
+			return true
+		}
+	}
+	return false
 }

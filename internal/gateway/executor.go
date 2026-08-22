@@ -627,30 +627,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		content := itemContent(t, it)
 		// 未指定号码：扫描聊天列表里当前可见的 1:1 好友并逐个发送。
 		if strings.TrimSpace(it.Phone) == "" {
-			maxFriends := 0
-			if e.cfg != nil {
-				maxFriends = e.cfg.Web.ChatListMaxFriends
-			}
-			n, names, serr := wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
-			if serr != nil && n == 0 && transientWDAError(serr) {
-				slog.Warn("chat-list send transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", serr.Error())
-				time.Sleep(2 * time.Second)
-				n, names, serr = wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
-			}
-			status, errMsg = "sent", ""
-			contactName = strings.Join(names, "、")
-			if n == 0 {
-				status = "failed"
-				if serr != nil {
-					errMsg = serr.Error()
-				} else {
-					errMsg = "聊天列表未找到好友会话"
-				}
+			n, names, serr := e.sendChatList(client, content, assist)
+			status, errMsg, contactName = chatListOutcome(n, names, serr)
+			if status == "failed" {
 				e.recordBug(t, it, "chat_list", fmt.Errorf("%s", errMsg), assist, client, "")
-			} else if serr != nil {
-				errMsg = serr.Error()
-			} else {
-				errMsg = fmt.Sprintf("聊天列表已发送 %d 人", n)
 			}
 			dur := time.Since(t0).Milliseconds()
 			e.finishItem(ItemResult{
@@ -707,6 +687,45 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 					isNew, oerr = wda.OpenChatOnSession(context.Background(), client, sid, bid, it.Phone, assist)
 				}
 			}
+		}
+		if oerr != nil && wda.ShouldFallbackChatList(oerr) {
+			// 平台带了本机号：新聊天只会搜到「给自己发消息」然后卡住。改发当前列表里的好友。
+			slog.Info("specified phone is self, fall back to chat list", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone)
+			dropSession()
+			n, names, serr := e.sendChatList(client, content, assist)
+			status, errMsg, contactName = chatListOutcome(n, names, serr)
+			if status == "failed" {
+				e.recordBug(t, it, "chat_list", fmt.Errorf("%s", errMsg), assist, client, "")
+			}
+			dur := time.Since(t0).Milliseconds()
+			e.finishItem(ItemResult{
+				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339),
+			})
+			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
+				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
+			if status == "failed" {
+				if containsAny(errMsg, "not reachable", "connection", "timed out") {
+					stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
+					return
+				}
+				consecFails++
+				if consecFails >= maxFails {
+					reason := "熔断:连续失败 " + strconv.Itoa(consecFails) + " 条"
+					e.cancelRemainingReason(env, t, t.Items[idx+1:], reason)
+					stopStatus, stopReason = taskStopBreaker, reason
+					return
+				}
+			} else {
+				consecFails = 0
+			}
+			if wait := nextInterval(sched, t.IntervalSec); wait > 0 {
+				if interrupted(cancelCh, wait) {
+					continue
+				}
+			}
+			continue
 		}
 		if oerr != nil {
 			status, errMsg = "failed", oerr.Error()
@@ -794,6 +813,38 @@ func (e *Executor) deviceReachable(udid, ip string, port int) bool {
 		p = 8100
 	}
 	return CheckWDA(u.Hostname(), p, 4*time.Second).OK
+}
+
+func (e *Executor) sendChatList(client *wda.Client, content string, assist wda.SendAssist) (int, []string, error) {
+	maxFriends := 0
+	if e.cfg != nil {
+		maxFriends = e.cfg.Web.ChatListMaxFriends
+	}
+	n, names, err := wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+	if err != nil && n == 0 && transientWDAError(err) {
+		time.Sleep(2 * time.Second)
+		n, names, err = wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+	}
+	return n, names, err
+}
+
+func chatListOutcome(n int, names []string, serr error) (status, errMsg, contact string) {
+	joined := strings.Join(names, "、")
+	if n > 0 {
+		contact = fmt.Sprintf("%d人：%s", n, joined)
+	} else {
+		contact = joined
+	}
+	if n == 0 {
+		if serr != nil {
+			return "failed", serr.Error(), contact
+		}
+		return "failed", "聊天列表未找到好友会话", contact
+	}
+	if serr != nil {
+		return "sent", serr.Error(), contact
+	}
+	return "sent", fmt.Sprintf("聊天列表已发送 %d 人", n), contact
 }
 
 // itemContent 返回单条明细的实际发送内容：明细有逐条渲染内容（平台模板变量）

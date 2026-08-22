@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"net/http/pprof"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -321,8 +321,11 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				return
 			}
 			stopped := g.WDA.Stop(udid)
-			removed := g.Cfg.RemoveDevice(udid)
-			_ = g.Cfg.IgnoreDevice(udid)
+			removed, err := g.Cfg.RemoveAndIgnoreDevice(udid)
+			if err != nil {
+				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "删除失败：" + err.Error()})
+				return
+			}
 			writeJSON(w, map[string]any{
 				"udid": udid, "status": "deleted", "removed": removed, "stopped": stopped,
 				"hidden": true,
@@ -471,15 +474,16 @@ func (g *Gateway) deviceList() []map[string]any {
 				model = info.Model
 			}
 		}
+		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
 		conn := "wifi"
-		if usbSet[d.UDID] {
+		if attached {
 			conn = "usb"
 		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
-			"configured": true, "usb": usbSet[d.UDID], "conn_type": conn,
+			"configured": true, "usb": attached, "conn_type": conn,
 			"wda_running": g.WDA.Running(d.UDID),
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})

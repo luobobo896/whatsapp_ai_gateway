@@ -443,7 +443,11 @@ async function api(path, opts = {}){
     // CSRF token 失效（如页面刷新后丢失）：向 /api/session 重新取一次并重试，避免操作无声失败
     try {
       const s = await (await fetch('/api/session')).json();
-      if (s.csrfToken) { csrfToken = s.csrfToken; return await fetch(path, opts); }
+      if (s.csrfToken) {
+        csrfToken = s.csrfToken;
+        opts.headers = Object.assign({}, opts.headers, { 'X-CSRF-Token': csrfToken });
+        return await fetch(path, opts);
+      }
     } catch(e) {}
   }
   if(r.status === 401){ showLogin(); throw new Error('unauthorized'); }
@@ -633,14 +637,15 @@ async function loadCloudCfg(force){
   }catch(e){ /* 静默：下次刷新再试 */ }
 }
 async function disableCloudCfg(){
-  if (!confirm('停用云通道后将不连接平台、不接收任务，确认停用？')) return;
-  try{
-    await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled:false})});
-    toast('云通道已停用');
-    await loadCloud();
-    await loadCloudCfg(true);
-    checkSession();
-  }catch(e){ toast('停用失败：' + (e.message || e)); }
+  showConfirm('停用云通道', '停用云通道后将不连接平台、不接收任务，确认停用？', '停用', async () => {
+    try{
+      await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled:false})});
+      toast('云通道已停用');
+      await loadCloud();
+      await loadCloudCfg(true);
+      checkSession();
+    }catch(e){ toast('停用失败：' + (e.message || e)); }
+  });
 }
 async function saveCloudCfg(){
   const body = {

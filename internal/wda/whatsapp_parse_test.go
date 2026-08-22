@@ -39,6 +39,38 @@ func TestParseSourceCells(t *testing.T) {
 	}
 }
 
+func TestCompactChatTitle(t *testing.T) {
+	if got := compactChatTitle("+ 8 6,1 5 2,1 3 4 7,2 0 8 5"); got != "+86 152 1347 2085" {
+		t.Fatalf("spaced phone = %q", got)
+	}
+	if got := compactChatTitle("罗泓森"); got != "罗泓森" {
+		t.Fatalf("name = %q", got)
+	}
+	if compactChatTitle("filter") != "" || compactChatTitle("  ") != "" {
+		t.Fatal("filter/blank should be empty")
+	}
+}
+
+func TestChatDisplayTitlePrefersNameThenChild(t *testing.T) {
+	if got := chatDisplayTitle(sourceCell{name: "张三", label: "+86 176 8854 0775"}); got != "张三" {
+		t.Fatalf("saved name: %q", got)
+	}
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication>
+ <XCUIElementTypeCell name="+ 8 6,1 9 0,9 8 5 1,3 9 0 9" label="+ 8 6,1 9 0,9 8 5 1,3 9 0 9">
+  <XCUIElementTypeStaticText name="ChatSessionCell_Name" label="+86 190 9851 3909"/>
+  <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="hi"/>
+ </XCUIElementTypeCell>
+</XCUIElementTypeApplication>`
+	cells, err := parseSourceCells(xml)
+	if err != nil || len(cells) != 1 {
+		t.Fatalf("parse: %v %+v", err, cells)
+	}
+	if got := chatDisplayTitle(cells[0]); got != "+86 190 9851 3909" {
+		t.Fatalf("child name title = %q cell=%+v", got, cells[0])
+	}
+}
+
 func TestDigitsOf(t *testing.T) {
 	cases := map[string]string{
 		"+ 8 6,1 7 6,8 8 5 4,0 7 7 5": "8617688540775",
@@ -72,6 +104,76 @@ func TestPhoneDigitsMatch(t *testing.T) {
 	}
 	if phoneDigitsMatch("", "8617688540775") {
 		t.Fatal("empty must not match")
+	}
+}
+
+func TestParseSourceCellsSelfChatFromSentToYou(t *testing.T) {
+	// 真机聊天列表：自己的会话 name 是资料名，value 是「已发送到你」（带 LTR 不可见字符）。
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication>
+ <XCUIElementTypeTable>
+  <XCUIElementTypeCell value="你的消息, 打字自愈优化验证, 已发送到&#x200e;你, 已读" name="罗泓森" label="罗泓森">
+   <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="打字自愈优化验证"/>
+  </XCUIElementTypeCell>
+  <XCUIElementTypeCell value="你的消息, hello, 已发送到+ 8 6,1 5 2,1 3 4 7,2 0 8 5" name="+ 8 6,1 5 2,1 3 4 7,2 0 8 5" label="+ 8 6,1 5 2,1 3 4 7,2 0 8 5">
+   <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="hello"/>
+   <XCUIElementTypeOther name="ChatSessionCell_Name" label="+86 152 1347 2085"/>
+  </XCUIElementTypeCell>
+ </XCUIElementTypeTable>
+</XCUIElementTypeApplication>`
+	cells, err := parseSourceCells(xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cells) != 2 {
+		t.Fatalf("cells = %d, want 2", len(cells))
+	}
+	if !isSelfChatCell(cells[0]) {
+		t.Fatalf("罗泓森 + 已发送到你 should be self: %+v", cells[0])
+	}
+	if isSelfChatCell(cells[1]) {
+		t.Fatalf("regular number cell must not be self: %+v", cells[1])
+	}
+	if !cellMatchesPhone(cells[1], "8615213472085") {
+		t.Fatal("ChatSessionCell_Name / cell name digits should match 152")
+	}
+}
+
+func TestPickerSearchOwnNumberIsSelf(t *testing.T) {
+	// 真机新聊天搜本机号 18078526388：可见结果只有「给自己发消息」。
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication>
+ <XCUIElementTypeCell name="PickerView_ContactCell" label="罗泓森 (你), 给自己发消息">
+  <XCUIElementTypeStaticText name="PickerView_ContactCell_PhoneNumber" label="给自己发消息"/>
+  <XCUIElementTypeStaticText name="PickerView_ContactCell_Name" label="罗泓森 (你)"/>
+ </XCUIElementTypeCell>
+</XCUIElementTypeApplication>`
+	cells, err := parseSourceCells(xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decidePickerResult(cells, "8618078526388")
+	if got != pickerSelf {
+		t.Fatalf("own number search should be pickerSelf, got %v cells=%+v", got, cells)
+	}
+}
+
+func TestPickerSearchRegularContactIsHit(t *testing.T) {
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication>
+ <XCUIElementTypeCell name="PickerView_ContactCell" label="+ 8 6,1 5 2,1 3 4 7,2 0 8 5, yangli">
+  <XCUIElementTypeStaticText name="PickerView_ContactCell_Name" label="+86 152 1347 2085"/>
+ </XCUIElementTypeCell>
+</XCUIElementTypeApplication>`
+	cells, err := parseSourceCells(xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decidePickerResult(cells, "8615213472085") != pickerHit {
+		t.Fatalf("saved contact should be pickerHit, cells=%+v", cells)
+	}
+	if decidePickerResult(cells, "8618078526388") != pickerNone {
+		t.Fatal("unrelated number must not hit 152 cell")
 	}
 }
 
@@ -128,6 +230,44 @@ func TestFriendChatTargetsSkipsGroupsAndFilters(t *testing.T) {
 	}
 	if nationalDigits(got[1].digits) != "13800000001" {
 		t.Fatalf("second friend digits: %+v", got[1])
+	}
+}
+
+func TestFriendChatTargetsRealSevenPlusList(t *testing.T) {
+	// 真机 iPhone 7 Plus 聊天列表：152、自己（罗泓森/已发送到你）、176。应只发两个好友。
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication>
+ <XCUIElementTypeTable name="ChatListView_TableView">
+  <XCUIElementTypeCell name="+ 8 6,1 5 2,1 3 4 7,2 0 8 5" label="+ 8 6,1 5 2,1 3 4 7,2 0 8 5" value="你的消息, hello, 已发送到+ 8 6,1 5 2,1 3 4 7,2 0 8 5">
+   <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="hello"/>
+  </XCUIElementTypeCell>
+  <XCUIElementTypeCell name="罗泓森" label="罗泓森" value="你的消息, 打字自愈优化验证, 已发送到&#x200e;你, 已读">
+   <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="打字自愈优化验证"/>
+  </XCUIElementTypeCell>
+  <XCUIElementTypeCell name="+ 8 6,1 7 6,8 8 5 4,0 7 7 5" label="+ 8 6,1 7 6,8 8 5 4,0 7 7 5" value="你的消息, 荔枝, 已发送到+ 8 6,1 7 6,8 8 5 4,0 7 7 5">
+   <XCUIElementTypeStaticText name="WAChatSessionCell_Message" label="荔枝"/>
+  </XCUIElementTypeCell>
+ </XCUIElementTypeTable>
+</XCUIElementTypeApplication>`
+	cells, err := parseSourceCells(xml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := friendChatTargets(cells)
+	if len(got) != 2 {
+		t.Fatalf("want 2 friends, got %d: %+v", len(got), got)
+	}
+	if nationalDigits(got[0].digits) != "15213472085" || nationalDigits(got[1].digits) != "17688540775" {
+		t.Fatalf("friends = %+v", got)
+	}
+}
+
+func TestShouldFallbackChatListOnSelf(t *testing.T) {
+	if !ShouldFallbackChatList(ErrSendToSelf) {
+		t.Fatal("own number must fall back to chat list")
+	}
+	if ShouldFallbackChatList(errOpenChatMiss) {
+		t.Fatal("unknown number must not spam chat list")
 	}
 }
 

@@ -107,3 +107,38 @@ func TestDeviceListReportUsesRunningState(t *testing.T) {
 		t.Fatalf("u-stale status = %q, want offline (WDA 进程未运行，即使健康探活 ok 也不上报 online)", status["u-stale"])
 	}
 }
+
+func TestWDACloudStatusTunnelCountsAsAttached(t *testing.T) {
+	// USB 枚举空、last_health 失败时，只要隧道还在就应上报 online，否则平台只给一台下发。
+	if !attachedUSB("u1", nil, true) {
+		t.Fatal("tunnel-only device must count as USB attached")
+	}
+	if attachedUSB("u1", nil, false) {
+		t.Fatal("no discover and no tunnel")
+	}
+	if !attachedUSB("u1", map[string]bool{"u1": true}, false) {
+		t.Fatal("discover hit must count")
+	}
+	if got := wdaCloudStatus(false, true, false, true, false); got != "online" {
+		t.Fatalf("running + attached + unhealthy = %q, want online", got)
+	}
+	if got := wdaCloudStatus(false, true, false, false, false); got != "offline" {
+		t.Fatalf("running + no attach + unhealthy = %q, want offline", got)
+	}
+}
+
+func TestDeviceListReportSkipsIgnored(t *testing.T) {
+	g, wdaMgr, _ := newStatusTestGateway(t)
+	g.Cfg.Devices = []Device{
+		{UDID: "u-keep", LastHealth: map[string]any{"ok": true}},
+		{UDID: "u-hidden", LastHealth: map[string]any{"ok": true}},
+	}
+	g.Cfg.Ignored = []string{"u-hidden"}
+	setWDA(t, wdaMgr, "u-keep", true)
+	setWDA(t, wdaMgr, "u-hidden", true)
+
+	got := g.deviceListReport()
+	if len(got) != 1 || got[0]["udid"] != "u-keep" {
+		t.Fatalf("report = %+v, want only u-keep", got)
+	}
+}

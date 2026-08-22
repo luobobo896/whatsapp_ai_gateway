@@ -170,3 +170,17 @@ loop:
 		t.Fatal("resend summary missing")
 	}
 }
+
+func TestChatListOutcomeRemembersCount(t *testing.T) {
+	st, errMsg, contact := chatListOutcome(2, []string{"+86 152 1347 2085", "+86 176 8854 0775"}, nil)
+	if st != "sent" || errMsg != "聊天列表已发送 2 人" {
+		t.Fatalf("status=%s err=%q", st, errMsg)
+	}
+	if contact != "2人：+86 152 1347 2085、+86 176 8854 0775" {
+		t.Fatalf("contact=%q", contact)
+	}
+	st, _, contact = chatListOutcome(0, nil, nil)
+	if st != "failed" || contact != "" {
+		t.Fatalf("empty: %s %q", st, contact)
+	}
+}
