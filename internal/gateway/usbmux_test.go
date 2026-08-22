@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
+	misses := map[string]int{}
+	tunnels := []string{"u1", "u2"}
+	if got := usbTunnelsToDrop(nil, tunnels, misses, 2); len(got) != 0 {
+		t.Fatalf("first empty round must keep tunnels, got %v", got)
+	}
+	if misses["u1"] != 1 || misses["u2"] != 1 {
+		t.Fatalf("misses=%v", misses)
+	}
+	got := usbTunnelsToDrop(nil, tunnels, misses, 2)
+	if len(got) != 2 {
+		t.Fatalf("second empty round must drop both, got %v", got)
+	}
+	if len(misses) != 0 {
+		t.Fatalf("dropped ids should clear misses: %v", misses)
+	}
+}
+
+func TestUSBTunnelsToDropResetsWhenRediscovered(t *testing.T) {
+	misses := map[string]int{"u1": 1}
+	got := usbTunnelsToDrop(map[string]bool{"u1": true}, []string{"u1"}, misses, 2)
+	if len(got) != 0 {
+		t.Fatalf("rediscovered must not drop: %v", got)
+	}
+	if _, ok := misses["u1"]; ok {
+		t.Fatalf("misses should reset: %v", misses)
+	}
+}
+
 // TestTransientWDAError 可达性类错误判定。
 func TestTransientWDAError(t *testing.T) {
 	for _, s := range []string{

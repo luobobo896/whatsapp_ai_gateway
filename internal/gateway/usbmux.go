@@ -71,6 +71,27 @@ func freeLocalPort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
+// usbTunnelsToDrop 连续 missLimit 轮不在 USB 列表里的隧道才拆除。
+// 枚举整表为空时也累计 miss，避免拔到另一台电脑后死隧道永不回收。
+func usbTunnelsToDrop(usb map[string]bool, tunneled []string, misses map[string]int, missLimit int) []string {
+	if missLimit < 1 {
+		missLimit = 1
+	}
+	var drop []string
+	for _, udid := range tunneled {
+		if usb[udid] {
+			delete(misses, udid)
+			continue
+		}
+		misses[udid]++
+		if misses[udid] >= missLimit {
+			drop = append(drop, udid)
+			delete(misses, udid)
+		}
+	}
+	return drop
+}
+
 // EnsureUSBTunnels 按当前 USB 设备与目标端口对账隧道（看护循环每轮调用）。
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
 func EnsureUSBTunnels(rawPorts map[string]int) {
@@ -84,32 +105,24 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 	for u, p := range rawPorts {
 		ports[normalizeUDID(u)] = p
 	}
-	if len(udids) == 0 && len(m.procs) > 0 {
-		// ioreg 偶发失败/空结果：视为发现层抖动，本轮不对账，
-		// 避免把全部隧道拆掉造成所有设备同时掉线（真拔线由连续确认机制兜底）。
-		slog.Warn("usb discovery empty with active tunnels, skip reconcile")
-		return
-	}
 	usb := map[string]bool{}
 	for _, u := range udids {
 		usb[normalizeUDID(u)] = true
 	}
-	// 拆除防抖：单台设备连续 2 轮未在 USB 列表确认才拆，单次抖动不误杀；
-	// 只拆确认消失的设备，其余隧道不受影响（停一台只停一台）。
-	for udid, p := range m.procs {
-		if usb[udid] {
-			delete(m.misses, udid)
-			continue
-		}
-		m.misses[udid]++
-		if m.misses[udid] < 2 {
-			continue
-		}
-		if p.cmd.Process != nil {
+	if len(udids) == 0 && len(m.procs) > 0 {
+		// 整表为空：可能是 ioreg 抖动，也可能是手机都拔到别的电脑。
+		// 仍走连续 miss 拆除，禁止跳过对账把死隧道留到永远。
+		slog.Warn("usb discovery empty with active tunnels, counting misses")
+	}
+	tunneled := make([]string, 0, len(m.procs))
+	for udid := range m.procs {
+		tunneled = append(tunneled, udid)
+	}
+	for _, udid := range usbTunnelsToDrop(usb, tunneled, m.misses, 2) {
+		if p := m.procs[udid]; p != nil && p.cmd.Process != nil {
 			_ = p.cmd.Process.Signal(os.Interrupt)
 		}
 		delete(m.procs, udid)
-		delete(m.misses, udid)
 	}
 	bin := iproxyBin()
 	if bin == "" {
