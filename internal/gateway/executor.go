@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"net/url"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,7 +129,9 @@ type Executor struct {
 	queues  map[string]chan TaskDispatch
 	workers map[string]bool
 	cancel  map[string]chan struct{}
-	busy    map[string]bool
+	// earlyCancel 记录 Cancel 早于 Submit 到达的 task_id（短 TTL），避免平台先推 cancel 后推 dispatch 时取消丢失。
+	earlyCancel map[string]time.Time
+	busy        map[string]bool
 
 	ReportQ  chan ItemResult
 	StatusQ  chan DeviceStatus
@@ -184,6 +186,7 @@ func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir str
 		queues:         map[string]chan TaskDispatch{},
 		workers:        map[string]bool{},
 		cancel:         map[string]chan struct{}{},
+		earlyCancel:    map[string]time.Time{},
 		busy:           map[string]bool{},
 		ReportQ:        make(chan ItemResult, 256),
 		StatusQ:        make(chan DeviceStatus, 256),
@@ -304,6 +307,13 @@ func (e *Executor) Submit(t TaskDispatch) {
 		return
 	}
 	e.mu.Lock()
+	e.pruneEarlyCancelLocked(e.now())
+	if _, cancelled := e.earlyCancel[t.TaskID]; cancelled {
+		delete(e.earlyCancel, t.TaskID)
+		e.mu.Unlock()
+		slog.Info("dispatch skipped: cancelled before submit", "task", t.TaskID, "udid", t.UDID)
+		return
+	}
 	if _, ok := e.cancel[t.TaskID]; ok {
 		e.mu.Unlock()
 		return
@@ -332,13 +342,35 @@ func (e *Executor) Submit(t TaskDispatch) {
 	}
 }
 
-// Cancel 收到 task:cancel。
+// earlyCancelTTL Cancel-before-Submit 负缓存保留时长（覆盖平台乱序推送窗口，避免永久挡住同 task 重推）。
+const earlyCancelTTL = 5 * time.Minute
+
+// Cancel 收到 task:cancel（幂等：重复取消同一 task 不 panic）。
+// 若 task 尚未 Submit，写入短 TTL 负缓存，后续 Submit 直接跳过，避免早到的 cancel 丢失。
 func (e *Executor) Cancel(taskID string) {
+	if taskID == "" {
+		return
+	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pruneEarlyCancelLocked(e.now())
 	ch := e.cancel[taskID]
-	e.mu.Unlock()
-	if ch != nil {
+	if ch == nil {
+		e.earlyCancel[taskID] = e.now()
+		return
+	}
+	select {
+	case <-ch: // 已关闭
+	default:
 		close(ch)
+	}
+}
+
+func (e *Executor) pruneEarlyCancelLocked(now time.Time) {
+	for id, at := range e.earlyCancel {
+		if now.Sub(at) > earlyCancelTTL {
+			delete(e.earlyCancel, id)
+		}
 	}
 }
 
@@ -509,6 +541,13 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	// 任务收口：无论正常结束/熔断/失联/预热截止，统一统计并上行 task:summary。
 	stopStatus, stopReason := taskDone, ""
 	defer func() { e.finishTask(env, t, start, stopStatus, stopReason) }()
+	// panic 时仍走 finishTask 收口，并避免打挂 per-UDID worker（否则 workers 标记残留导致该机队列永久卡住）。
+	defer func() {
+		if r := recover(); r != nil {
+			stopStatus, stopReason = "panic", fmt.Sprintf("processTask panic: %v", r)
+			slog.Error("processTask panicked", "task", t.TaskID, "udid", udid, "panic", r)
+		}
+	}()
 
 	ip := ""
 	port := 8100
@@ -563,7 +602,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	if maxFails <= 0 {
 		maxFails = 5
 	}
-	client := wda.NewClient(wdaBaseURLFor(udid, ip, port), 40*time.Second)
+	client := wda.NewClient(resolveWDABaseURL(udid, ip, port), 40*time.Second)
 	consecFails := 0
 	// 整单共用一条 WDA 会话：CreateSession 冷启动 WhatsApp 要十数秒，
 	// 每条都建/拆就会把竞品 1s 级连发打成 20s+。聊天列表路径已经复用会话。
@@ -641,7 +680,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
 				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
 			if status == "failed" {
-				if containsAny(errMsg, "not reachable", "connection", "timed out") {
+				if isUnreachableItemError(errMsg) {
 					slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
 					stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
 					return
@@ -706,7 +745,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
 				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
 			if status == "failed" {
-				if containsAny(errMsg, "not reachable", "connection", "timed out") {
+				if isUnreachableItemError(errMsg) {
 					stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
 					return
 				}
@@ -770,7 +809,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			if strings.Contains(errMsg, "占比控制") || strings.Contains(errMsg, "禁止给自己发送") {
 				continue
 			}
-			if containsAny(errMsg, "not reachable", "connection", "timed out") {
+			if isUnreachableItemError(errMsg) {
 				slog.Warn("device unreachable, stop task", "task", t.TaskID, "udid", udid)
 				stopStatus, stopReason = taskStopUnreach, "设备失联（WDA 不可达/超时），剩余明细待平台续发"
 				return
@@ -802,17 +841,25 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	}
 }
 
-// deviceReachable 任务开始前快速探活设备 WDA（USB 隧道优先，Wi-Fi 兜底）。
+// deviceReachable 任务开始前快速探活：活隧道优先，不通则回退 Wi-Fi（与 checkWDA 一致）。
+// 禁止只信 wdaBaseURLFor：拔线后死隧道短暂残留时会把本可走 Wi-Fi 的群发拒掉。
 func (e *Executor) deviceReachable(udid, ip string, port int) bool {
-	u, err := url.Parse(wdaBaseURLFor(udid, ip, port))
-	if err != nil {
+	if a := TunnelAddr(udid); a != "" {
+		host, portStr, err := net.SplitHostPort(a)
+		if err == nil {
+			p, _ := strconv.Atoi(portStr)
+			if CheckWDA(host, p, 4*time.Second).OK {
+				return true
+			}
+		}
+	}
+	if ip == "" {
 		return false
 	}
-	p, _ := strconv.Atoi(u.Port())
-	if p == 0 {
-		p = 8100
+	if port == 0 {
+		port = 8100
 	}
-	return CheckWDA(u.Hostname(), p, 4*time.Second).OK
+	return CheckWDA(ip, port, 4*time.Second).OK
 }
 
 func (e *Executor) sendChatList(client *wda.Client, content string, assist wda.SendAssist) (int, []string, error) {
@@ -988,22 +1035,48 @@ func (e *Executor) persisted(taskID, itemID string) bool {
 	return e.store.itemPersisted(taskID, itemID)
 }
 
+// persistItemAttempts 明细落盘重试次数（瞬时 SQLite busy/锁冲突常见）。
+const persistItemAttempts = 3
+
 // finishItem 落盘并上报单条明细（先落盘后上报，断网不丢）。
 // 发送计数在此单点收敛（sent/failed 均计入 metrics），保证落盘明细与统计永远一致。
+// 若多次落盘仍失败：大声报错、仍 best-effort 上报，但不记 metrics、不宣称已持久化（未落盘条目可被重推续发）。
 func (e *Executor) finishItem(r ItemResult) {
-	e.persistItem(r)
+	if err := e.persistItem(r); err != nil {
+		slog.Error("item persist failed after retries; reporting without disk persistence",
+			"task", r.TaskID, "item", r.ItemID, "status", r.Status, "error", err)
+		e.report(r)
+		return
+	}
 	if r.Status == "sent" || r.Status == "failed" {
 		e.recordMetric(r.Udid, r.TaskID, r.Status, r.Status == "sent" && r.NewSession)
 	}
 	e.report(r)
 }
 
-func (e *Executor) persistItem(r ItemResult) {
-	_ = e.store.putItem(r.TaskID, r.ItemID, itemRecord{
+func (e *Executor) persistItem(r ItemResult) error {
+	rec := itemRecord{
 		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
 		Udid: r.Udid, Serial: r.Serial, DeviceName: r.DeviceName, ConnType: r.ConnType,
 		Content: r.Content, ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
-	}, e.now())
+	}
+	var err error
+	for attempt := 1; attempt <= persistItemAttempts; attempt++ {
+		if e.store == nil {
+			err = errResultsStoreUnavailable
+		} else {
+			err = e.store.putItem(r.TaskID, r.ItemID, rec, e.now())
+		}
+		if err == nil {
+			return nil
+		}
+		slog.Error("item persist attempt failed",
+			"task", r.TaskID, "item", r.ItemID, "attempt", attempt, "error", err)
+		if attempt < persistItemAttempts {
+			time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
+		}
+	}
+	return err
 }
 
 // finishTask 任务收口：按已落盘明细统计，写 meta 并上行 task:summary（meta 落库后队列满可丢，重连补报）。
@@ -1232,36 +1305,87 @@ func (e *Executor) DeviceItems(udidFilter string, limit int) ([]DeviceItemGroup,
 }
 
 // ResendPersisted 重连后补报本地已持久化的明细与任务汇总（SQLite results.db）。
+// 优先未收口任务明细与最近记录；ReportQ/SummaryQ 满则停止并打明确日志，剩余留待下次重连续报，
+// 避免静默丢弃关键补报（协议仍为 at-least-once，不改变上行消息语义）。
 func (e *Executor) ResendPersisted() {
-	// 任务汇总（meta）
-	for _, t := range e.store.taskIDsByUpdate(0) { // 0 = 不限量
-		if s := e.readSummary(t.TaskID); s != nil {
-			select {
-			case e.SummaryQ <- *s:
-			default:
+	if e.store == nil {
+		slog.Error("resend skipped: results store unavailable")
+		return
+	}
+
+	unfinished := map[string]bool{}
+	tasks := e.store.taskIDsByUpdate(0) // 0 = 不限量（按更新时间倒序）
+	for _, t := range tasks {
+		if e.readSummary(t.TaskID) == nil {
+			unfinished[t.TaskID] = true
+		}
+	}
+
+	rows := e.store.recentItems(0)
+	var priority, rest []itemRow
+	for _, row := range rows {
+		if unfinished[row.TaskID] {
+			priority = append(priority, row)
+		} else {
+			rest = append(rest, row)
+		}
+	}
+	ordered := append(priority, rest...)
+
+	itemEnq, itemLeft := 0, 0
+	for i, row := range ordered {
+		r := e.itemResultFromRow(row)
+		select {
+		case e.ReportQ <- r:
+			itemEnq++
+		default:
+			itemLeft = len(ordered) - i
+			slog.Warn("resend: ReportQ full, stopping; remaining resume on next reconnect",
+				"enqueued", itemEnq, "remaining", itemLeft, "unfinished_first", len(priority))
+			goto summaries
+		}
+	}
+
+summaries:
+	sumEnq := 0
+	for i, t := range tasks {
+		s := e.readSummary(t.TaskID)
+		if s == nil {
+			continue
+		}
+		select {
+		case e.SummaryQ <- *s:
+			sumEnq++
+		default:
+			slog.Warn("resend: SummaryQ full, stopping; remaining resume on next reconnect",
+				"enqueued", sumEnq, "remaining_tasks", len(tasks)-i)
+			return
+		}
+	}
+	if itemLeft == 0 && itemEnq > 0 {
+		slog.Info("resend enqueued", "items", itemEnq, "summaries", sumEnq)
+	}
+}
+
+// itemResultFromRow 把落盘行转成上行明细；老记录缺 serial/device_name 时按 udid 从配置兜底。
+func (e *Executor) itemResultFromRow(row itemRow) ItemResult {
+	r := row.Record
+	serial, devName := r.Serial, r.DeviceName
+	if e.cfg != nil && r.Udid != "" {
+		if dev := e.cfg.Device(r.Udid); dev != nil {
+			if serial == "" {
+				serial = dev.Serial
+			}
+			if devName == "" {
+				devName = dev.Name
 			}
 		}
 	}
-	// 全部明细（老记录缺 serial/device_name 时按 udid 从配置兜底补全，保证上行字段完整）
-	for _, row := range e.store.recentItems(0) { // 0 = 不限量
-		r := row.Record
-		serial, devName := r.Serial, r.DeviceName
-		if e.cfg != nil && r.Udid != "" {
-			if dev := e.cfg.Device(r.Udid); dev != nil {
-				if serial == "" {
-					serial = dev.Serial
-				}
-				if devName == "" {
-					devName = dev.Name
-				}
-			}
-		}
-		e.report(ItemResult{
-			TaskID: row.TaskID, ItemID: row.ItemID,
-			Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
-			Udid: r.Udid, Serial: serial, DeviceName: devName, ConnType: r.ConnType, Content: r.Content,
-			ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
-		})
+	return ItemResult{
+		TaskID: row.TaskID, ItemID: row.ItemID,
+		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
+		Udid: r.Udid, Serial: serial, DeviceName: devName, ConnType: r.ConnType, Content: r.Content,
+		ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
 	}
 }
 
@@ -1273,6 +1397,20 @@ func transientWDAError(err error) bool {
 	}
 	return containsAny(err.Error(),
 		"not reachable", "connection", "timed out", "timeout", "deadline exceeded", "EOF")
+}
+
+// isUnreachableItemError 判定单条失败是否像设备/WDA 失联（应中止本任务、保留 pending 待续发）。
+// 避免裸匹配 "connection"/"timed out" 误伤业务文案导致整单群发被错误打断。
+func isUnreachableItemError(errMsg string) bool {
+	return containsAny(errMsg,
+		"not reachable",
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"deadline exceeded",
+		"Client.Timeout",
+		"EOF",
+	)
 }
 
 func containsAny(s string, subs ...string) bool {

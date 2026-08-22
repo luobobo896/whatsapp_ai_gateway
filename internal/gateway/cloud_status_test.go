@@ -155,3 +155,38 @@ func TestDeviceListReportSkipsIgnored(t *testing.T) {
 		t.Fatalf("report = %+v, want only u-keep", got)
 	}
 }
+
+// TestDeviceListReportSkipsOffline 云端 device_list 不得上报 offline 设备，
+// 否则云端会持续刷新 updated_at，幽灵设备无法进入删除宽限期。
+func TestDeviceListReportSkipsOffline(t *testing.T) {
+	g, wdaMgr, _ := newStatusTestGateway(t)
+	g.Cfg.Devices = []Device{
+		{UDID: "u-online", LastHealth: map[string]any{"ok": true}},
+		{UDID: "u-offline", LastHealth: map[string]any{"ok": false}},
+		{UDID: "u-busy", LastHealth: map[string]any{"ok": true}},
+	}
+	setWDA(t, wdaMgr, "u-online", true)
+	setWDA(t, wdaMgr, "u-offline", false)
+	setWDA(t, wdaMgr, "u-busy", true)
+	g.Exec.mu.Lock()
+	g.Exec.busy["u-busy"] = true
+	g.Exec.mu.Unlock()
+
+	got := g.deviceListReport()
+	status := map[string]string{}
+	for _, d := range got {
+		status[d["udid"].(string)] = d["wda_status"].(string)
+	}
+	if _, ok := status["u-offline"]; ok {
+		t.Fatalf("offline device must be skipped from device_list, got %+v", got)
+	}
+	if status["u-online"] != "online" {
+		t.Fatalf("u-online = %q, want online", status["u-online"])
+	}
+	if status["u-busy"] != "busy" {
+		t.Fatalf("u-busy = %q, want busy", status["u-busy"])
+	}
+	if len(got) != 2 {
+		t.Fatalf("report len=%d, want 2 (online+busy)", len(got))
+	}
+}

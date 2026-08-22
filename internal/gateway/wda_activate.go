@@ -71,6 +71,8 @@ func enableWifiLockdown(udid string) {
 		slog.Warn("enable wifi lockdown failed", "udid", shortOf(udid), "error", err)
 		return
 	}
+	// 给 usbmuxd 一点时间挂上 Network 条目；真正的等待在 wifi-runwda -wait-network。
+	time.Sleep(2 * time.Second)
 	slog.Info("wifi lockdown enabled", "udid", shortOf(udid))
 }
 

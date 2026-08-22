@@ -267,13 +267,19 @@ readLoop:
 		switch msg.Type {
 		case "task:dispatch":
 			var t TaskDispatch
-			_ = json.Unmarshal(msg.Payload, &t)
+			if err := json.Unmarshal(msg.Payload, &t); err != nil {
+				slog.Error("task:dispatch unmarshal failed, skipped", "error", err)
+				continue
+			}
 			g.Exec.Submit(t)
 		case "task:cancel":
 			var p struct {
 				TaskID string `json:"task_id"`
 			}
-			_ = json.Unmarshal(msg.Payload, &p)
+			if err := json.Unmarshal(msg.Payload, &p); err != nil {
+				slog.Error("task:cancel unmarshal failed, skipped", "error", err)
+				continue
+			}
 			g.Exec.Cancel(p.TaskID)
 		case "server:ack":
 			var ack struct {
@@ -333,8 +339,9 @@ func pump[T any](ctx context.Context, conn *websocket.Conn, q <-chan T, typ stri
 }
 
 func (g *Gateway) deviceListReport() []map[string]any {
-	// 与 Web 设备列表一致：已配置设备始终上报（USB 直连 / Wi-Fi 在线 / 离线），
-	// 离线状态由 wda_status 表达；拔掉 USB 后设备不消失。
+	// 云端 device_list 只上报可用设备（online/busy）。offline 设备不进入列表，
+	// 由云端按「本网关已拥有但本次未出现」标记离线并在宽限期后物理删除，避免幽灵设备。
+	// 单次 offline 仍可通过 device:status 上报一次；不要靠 device_list 反复刷 offline。
 	usb := Discover()
 	usbSet := map[string]bool{}
 	for _, d := range usb {
@@ -347,6 +354,10 @@ func (g *Gateway) deviceListReport() []map[string]any {
 			continue
 		}
 		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
+		status := g.deviceCloudStatus(d, attached)
+		if status == "offline" {
+			continue
+		}
 		conn := "wifi"
 		if attached {
 			conn = "usb"
@@ -354,7 +365,7 @@ func (g *Gateway) deviceListReport() []map[string]any {
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ios_version": d.IOSVersion, "wda_ip": d.IP, "wda_port": d.Port,
-			"conn_type": conn, "wda_status": g.deviceCloudStatus(d, attached), "whatsapp_version": "",
+			"conn_type": conn, "wda_status": status, "whatsapp_version": "",
 		})
 	}
 	return out

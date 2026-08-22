@@ -42,9 +42,10 @@ func wifiReachable(dev *Device) bool {
 	return exec.CommandContext(ctx, "ping", pingArgs(dev.IP)...).Run() == nil
 }
 
-// reactivateDecision 是否应重激活：健康失败 + 允许自动重激活 + 未在运行 + USB 在线。
-func reactivateDecision(healthy, autoReactivate, running, usbAttached bool) bool {
-	return !healthy && autoReactivate && !running && usbAttached
+// reactivateDecision 是否应重激活：健康失败 + 允许自动重激活 + 主机未托管进程 + 通道可达。
+// 通道可达 = USB 或 Wi-Fi（新旧机型同一规则）；存活看机上 /status，不把 USB 当前提。
+func reactivateDecision(healthy, autoReactivate, running, channelReachable bool) bool {
+	return !healthy && autoReactivate && !running && channelReachable
 }
 
 // WatchdogLoop 逐台健康检查、自动重激活、网络跟随、自动配 IP。
@@ -151,23 +152,17 @@ func (g *Gateway) watchOnce() {
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
 		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID) || TunnelAddr(dev.UDID) != "", errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
-			// 40 位 UDID 不能在无 USB 时 *拉起* WDA（无 CoreDevice 无线配对）。
-			// 已激活的 XCTest 可以拔线后走 Wi-Fi :8100；这里只跳过重拉起，不改写健康态。
-			if cannotLaunchWDAWithoutUSB(dev.UDID, usbConnected(dev.UDID)) {
-				if prevOK {
-					slog.Warn("legacy device unplugged, skip relaunch; probe Wi-Fi WDA next rounds",
-						"udid", dev.UDID[:8], "ip", dev.IP)
-				}
-				continue
-			}
-			if !usbConnected(dev.UDID) && !wifiReachable(dev) {
-				// 设备物理离线（USB 未接 且 WiFi 也不可达）：跳过重激活，避免 xcodebuild 反复失败。
+			// 拔 USB 只拆 iproxy 隧道，不主动 Stop WDA。存活看机上 /status；
+			// 重拉起时 USB / Wi-Fi 任一可达即可（含 40 位 UDID 老机型）。
+			usbOK := usbConnected(dev.UDID)
+			wifiOK := wifiReachable(dev)
+			if !reactivateDecision(false, true, false, usbOK || wifiOK) {
 				if prevOK {
 					slog.Warn("device offline and not reachable, skip reactivation",
-						"udid", dev.UDID[:8], "ip", dev.IP)
+						"udid", shortOf(dev.UDID), "ip", dev.IP)
 				}
-				if h.Error == "" || !strings.Contains(h.Error, "USB") {
-					dev.LastHealth["error"] = "device offline: network unreachable and not USB-attached; skipped reactivation (reconnect USB/Wi-Fi)"
+				if h.Error == "" {
+					dev.LastHealth["error"] = "device offline: no USB and Wi-Fi unreachable; skipped reactivation"
 				}
 				continue
 			}
@@ -190,14 +185,14 @@ func (g *Gateway) watchOnce() {
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
-// cannotLaunchWDAWithoutUSB：40 位 UDID 没有无线开发配对，只能插着 USB 首次拉起。
-// 保活不是这个函数的职责：/status 通了就继续用，不要因拔线去重跑 xcodebuild。
-func cannotLaunchWDAWithoutUSB(udid string, usb bool) bool {
-	return udid != "" && !strings.Contains(udid, "-") && !usb
+// channelReachableForRelaunch：USB 或 Wi-Fi 任一可达即可尝试重拉起（新旧机型同一规则）。
+// WDA 是否存活不看 USB，只看机上 HTTP /status（见 checkWDA / wdaAppearsRunning）。
+func channelReachableForRelaunch(usbAttached, wifiOK bool) bool {
+	return usbAttached || wifiOK
 }
 
-// checkWDA 探测设备 WDA 健康：USB 隧道优先（不依赖手机 Wi-Fi），
-// 无隧道或隧道不通时回退 Wi-Fi IP。
+// checkWDA 探测设备 WDA 健康：有 USB 隧道时先走隧道，失败或无隧道则走 Wi-Fi IP。
+// 拔线拆除隧道后必须仍能靠 Wi-Fi 判活，不得把 USB 当作存活前提。
 func (g *Gateway) checkWDA(dev *Device) WDAHealth {
 	if dev == nil {
 		return WDAHealth{OK: false, Error: "nil device"}

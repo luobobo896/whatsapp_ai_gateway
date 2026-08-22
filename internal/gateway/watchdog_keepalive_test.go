@@ -6,17 +6,28 @@ import (
 	"testing"
 )
 
-func TestCannotLaunchWDAWithoutUSB(t *testing.T) {
-	legacy := "4886579a97a96bad83b527862bab409b5a07c741"
-	modern := "00008120-000865D90A10C01E"
-	if !cannotLaunchWDAWithoutUSB(legacy, false) {
-		t.Fatal("40-hex without USB cannot start WDA")
+func TestChannelReachableForRelaunch(t *testing.T) {
+	if !channelReachableForRelaunch(true, false) {
+		t.Fatal("USB alone is enough to relaunch")
 	}
-	if cannotLaunchWDAWithoutUSB(legacy, true) {
-		t.Fatal("40-hex with USB can start WDA")
+	if !channelReachableForRelaunch(false, true) {
+		t.Fatal("Wi-Fi alone is enough to relaunch (incl. 40-hex devices)")
 	}
-	if cannotLaunchWDAWithoutUSB(modern, false) {
-		t.Fatal("iOS 16+ can start over Wi-Fi pairing; do not block")
+	if channelReachableForRelaunch(false, false) {
+		t.Fatal("no USB and no Wi-Fi must not relaunch")
+	}
+}
+
+func TestReactivateDecisionIgnoresUSBOnlyAssumption(t *testing.T) {
+	// 健康失败 + 自动重激活 + 未在跑 + 仅 Wi-Fi 可达 → 应重激活（老机型也一样）
+	if !reactivateDecision(false, true, false, true) {
+		t.Fatal("reachable channel should allow reactivate")
+	}
+	if reactivateDecision(false, true, false, false) {
+		t.Fatal("unreachable must not reactivate")
+	}
+	if reactivateDecision(true, true, false, true) {
+		t.Fatal("healthy must not reactivate")
 	}
 }
 

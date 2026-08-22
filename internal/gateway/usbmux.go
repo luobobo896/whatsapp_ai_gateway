@@ -10,11 +10,12 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"time"
 )
 
-// USB 隧道：USB 直连设备的 WDA 流量经 libimobiledevice 的 iproxy 转发到手机 8100，
-// 不再依赖手机 Wi-Fi（iOS 锁屏 Wi-Fi 休眠/DHCP 变更会造成"USB 在、WDA 活、
-// 网络不通"的假在线）。每个 USB 在线设备监听 127.0.0.1 随机本地端口。
+// USB 隧道：USB 直连时经 iproxy 转发到手机 8100（锁屏 Wi-Fi 休眠时更稳）。
+// 拔线只拆除隧道进程，绝不 Stop 机上 WDA；之后由 wdaBaseURLFor / checkWDA 回退 Wi-Fi。
+// 每个 USB 在线设备监听 127.0.0.1 随机本地端口。
 
 // usbTunnelProc 一台设备的 iproxy 进程。
 type usbTunnelProc struct {
@@ -93,6 +94,7 @@ func usbTunnelsToDrop(usb map[string]bool, tunneled []string, misses map[string]
 }
 
 // EnsureUSBTunnels 按当前 USB 设备与目标端口对账隧道（看护循环每轮调用）。
+// 拔线只停 iproxy，不触碰 WDA 激活进程 / 机上 XCTest。
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
 func EnsureUSBTunnels(rawPorts map[string]int) {
 	udids := USBUDIDs()
@@ -169,6 +171,7 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 
 // TunnelAddr 返回某 UDID 的本地隧道地址（"127.0.0.1:port"）；无可用隧道返回空串。
 func TunnelAddr(udid string) string {
+	udid = normalizeUDID(udid)
 	m := usbTunnels
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -183,11 +186,35 @@ func TunnelAddr(udid string) string {
 	return ""
 }
 
-// wdaBaseURLFor 解析某设备的 WDA 访问地址：USB 隧道优先（不依赖手机 Wi-Fi），
-// 无隧道回退 Wi-Fi IP:port。
+// wdaBaseURLFor：USB 隧道优先；无隧道（含已拔线）回退 Wi-Fi IP:port。
 func wdaBaseURLFor(udid, ip string, port int) string {
 	if a := TunnelAddr(udid); a != "" {
 		return "http://" + a
+	}
+	return fmt.Sprintf("http://%s:%d", ip, port)
+}
+
+// resolveWDABaseURL 选一条当前能答 /status 的地址：活着的 USB 隧道优先，否则 Wi-Fi。
+// 拔线后 iproxy 可能短暂仍登记在表里但已不通；不能像 wdaBaseURLFor 那样死磕隧道，
+// 否则群发会在看护回退 Wi-Fi 之前被拒。
+func resolveWDABaseURL(udid, ip string, port int) string {
+	if a := TunnelAddr(udid); a != "" {
+		host, portStr, err := net.SplitHostPort(a)
+		if err == nil {
+			p, _ := strconv.Atoi(portStr)
+			if p == 0 {
+				p = 8100
+			}
+			if CheckWDA(host, p, 2*time.Second).OK {
+				return "http://" + a
+			}
+		}
+	}
+	if ip == "" {
+		return ""
+	}
+	if port == 0 {
+		port = 8100
 	}
 	return fmt.Sprintf("http://%s:%d", ip, port)
 }

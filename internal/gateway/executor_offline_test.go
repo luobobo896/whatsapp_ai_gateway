@@ -115,3 +115,44 @@ func TestResendPersistedFieldsComplete(t *testing.T) {
 		t.Fatalf("i2 not enriched from config: %+v", r)
 	}
 }
+
+
+// TestCancelIdempotent 重复 task:cancel 同一 task 不得 panic（平台重推 cancel 常见）。
+func TestCancelIdempotent(t *testing.T) {
+	e := NewExecutor(&Config{Devices: []Device{{UDID: "udid-c", IP: ""}}}, nil, nil, t.TempDir())
+	// 人为放入 cancel 通道，模拟已 Submit 尚未跑完。
+	ch := make(chan struct{})
+	e.mu.Lock()
+	e.cancel["task-c"] = ch
+	e.mu.Unlock()
+	e.Cancel("task-c")
+	e.Cancel("task-c") // 第二次不得 panic
+	e.Cancel("missing")
+	select {
+	case <-ch:
+	default:
+		t.Fatal("cancel channel should be closed")
+	}
+}
+
+// TestIsUnreachableItemError 失联判定：真实传输类命中，裸 "connection" 业务文案不命中。
+func TestIsUnreachableItemError(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"wda not reachable: dial tcp: i/o timeout", true},
+		{"wda not reachable: context deadline exceeded", true},
+		{"Get http://x: Client.Timeout exceeded while awaiting headers", true},
+		{"connection refused", true},
+		{"connection reset by peer", true},
+		{"no connection to chat server", false}, // 裸 connection 不应整单中止
+		{"element timed out waiting", false},
+		{"聊天列表未找到好友会话", false},
+	}
+	for _, c := range cases {
+		if got := isUnreachableItemError(c.in); got != c.want {
+			t.Fatalf("%q: got %v want %v", c.in, got, c.want)
+		}
+	}
+}

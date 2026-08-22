@@ -133,3 +133,18 @@ Macaca **没有**「激活后拔 USB、调试会话改走无线」的实现。�
 7 Plus（`59524996…` / `192.168.10.236`）当时只有 USB id=13，没有 Network。Bonjour `_apple-mobdev2` 在广播，`:62078` 开着，但 usbmuxd 未挂上无线条目。该机若现在拔线，仍会拆 USB DTX。
 
 激活路径：有 `wifi-runwda` 就走它（有 Network 用 Network，没有则 USB）。`build-dmg.sh` 会把 `tools/wifi-runwda` 打进包。
+
+## 2026-08-23 双通道规则（按产品要求收口）
+
+- 拔 USB：只拆 `iproxy` 隧道，**不** `Stop` 机上 WDA；探活/发消息回退 `http://手机Wi-Fi:8100`。
+- 存活判定：机上 `/status`（或主机激活进程仍在），**不以 USB 在线为前提**；40 位 UDID 与新机型同一套。
+- 重拉起：USB **或** Wi-Fi 可达即可尝试（已去掉「老机型无 USB 必跳过」）。
+- 激活：优先 `wifi-lockdown` + `wifi-runwda`（默认等待 usbmux `Network` 最多 45s），再 `ios runwda`；无 Network 时回退 USB 并打 WARN。
+
+## 2026-08-23 00:42 审计补丁（群发死隧道窗口）
+
+看护 `checkWDA` 已隧道→Wi-Fi 回退，但群发曾只走 `wdaBaseURLFor`：拔线后死隧道短暂残留会拒单。
+
+已补：`resolveWDABaseURL` + `deviceReachable`/`NewClient` 对齐；`TunnelAddr` 查表前 `normalizeUDID`。
+
+注意：App 包内 `wifi-runwda` 若仍是旧包则无 `-wait-network`，需重打 DMG 或同步 `tools/wifi-runwda`。无 usbmux Network 时激活仍 USB 回退，拔线会拆 XCTest。

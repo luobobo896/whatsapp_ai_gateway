@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPickDevicePrefersNetwork(t *testing.T) {
 	udid := "4886579a97a96bad83b527862bab409b5a07c741"
@@ -39,5 +42,35 @@ func TestMuxPortToTCP(t *testing.T) {
 	}
 	if muxPortToTCP(40445) != 64925 {
 		t.Fatalf("40445 -> %d want 64925", muxPortToTCP(40445))
+	}
+}
+
+func TestWaitPreferNetworkEventually(t *testing.T) {
+	udid := "4886579a97a96bad83b527862bab409b5a07c741"
+	n := 0
+	list := func() []muxDevice {
+		n++
+		if n < 3 {
+			return []muxDevice{{ID: 9, UDID: udid, Type: "USB"}}
+		}
+		return []muxDevice{
+			{ID: 9, UDID: udid, Type: "USB"},
+			{ID: 12, UDID: udid, Type: "Network"},
+		}
+	}
+	got, ok := waitPreferNetwork(udid, 2*time.Second, list)
+	if !ok || got.Type != "Network" || got.ID != 12 {
+		t.Fatalf("got %#v ok=%v after %d polls", got, ok, n)
+	}
+}
+
+func TestWaitPreferNetworkUSBFallback(t *testing.T) {
+	udid := "5952499671171c733d6ef1345d4548a782686804"
+	list := func() []muxDevice {
+		return []muxDevice{{ID: 13, UDID: udid, Type: "USB"}}
+	}
+	got, ok := waitPreferNetwork(udid, 200*time.Millisecond, list)
+	if !ok || got.Type != "USB" {
+		t.Fatalf("got %#v ok=%v", got, ok)
 	}
 }

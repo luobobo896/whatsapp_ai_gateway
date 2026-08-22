@@ -65,7 +65,7 @@ func TestWdaBaseURLForFallback(t *testing.T) {
 }
 
 func TestWdaBaseURLForPrefersUSBTunnel(t *testing.T) {
-	udid := "test-tunnel-udid"
+	udid := "aabbccddeeff00112233445566778899aabbccdd"
 	usbTunnels.mu.Lock()
 	usbTunnels.procs[udid] = &usbTunnelProc{port: 63344, done: make(chan struct{})}
 	usbTunnels.mu.Unlock()
@@ -76,5 +76,42 @@ func TestWdaBaseURLForPrefersUSBTunnel(t *testing.T) {
 	})
 	if got := wdaBaseURLFor(udid, "192.168.10.237", 8100); got != "http://127.0.0.1:63344" {
 		t.Fatalf("tunnel first, got %s", got)
+	}
+}
+
+func TestResolveWDABaseURLFallsBackWhenTunnelDead(t *testing.T) {
+	udid := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	done := make(chan struct{}) // open: TunnelAddr still lists it
+	usbTunnels.mu.Lock()
+	usbTunnels.procs[udid] = &usbTunnelProc{port: 1, done: done} // nothing listens on :1
+	usbTunnels.mu.Unlock()
+	t.Cleanup(func() {
+		usbTunnels.mu.Lock()
+		delete(usbTunnels.procs, udid)
+		usbTunnels.mu.Unlock()
+	})
+	// 死隧道不得挡住 Wi-Fi 地址选择（探活由调用方再做；这里只验证回退选址）。
+	got := resolveWDABaseURL(udid, "192.168.10.236", 8100)
+	if got != "http://192.168.10.236:8100" {
+		t.Fatalf("want wifi fallback, got %s", got)
+	}
+	if got := wdaBaseURLFor(udid, "192.168.10.236", 8100); got != "http://127.0.0.1:1" {
+		t.Fatalf("wdaBaseURLFor still prefers listed tunnel, got %s", got)
+	}
+}
+
+func TestTunnelAddrNormalizesHyphenUDID(t *testing.T) {
+	key := normalizeUDID("00008120-001a2b3c4d5e6f70")
+	done := make(chan struct{})
+	usbTunnels.mu.Lock()
+	usbTunnels.procs[key] = &usbTunnelProc{port: 61234, done: done}
+	usbTunnels.mu.Unlock()
+	t.Cleanup(func() {
+		usbTunnels.mu.Lock()
+		delete(usbTunnels.procs, key)
+		usbTunnels.mu.Unlock()
+	})
+	if got := TunnelAddr("00008120-001a2b3c4d5e6f70"); got != "127.0.0.1:61234" {
+		t.Fatalf("lowercase lookup missed normalized tunnel: %q", got)
 	}
 }

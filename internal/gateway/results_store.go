@@ -3,6 +3,7 @@ package gateway
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,10 @@ import (
 
 	_ "modernc.org/sqlite" // 纯 Go SQLite 驱动（无 CGO）
 )
+
+// errResultsStoreUnavailable 在 store 未打开（mkdir/open/init 失败）时由写路径返回，
+// 避免调用方把「未落盘」误当成成功。
+var errResultsStoreUnavailable = errors.New("results store unavailable")
 
 // resultsStore 任务明细/汇总/统计的 SQLite 持久化（<resultsDir>/results.db），
 // 替代旧的 results/<task_id>.json、<task_id>.meta.json、metrics.json 文件。
@@ -135,7 +140,7 @@ func (s *resultsStore) itemPersisted(taskID, itemID string) bool {
 
 func (s *resultsStore) putItem(taskID, itemID string, r itemRecord, at time.Time) error {
 	if s == nil {
-		return nil
+		return errResultsStoreUnavailable
 	}
 	b, err := json.Marshal(r)
 	if err != nil {
@@ -268,7 +273,7 @@ func (s *resultsStore) recentItems(limit int) []itemRow {
 
 func (s *resultsStore) putMeta(sum TaskSummary) error {
 	if s == nil {
-		return nil
+		return errResultsStoreUnavailable
 	}
 	b, err := json.Marshal(sum)
 	if err != nil {
