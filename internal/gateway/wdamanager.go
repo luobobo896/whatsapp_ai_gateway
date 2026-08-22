@@ -91,6 +91,23 @@ func (m *WDAManager) StartedSecondsAgo(udid string) float64 {
 	return time.Since(t).Seconds()
 }
 
+// findExistingXctestrun 在 derived 里找已编过的 xctestrun。
+// 优先不含 .runtime. 的模板（Activate 会按 UDID 再拷一份）。
+func findExistingXctestrun(derived string) string {
+	hits, _ := filepath.Glob(filepath.Join(derived, "Build", "Products", "WebDriverAgentRunner_iphoneos*.xctestrun"))
+	var fallback string
+	for _, h := range hits {
+		if strings.Contains(filepath.Base(h), ".runtime.") {
+			if fallback == "" {
+				fallback = h
+			}
+			continue
+		}
+		return h
+	}
+	return fallback
+}
+
 // ensureBuilt 构建一次 WDA，产物复用。
 func (m *WDAManager) ensureBuilt() (string, error) {
 	// buildMu 只串行化构建本身；持有期间 mu 上的 Running/Stop/Activate 照常工作。
@@ -100,6 +117,11 @@ func (m *WDAManager) ensureBuilt() (string, error) {
 		if _, err := os.Stat(m.xctestrun); err == nil {
 			return m.xctestrun, nil
 		}
+	}
+	if existing := findExistingXctestrun(m.derivedData); existing != "" {
+		m.xctestrun = existing
+		slog.Info("reuse existing WDA product", "xctestrun", existing)
+		return existing, nil
 	}
 	slog.Info("WDA product not built, running build-for-testing (may take minutes)")
 	args := []string{
@@ -120,13 +142,13 @@ func (m *WDAManager) ensureBuilt() (string, error) {
 	cmd := exec.Command("xcodebuild", args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("build-for-testing: %w", err)
+		return "", fmt.Errorf("build-for-testing: %w（Xcode 找不到 iOS 目标；若本机缺 iOS Platform，应复用已有 xctestrun，不要反复点激活）", err)
 	}
-	hits, _ := filepath.Glob(filepath.Join(m.derivedData, "Build", "Products", "WebDriverAgentRunner_iphoneos*.xctestrun"))
-	if len(hits) == 0 {
+	existing := findExistingXctestrun(m.derivedData)
+	if existing == "" {
 		return "", fmt.Errorf("xctestrun not found after build")
 	}
-	m.xctestrun = hits[0]
+	m.xctestrun = existing
 	slog.Info("WDA build finished", "xctestrun", m.xctestrun)
 	return m.xctestrun, nil
 }

@@ -1,0 +1,14 @@
+{
+  "wda": "http://127.0.0.1:18100",
+  "phone": "15213472085",
+  "content": "hello nice to see you",
+  "title": "‪+86 152 1347 2085‬",
+  "new_session": false,
+  "status": "sent",
+  "started": "2026-08-22T15:08:46+08:00",
+  "open_ms": 19930,
+  "send_ms": 4794,
+  "total_ms": 26752,
+  "shot_open": "/tmp/wa-shot-20260822/02-opened.png",
+  "shot_sent": "/tmp/wa-shot-20260822/03-sent.png"
+}

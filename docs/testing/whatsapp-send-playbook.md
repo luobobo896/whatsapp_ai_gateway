@@ -1,7 +1,12 @@
 # WhatsApp 发送：已验证步骤（禁止再犯）
 
 最后核验：2026-08-22，iPhone 7 Plus / iOS 15.8.8 / 普通 WhatsApp（非 Business）。  
-成功证据：`wda-probe -phone 15213472085 -text 你好`，5.895s，`err=<nil>`，**未走模型**。
+成功证据：
+
+- 单条：`wda-probe -phone 15213472085 -text 你好`，5.895s（Wi‑Fi `:8100`）
+- 连发：USB `127.0.0.1:18100`，`-count 3`，整单复用会话，约 6s/条，见 [2026-08-22-smooth-batch-mac.md](./2026-08-22-smooth-batch-mac.md)
+
+**未走模型。** 群发不要每条 `CreateSession`（冷启动十数秒）。
 
 ## 成功步骤（下次按这个做）
 
@@ -31,8 +36,10 @@
 ## 复验命令
 
 ```bash
-# WDA 已在手机 Wi-Fi :8100 时
-go run ./cmd/wda-probe -wda http://<phone-ip>:8100 -phone 15213472085 -text '你好' -send
+# USB 隧道优先（锁屏 Wi-Fi 会掉）
+go run ./cmd/wda-probe -wda http://127.0.0.1:18100 -phone 15213472085 \
+  -text 'hello nice to see you' -send -count 3 -interval 1
 ```
 
-实现落在 `internal/wda/whatsapp.go`：`openTargetChat` 先 `chatOpenedFor`，命中就发。
+实现：`OpenChatOnSession` 复用会话；`openTargetChat` 先 `chatOpenedFor`，命中就发。  
+Windows 当晚步骤：[windows-night-runbook.md](../deployment/windows-night-runbook.md)。

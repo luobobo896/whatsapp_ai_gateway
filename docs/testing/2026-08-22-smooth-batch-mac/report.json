@@ -1,0 +1,44 @@
+{
+  "wda": "http://127.0.0.1:18100",
+  "phone": "15213472085",
+  "content": "hello nice to see you",
+  "title": "‪+86 152 1347 2085‬",
+  "new_session": false,
+  "status": "sent",
+  "started": "2026-08-22T15:22:09+08:00",
+  "session_ms": 16,
+  "open_ms": 1019,
+  "send_ms": 4732,
+  "total_ms": 20315,
+  "shot_open": "/Users/hanson/work/个人文档/whatsapp_ai_gateway/docs/testing/2026-08-22-smooth-batch-mac/02-opened.png",
+  "shot_sent": "/Users/hanson/work/个人文档/whatsapp_ai_gateway/docs/testing/2026-08-22-smooth-batch-mac/03-sent.png",
+  "items": [
+    {
+      "n": 1,
+      "content": "hello nice to see you #1",
+      "status": "sent",
+      "new_session": false,
+      "open_ms": 1019,
+      "send_ms": 4604,
+      "total_ms": 6437
+    },
+    {
+      "n": 2,
+      "content": "hello nice to see you #2",
+      "status": "sent",
+      "new_session": false,
+      "open_ms": 1065,
+      "send_ms": 4583,
+      "total_ms": 5648
+    },
+    {
+      "n": 3,
+      "content": "hello nice to see you #3",
+      "status": "sent",
+      "new_session": false,
+      "open_ms": 1253,
+      "send_ms": 4732,
+      "total_ms": 5985
+    }
+  ]
+}

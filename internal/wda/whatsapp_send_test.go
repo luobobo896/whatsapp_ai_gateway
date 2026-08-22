@@ -26,7 +26,8 @@ func (f *fakeWDA) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		isInput := strings.Contains(body.Value, "TextView")
-		isTitle := strings.Contains(body.Value, "StaticText") || strings.Contains(body.Value, "ChatTitleView")
+		isTitle := strings.Contains(body.Value, "StaticText") || strings.Contains(body.Value, "ChatTitleView") ||
+			strings.Contains(body.Value, "ConversationHeader") || strings.Contains(body.Value, "TitleLabel")
 		if isInput || isTitle {
 			id := "input-1"
 			if isTitle {
@@ -151,6 +152,33 @@ func TestChatOpenedForTitleMatch(t *testing.T) {
 	defer srv8.Close()
 	if chatOpenedFor(context.Background(), c, "s1", "8615213472085", 400*time.Millisecond, "") {
 		t.Fatal("empty title should wait and fail, not accept")
+	}
+}
+
+// TestOpenChatOnSessionDoesNotCreate 已有会话时不得再 POST /session（群发复用）。
+func TestOpenChatOnSessionDoesNotCreate(t *testing.T) {
+	var created atomic.Int64
+	f := &fakeWDA{}
+	f.text.Store("+86 152 1347 2085")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/session" && r.Method == http.MethodPost {
+			created.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"value": map[string]any{"sessionId": "s-new"}})
+			return
+		}
+		f.handler(w, r)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, 5*time.Second)
+	isNew, err := OpenChatOnSession(context.Background(), c, "s1", WhatsAppBundleID, "15213472085", nil)
+	if err != nil {
+		t.Fatalf("OpenChatOnSession: %v", err)
+	}
+	if isNew {
+		t.Fatal("existing chat should not be new session")
+	}
+	if created.Load() != 0 {
+		t.Fatalf("OpenChatOnSession posted /session %d times, want 0", created.Load())
 	}
 }
 

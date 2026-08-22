@@ -144,55 +144,44 @@ func SendMessageToPhoneInfo(ctx context.Context, client *Client, phone, content 
 	return isNew, TypeAndSend(ctx, client, sid, content, assist)
 }
 
-// OpenChatForSend 创建 WhatsApp 会话并打开目标会话（不发送）。返回会话 id 与该会话
-// 是否为新会话；调用方发送后需自行 DeleteSession。
-func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid string, isNew bool, err error) {
-	digits := ""
-	if phone != "" {
-		if digits, err = normalizeMobilePhone(phone); err != nil {
-			return "", false, err
-		}
+// CreateWhatsAppSession 启动 WhatsApp（普通或 Business）并建立一条可复用的 WDA 会话。
+// 群发应整单共用这一条，不要每条 Create/Delete（冷启动一次十数秒，竞品之所以丝滑是 XCTest 常驻）。
+func CreateWhatsAppSession(ctx context.Context, client *Client) (sid, bid string, err error) {
+	return createWhatsAppSession(ctx, client)
+}
+
+// OpenChatOnSession 在已有 WDA 会话里打开目标号码，不新建、不删除会话。
+func OpenChatOnSession(ctx context.Context, client *Client, sid, bid, phone string, assist SendAssist) (isNew bool, err error) {
+	if strings.TrimSpace(sid) == "" {
+		return false, fmt.Errorf("empty wda session")
 	}
-	sid, bid, err := createWhatsAppSession(ctx, client)
+	if bid == "" {
+		bid = WhatsAppBundleID
+	}
+	if strings.TrimSpace(phone) == "" {
+		return false, openDefaultChat(ctx, client, sid)
+	}
+	digits, err := normalizeMobilePhone(phone)
 	if err != nil {
-		return "", false, fmt.Errorf("create wda session: %w", err)
+		return false, err
 	}
-	if digits != "" {
-		isNew, err = openTargetChat(ctx, client, sid, bid, digits, nil)
-		if err != nil {
-			return sid, false, err
-		}
-	} else {
-		if err := openDefaultChat(ctx, client, sid); err != nil {
-			return sid, false, err
-		}
-	}
-	return sid, isNew, nil
+	return openTargetChat(ctx, client, sid, bid, digits, assist)
+}
+
+// OpenChatForSend 创建 WhatsApp 会话并打开目标会话（不发送）。返回会话 id 与该会话
+// 是否为新会话；调用方发送后需自行 DeleteSession。单条探针用；群发请复用 CreateWhatsAppSession。
+func OpenChatForSend(ctx context.Context, client *Client, phone string) (sid string, isNew bool, err error) {
+	return OpenChatForSendWithAssist(ctx, client, phone, nil)
 }
 
 // OpenChatForSendWithAssist 同 OpenChatForSend，会话校验失败时用视觉模型判断界面并尝试恢复。
 func OpenChatForSendWithAssist(ctx context.Context, client *Client, phone string, assist SendAssist) (sid string, isNew bool, err error) {
-	digits := ""
-	if phone != "" {
-		if digits, err = normalizeMobilePhone(phone); err != nil {
-			return "", false, err
-		}
-	}
 	sid, bid, err := createWhatsAppSession(ctx, client)
 	if err != nil {
 		return "", false, fmt.Errorf("create wda session: %w", err)
 	}
-	if digits != "" {
-		isNew, err = openTargetChat(ctx, client, sid, bid, digits, assist)
-		if err != nil {
-			return sid, false, err
-		}
-	} else {
-		if err := openDefaultChat(ctx, client, sid); err != nil {
-			return sid, false, err
-		}
-	}
-	return sid, isNew, nil
+	isNew, err = OpenChatOnSession(ctx, client, sid, bid, phone, assist)
+	return sid, isNew, err
 }
 
 // TypeAndSend 在已打开的会话中输入内容并点发送（发送键找不到时可用视觉/LLM 兜底）。

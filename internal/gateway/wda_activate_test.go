@@ -1,10 +1,38 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestFindExistingXctestrunPrefersTemplate(t *testing.T) {
+	dir := t.TempDir()
+	prod := filepath.Join(dir, "Build", "Products")
+	if err := os.MkdirAll(prod, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template := filepath.Join(prod, "WebDriverAgentRunner_iphoneos18.5-arm64.xctestrun")
+	runtimeFile := template + ".59524996.runtime.xctestrun"
+	if err := os.WriteFile(template, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeFile, []byte("rt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := findExistingXctestrun(dir)
+	if got != template {
+		t.Fatalf("got %q want template %q", got, template)
+	}
+}
+
+func TestFindExistingXctestrunEmpty(t *testing.T) {
+	if got := findExistingXctestrun(t.TempDir()); got != "" {
+		t.Fatalf("empty derived want \"\", got %q", got)
+	}
+}
 
 func TestResolveActivator(t *testing.T) {
 	if got := resolveActivator("goios"); got != activatorGoIOS {
@@ -54,7 +82,7 @@ func TestTideviceArgs(t *testing.T) {
 	args := tideviceArgs(udid, "com.wda.WebRunner.xctrunner", 8200, "reported-udid")
 	want := []string{
 		"-u", udid, "xctest", "-B", "com.wda.WebRunner.xctrunner",
-		"--env", "USE_PORT=8200", "--env", "WDA_DEVICE_UDID=reported-udid",
+		"-e", "USE_PORT:8200", "-e", "WDA_DEVICE_UDID:reported-udid",
 	}
 	if len(args) != len(want) {
 		t.Fatalf("len=%d want %d: %#v", len(args), len(want), args)

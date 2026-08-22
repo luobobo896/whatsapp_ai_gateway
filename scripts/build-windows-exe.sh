@@ -7,7 +7,7 @@
 #   GOARCH=amd64|386|arm64   默认 amd64
 #   SKIP_TESTS=1             跳过 go test
 #
-# 产出：dist/windows-<arch>/gateway.exe + 使用说明.txt
+# 产出：dist/windows-<arch>/gateway.exe + wda-probe.exe + 使用说明.txt
 # 不打包 devices.json / data / 密钥。Windows 上的 Apple Devices、ios.exe、
 # iproxy 需另行安装，见产出目录里的说明。
 
@@ -39,6 +39,7 @@ fi
 echo "▶ [2/3] 交叉编译 GOOS=windows GOARCH=$ARCH"
 mkdir -p "$OUT/static"
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$EXE" ./cmd/gateway
+CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" -o "$OUT/wda-probe.exe" ./cmd/wda-probe
 cp "$ROOT/static/index.html" "$OUT/static/index.html"
 
 cat > "$OUT/使用说明.txt" <<EOF
@@ -57,6 +58,11 @@ WDA Farm Gateway ${VERSION} (Windows ${ARCH})
   2. iPhone 已配对、已开开发者模式、已信任开发者证书
   3. 手机上已安装签过名的 WebDriverAgentRunner（bundle 默认 com.wda.WebRunner.xctrunner）
   4. iOS 17+ 需要 wintun.dll（go-ios 隧道）
+
+连发探针（WDA 已在 127.0.0.1:18100 ready 时）：
+  wda-probe.exe -wda http://127.0.0.1:18100 -phone 15213472085 -text "hello nice to see you" -send -count 3 -interval 1
+
+当晚步骤见仓库 docs/deployment/windows-night-runbook.md。
 
 不要把 gateway.db、devices.json、云凭证打进分发包。
 EOF

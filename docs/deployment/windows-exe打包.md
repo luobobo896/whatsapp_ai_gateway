@@ -11,4 +11,6 @@ sh scripts/build-windows-exe.sh
 
 `modernc.org/sqlite` 是纯 Go，构建使用 `CGO_ENABLED=0`，不依赖 MinGW。
 
-Windows 主机上的 USB 发现 / 激活依赖另行安装的 Apple Devices + `ios.exe` / `iproxy`，不随本脚本打包（本机构没有已核验的 Windows 版 libimobiledevice 二进制）。详见产出目录 `使用说明.txt` 与 `docs/design/windows-wda-activation.md`。
+Windows 主机上的 USB 发现 / 激活依赖另行安装的 Apple Devices + `ios.exe` / `tidevice` / `iproxy`，不随本脚本打包（本机构没有已核验的 Windows 版 libimobiledevice 二进制）。
+
+当晚回家按 [windows-night-runbook.md](./windows-night-runbook.md) 验收。设计说明见 [windows-wda-activation.md](../design/windows-wda-activation.md)。

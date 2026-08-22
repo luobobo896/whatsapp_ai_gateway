@@ -107,12 +107,13 @@ func tideviceArgs(udid, bundleID string, port int, reportedUDID string) []string
 	if reportedUDID == "" {
 		reportedUDID = udid
 	}
+	// tidevice 的 -e/--env 格式是 KEY:VALUE（冒号），不是 go-ios 的 KEY=VALUE。
 	return []string{
 		"-u", udid,
 		"xctest",
 		"-B", bundleID,
-		"--env", "USE_PORT=" + strconv.Itoa(port),
-		"--env", "WDA_DEVICE_UDID=" + reportedUDID,
+		"-e", "USE_PORT:" + strconv.Itoa(port),
+		"-e", "WDA_DEVICE_UDID:" + reportedUDID,
 	}
 }
 

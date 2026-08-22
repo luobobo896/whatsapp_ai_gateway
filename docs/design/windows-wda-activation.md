@@ -1,8 +1,13 @@
 # Windows 激活 iOS WDA
 
-- 状态：已在本机实现命令构造与后端分发；Windows 真机激活未在本环境核验
+- 状态：命令构造与后端分发已实现；Mac 发送/连发已核验；Windows 真机激活未核验
 - 日期：2026-08-22
-- 来源：别人现场拍的 25 秒视频 + 本仓库现有 `xcodebuild` 激活链路
+- 全流程图：[wda-end-to-end-flow.md](./wda-end-to-end-flow.md)
+- 当晚操作步骤：[windows-night-runbook.md](../deployment/windows-night-runbook.md)
+- 来源：竞品 25 秒视频 + 下列公开笔记
+  - https://github.com/hiyongz/DevTest-Notes/blob/main/docs/app/app-testing-for-ios-app-on-windows.md
+  - https://testerhome.com/topics/29230
+  - https://hiyongz.github.io/posts/app-testing-for-ios-app-testing-on-windows-with-airtest/
 
 ## 1. 视频里实际看到了什么
 
@@ -38,13 +43,14 @@
 
 对方 Windows 机做的是右边这件事。左边在更早的时候已经做完：Runner 已经在手机上，开发者模式已开，证书已信任，USB 已配对。
 
-本仓库今天的激活路径还停在左边+右边绑死 Xcode：
+本仓库激活已经按平台分开，不再绑死 Xcode：
 
-- `WDAManager.Activate` → `xcodebuild test-without-building`
-- USB 发现已经走 `idevice_id -l`（跨平台），`ioreg` / `devicectl` 只是 Darwin 回退
-- DDI 补齐读的是 Xcode `DeviceSupport`，Darwin 专属
+- Windows / `signing.activator=goios|tidevice`：`ios runwda` 或 `tidevice xctest` 拉起**已安装**的 Runner
+- Darwin 默认：`xcodebuild test-without-building`（开发机方便）
+- USB 发现走 `idevice_id -l`（跨平台），`ioreg` / `devicectl` 只是 Darwin 回退
+- DDI 补齐只在 Darwin 读 Xcode `DeviceSupport`；Windows 直接跳过
 
-所以「Windows 不能激活」不是 usbmux 做不到，是我们把「拉起 XCTest」写成了 `xcodebuild`。
+所以「Windows 不能激活」不是 usbmux 做不到，是 **Runner 必须先在 Mac 上装进手机**。装好之后，Windows 只负责右边。
 
 ## 3. 正确的 Windows 链路
 

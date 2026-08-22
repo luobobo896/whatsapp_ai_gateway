@@ -565,6 +565,28 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	}
 	client := wda.NewClient(wdaBaseURLFor(udid, ip, port), 40*time.Second)
 	consecFails := 0
+	// 整单共用一条 WDA 会话：CreateSession 冷启动 WhatsApp 要十数秒，
+	// 每条都建/拆就会把竞品 1s 级连发打成 20s+。聊天列表路径已经复用会话。
+	var sid, bid string
+	dropSession := func() {
+		if sid == "" {
+			return
+		}
+		_ = client.DeleteSession(context.Background(), sid)
+		sid, bid = "", ""
+	}
+	defer dropSession()
+	ensureSession := func() error {
+		if sid != "" {
+			return nil
+		}
+		s, b, err := wda.CreateWhatsAppSession(context.Background(), client)
+		if err != nil {
+			return err
+		}
+		sid, bid = s, b
+		return nil
+	}
 
 	for idx, it := range t.Items {
 		select {
@@ -667,16 +689,29 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		// 存量会话不受影响继续发送。
 		// 可达性类瞬时故障（WDA 500/超时/连接抖动）先原地重试一次再判失败——
 		// 打开会话本身幂等（未发送任何内容），重试无重复发送风险。
-		sid, isNew, oerr := wda.OpenChatForSendWithAssist(context.Background(), client, it.Phone, assist)
-		if oerr != nil && transientWDAError(oerr) {
-			slog.Warn("open chat transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", oerr.Error())
-			time.Sleep(2 * time.Second)
-			sid, isNew, oerr = wda.OpenChatForSendWithAssist(context.Background(), client, it.Phone, assist)
+		if err := ensureSession(); err != nil {
+			status, errMsg = "failed", err.Error()
+			e.recordBug(t, it, "open_chat", err, assist, client, "")
+		}
+		var isNew bool
+		var oerr error
+		if status == "sent" {
+			isNew, oerr = wda.OpenChatOnSession(context.Background(), client, sid, bid, it.Phone, assist)
+			if oerr != nil && transientWDAError(oerr) {
+				slog.Warn("open chat transient error, retry once", "task", t.TaskID, "item", it.ItemID, "error", oerr.Error())
+				dropSession()
+				time.Sleep(2 * time.Second)
+				if err := ensureSession(); err != nil {
+					oerr = err
+				} else {
+					isNew, oerr = wda.OpenChatOnSession(context.Background(), client, sid, bid, it.Phone, assist)
+				}
+			}
 		}
 		if oerr != nil {
 			status, errMsg = "failed", oerr.Error()
 			e.recordBug(t, it, "open_chat", oerr, assist, client, sid)
-		} else {
+		} else if status == "sent" {
 			// 收件人姓名：聊天页已打开，尽力读标题（联系人名/号码），失败为空不影响发送。
 			contactName = wda.ChatTitle(context.Background(), client, sid)
 			if isNew && sched.MaxNewSessionRatio > 0 {
@@ -684,12 +719,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 				if newSessionRatioExceeded(m.NewSessions, m.Total, sched.MaxNewSessionRatio) {
 					status, errMsg = "failed",
 						fmt.Sprintf("新会话占比控制:今日新会话占比已达上限 %d%%，该号码请明日再发", sched.MaxNewSessionRatio)
-					_ = client.DeleteSession(context.Background(), sid)
-					sid = ""
 				}
 			}
 		}
-		if sid != "" {
+		if status == "sent" && sid != "" {
 			var serr error
 			if assist == nil {
 				serr = wda.TypeAndSend(context.Background(), client, sid, content, nil)
@@ -699,8 +732,10 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			if serr != nil {
 				status, errMsg = "failed", serr.Error()
 				e.recordBug(t, it, "type_send", serr, assist, client, sid)
+				if transientWDAError(serr) {
+					dropSession()
+				}
 			}
-			_ = client.DeleteSession(context.Background(), sid)
 		}
 		dur := time.Since(t0).Milliseconds()
 		e.finishItem(ItemResult{
