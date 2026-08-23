@@ -721,7 +721,8 @@ function deviceCard(d){
   let actions = '';
   if (d.busy) {
     actions = `<button class="btn sm" disabled style="opacity:.5;cursor:not-allowed">忙碌中</button>`;
-  } else if (running && healthy) {
+  } else if (healthy) {
+    // /status 已通：视为已激活，只展示停止，不再展示激活。
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
   } else {
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;

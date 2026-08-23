@@ -287,9 +287,14 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			_ = g.Cfg.UnignoreDevice(udid)
 			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
 			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
-			if dev.IP != "" {
+			// /status reachable via Wi-Fi IP or USB tunnel => already activated (no re-launch).
+			if dev.IP != "" || TunnelAddr(udid) != "" {
 				if h := g.checkWDA(dev); h.OK {
 					applyHealth(dev, h)
+					if h.IP != "" {
+						_ = syncStoredWifiIP(dev, h.IP)
+					}
+					_ = g.Cfg.Save()
 					writeJSON(w, map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "already-running"})
 					return
 				}
@@ -449,6 +454,56 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 	return map[string]any{"udid": udid, "status": "starting", "ready": false, "auto_reactivate": true}
 }
 
+
+// ensureUSBTunnelsForList builds iproxy for configured + currently attached USB devices.
+
+// healthCheckStale reports whether last_health is missing or older than maxAgeSec (failed checks are retried).
+func healthCheckStale(h map[string]any, maxAgeSec float64) bool {
+	if h == nil {
+		return true
+	}
+	at, _ := h["checked_at"].(float64)
+	if at == 0 {
+		return true
+	}
+	return float64(time.Now().Unix())-at >= maxAgeSec
+}
+
+func (g *Gateway) ensureUSBTunnelsForList() {
+	ports := map[string]int{}
+	for _, d := range g.Cfg.Devices {
+		if d.UDID == "" {
+			continue
+		}
+		p := d.Port
+		if p == 0 {
+			p = 8100
+		}
+		ports[d.UDID] = p
+	}
+	for _, u := range USBUDIDs() {
+		if _, ok := ports[u]; !ok {
+			ports[u] = 8100
+		}
+	}
+	EnsureUSBTunnels(ports)
+}
+
+// recognizeLiveWDA probes /status; when OK, marks device activated and stores Wi-Fi IP from ios.ip.
+func (g *Gateway) recognizeLiveWDA(dev *Device) WDAHealth {
+	if dev == nil {
+		return WDAHealth{OK: false, Error: "nil device"}
+	}
+	h := g.checkWDA(dev)
+	applyHealth(dev, h)
+	if h.OK && h.IP != "" {
+		if syncStoredWifiIP(dev, h.IP) {
+			_ = g.Cfg.Save()
+		}
+	}
+	return h
+}
+
 func (g *Gateway) deviceList() []map[string]any {
 	// 设备列表实时获取：USB 直连（idevice_id/ioreg/devicectl）与 Wi-Fi 在线（WDA 健康）才算在线；
 	// 离线设备不再出现（不在线就没有数据）。
@@ -459,6 +514,7 @@ func (g *Gateway) deviceList() []map[string]any {
 		usbSet[d.UDID] = true
 		usbInfo[d.UDID] = d
 	}
+	g.ensureUSBTunnelsForList()
 
 	out := []map[string]any{}
 	emitted := map[string]bool{}
@@ -485,6 +541,10 @@ func (g *Gateway) deviceList() []map[string]any {
 		if attached {
 			conn = "usb"
 		}
+		// USB/tunnel/IP available but not yet healthy: probe /status (throttled) and adopt as activated when ready.
+		if (attached || TunnelAddr(d.UDID) != "" || d.IP != "") && !healthOK(d.LastHealth) && !g.Exec.IsBusy(d.UDID) && healthCheckStale(d.LastHealth, 8) {
+			g.recognizeLiveWDA(d)
+		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
@@ -499,10 +559,41 @@ func (g *Gateway) deviceList() []map[string]any {
 		if emitted[d.UDID] || g.Cfg.IsIgnored(d.UDID) {
 			continue
 		}
+		// Unconfigured USB device: if phone WDA /status is already up, adopt it (IP + activated) instead of showing "activate".
+		dev := &Device{UDID: d.UDID, Port: 8100, Name: d.Name, Model: d.Model, AutoReactivate: true}
+		h := g.recognizeLiveWDA(dev)
+		if h.OK {
+			if existing := g.Cfg.Device(d.UDID); existing == nil {
+				g.Cfg.Devices = append(g.Cfg.Devices, *dev)
+			} else {
+				applyHealth(existing, h)
+				if h.IP != "" {
+					_ = syncStoredWifiIP(existing, h.IP)
+				}
+				if existing.Name == "" && d.Name != "" {
+					existing.Name = d.Name
+				}
+				if existing.Model == "" && d.Model != "" {
+					existing.Model = d.Model
+				}
+				dev = existing
+			}
+			_ = g.Cfg.Save()
+			out = append(out, map[string]any{
+				"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": dev.Name, "model": dev.Model,
+				"ip": dev.IP, "port": dev.Port, "auto_reactivate": true, "configured": true,
+				"last_health": dev.LastHealth, "ios_version": dev.IOSVersion,
+				"usb": true, "conn_type": "usb",
+				"wda_running": true,
+				"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
+			})
+			continue
+		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
 			"usb": true, "conn_type": "usb", "wda_running": g.WDA.Running(d.UDID),
+			"last_health": dev.LastHealth,
 			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
 		})
 	}

@@ -82,8 +82,19 @@ func (g *Gateway) watchOnce() {
 	// USB 隧道对账：配置内且 USB 在线的设备起本地隧道，拔线即撤。
 	tunnelPorts := map[string]int{}
 	for _, d := range cfg.Devices {
-		if d.UDID != "" && d.Port != 0 {
-			tunnelPorts[d.UDID] = d.Port
+		if d.UDID == "" {
+			continue
+		}
+		p := d.Port
+		if p == 0 {
+			p = 8100
+		}
+		tunnelPorts[d.UDID] = p
+	}
+	// USB plugged but not yet in devices.json still needs a tunnel to probe /status.
+	for _, u := range USBUDIDs() {
+		if _, ok := tunnelPorts[u]; !ok {
+			tunnelPorts[u] = 8100
 		}
 	}
 	EnsureUSBTunnels(tunnelPorts)
