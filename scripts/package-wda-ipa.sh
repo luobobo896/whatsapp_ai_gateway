@@ -99,7 +99,8 @@ trap cleanup EXIT
 
 mkdir -p "$STAGE/Payload"
 ditto "$APP" "$STAGE/Payload/$APP_NAME"
-rm -rf "$STAGE/Payload/$APP_NAME/PlugIns/"*.dSYM
+# Do NOT delete files inside the signed .app (e.g. PlugIns/*.dSYM) — that triggers
+# ApplicationVerificationFailed 0xe8008017 (resource added/modified/deleted).
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 (cd "$STAGE" && zip -qry "$OUT" Payload)
