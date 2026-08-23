@@ -77,6 +77,7 @@ func main() {
 		_ = os.MkdirAll(filepath.Join(state, sub), 0o755)
 	}
 	setupFileLog(filepath.Join(state, "logs", "shell.log"))
+	enableHighDPI()
 	shellLog("start: state=%s port=%d", state, port)
 
 	gw := newGatewayProcess(state, port)
@@ -221,6 +222,7 @@ func (a *desktopApp) openWindow() {
 				Title:  appName,
 				Width:  1280,
 				Height: 860,
+				IconId: 2, // winres RT_GROUP_ICON #2 (title bar / taskbar)
 				Center: true,
 			},
 		})
@@ -580,6 +582,43 @@ func stateDir() string {
 	dir := filepath.Join(base, "WDAFarmGateway")
 	_ = os.MkdirAll(dir, 0o755)
 	return dir
+}
+
+
+// enableHighDPI: declare Per-Monitor V2 DPI awareness before any window is created.
+// Manifest (winres, dpi-awareness=per monitor v2) is primary. Runtime API is backup;
+// ACCESS_DENIED usually means the manifest already locked awareness — that is success.
+func enableHighDPI() {
+	const (
+		dpiAwarenessContextPerMonitorAwareV2 = ^uintptr(3) // DPI_AWARENESS_CONTEXT(-4)
+		processPerMonitorDPIAware             = 2
+	)
+	u32 := windows.NewLazySystemDLL("user32.dll")
+	if proc := u32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
+		r, _, err := proc.Call(dpiAwarenessContextPerMonitorAwareV2)
+		if r != 0 {
+			shellLog("dpi: PerMonitorV2 via SetProcessDpiAwarenessContext")
+			return
+		}
+		if err == windows.ERROR_ACCESS_DENIED {
+			shellLog("dpi: PerMonitorV2 already set (embedded manifest)")
+			return
+		}
+		shellLog("dpi: SetProcessDpiAwarenessContext failed: %v", err)
+	}
+	shcore := windows.NewLazySystemDLL("shcore.dll")
+	if proc := shcore.NewProc("SetProcessDpiAwareness"); proc.Find() == nil {
+		r, _, err := proc.Call(uintptr(processPerMonitorDPIAware))
+		if r == 0 { // S_OK
+			shellLog("dpi: PerMonitor via SetProcessDpiAwareness")
+			return
+		}
+		shellLog("dpi: SetProcessDpiAwareness failed: %v", err)
+	}
+	if proc := u32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
+		proc.Call()
+		shellLog("dpi: fallback SetProcessDPIAware")
+	}
 }
 
 func ensureSingleInstance() (func(), bool) {
