@@ -3,21 +3,17 @@ __pycache__/
 *.pyc
 data/
 .DS_Store
-tools/easytier/easytier-core
-tools/easytier/easytier-cli
-tools/ios
 /gateway
 
 # 本地运行时配置（含网关凭证 token，禁止提交）
 devices.json
 
-# 桌面壳构建与打包产物
+# 桌面壳构建与打包产物（签名好的控制器放 tools/wda.ipa，不进 dist/）
 desktop/.build/
 build/
 dist/
 *.dmg
 *.ipa
-tools/wifi-lockdown
-tools/wifi-runwda
+!tools/wda.ipa
 
 tools/webview2/

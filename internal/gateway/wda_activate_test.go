@@ -106,6 +106,30 @@ func TestTideviceArgs(t *testing.T) {
 	}
 }
 
+func TestLookToolFindsRepoToolsWhenResourcesUnset(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "")
+	if _, err := os.Stat("tools/ios"); err != nil {
+		t.Skip("run from repo root so tools/ios is visible")
+	}
+	if p := lookTool("ios", "ios.exe"); p == "" {
+		t.Fatal("expected tools/ios when WDA_GATEWAY_RESOURCES is unset")
+	}
+}
+
+func TestResolvedIPAFallsBackToRepoTools(t *testing.T) {
+	t.Setenv("WDA_GATEWAY_RESOURCES", "")
+	m := NewWDAManager("", "", "")
+	m.ipaPath = filepath.Join(t.TempDir(), "missing.ipa")
+	got := m.resolvedIPA()
+	if got == "" {
+		t.Skip("tools/wda.ipa not present")
+	}
+	if filepath.Base(got) != "wda.ipa" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestEnableWifiLockdownMissingBinaryIsNoop(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")

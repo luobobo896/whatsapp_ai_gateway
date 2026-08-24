@@ -32,6 +32,8 @@ Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、
 
 日常发消息用 **Windows**。苹果电脑只做编译和签名，不是每天开机发消息的那台。
 
+仓库 `tools/` 已带 go-ios（`ios` / `ios.exe`）、`wifi-runwda`、`wifi-lockdown`、已签名 `wda.ipa`。在仓库根目录启动网关会自动找到，不必再单独下载。说明见 [tools/README.md](tools/README.md)。
+
 **Windows（日常主机）**
 
 装 Apple Devices 或 iTunes，插 iPhone，点信任。普通权限即可发消息；只有开 easytier 虚拟网卡时才右键 **以管理员身份运行**。

@@ -248,6 +248,13 @@ func (m *WDAManager) resolvedIPA() string {
 		if _, err := os.Stat(cand); err == nil {
 			return cand
 		}
+		return p
+	}
+	for _, dir := range repoToolsDirs() {
+		cand := filepath.Join(dir, "wda.ipa")
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
 	}
 	return p
 }
@@ -382,6 +389,10 @@ func lookTool(unixName, windowsName string) string {
 		for _, name := range names {
 			candidates = append(candidates, filepath.Join(res, "bin", name))
 		}
+	} else {
+		// 源码运行：用仓库 tools/，这样别人 git pull 后不必再配 PATH。
+		// 桌面壳会设 WDA_GATEWAY_RESOURCES，测试缺二进制时也设它，避免误用仓内工具。
+		candidates = append(candidates, repoToolPaths(names)...)
 	}
 	if runtime.GOOS != "windows" {
 		candidates = append(candidates, "/opt/homebrew/bin/"+unixName, "/usr/local/bin/"+unixName)
@@ -392,6 +403,44 @@ func lookTool(unixName, windowsName string) string {
 		}
 	}
 	return ""
+}
+
+func repoToolsDirs() []string {
+	var starts []string
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	if ex, err := os.Executable(); err == nil {
+		starts = append(starts, filepath.Dir(ex))
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for _, start := range starts {
+		dir := start
+		for i := 0; i < 6; i++ {
+			cand := filepath.Join(dir, "tools")
+			if st, err := os.Stat(cand); err == nil && st.IsDir() && !seen[cand] {
+				seen[cand] = true
+				dirs = append(dirs, cand)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return dirs
+}
+
+func repoToolPaths(names []string) []string {
+	var out []string
+	for _, dir := range repoToolsDirs() {
+		for _, name := range names {
+			out = append(out, filepath.Join(dir, name))
+		}
+	}
+	return out
 }
 
 func verOrUnknown(v string) string {
