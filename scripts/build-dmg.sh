@@ -90,7 +90,6 @@ if command -v iproxy >/dev/null 2>&1; then
       if [ ! -f "$DST" ]; then
         cp -L "$DEP" "$DST"
         QUEUE+=("$DEP")
-        # 短名软链（libfoo-1.0.6.dylib → libfoo-1.0.dylib）：部分引用用短名，兜底
         SHORT="$(echo "$B" | sed -E 's/-([0-9]+)\.[0-9]+\.dylib/-\1.dylib/')"
         if [ "$SHORT" != "$B" ] && [ ! -e "$RES/lib/$SHORT" ]; then
           ln -s "$B" "$RES/lib/$SHORT"
@@ -102,29 +101,31 @@ if command -v iproxy >/dev/null 2>&1; then
   [ -x "$IDEV" ] && cp "$IDEV" "$RES/bin/ideviceinfo"
   [ -x "$IDEVID" ] && cp "$IDEVID" "$RES/bin/idevice_id"
   [ -x "$IDEVPROV" ] && cp "$IDEVPROV" "$RES/bin/ideviceprovision"
-  if [ -x "$ROOT/tools/ios" ]; then
-    cp "$ROOT/tools/ios" "$RES/bin/ios"
-  fi
-  if [ -x "$ROOT/tools/wifi-lockdown" ]; then
-    cp "$ROOT/tools/wifi-lockdown" "$RES/bin/wifi-lockdown"
-  fi
-  if [ -x "$ROOT/tools/wifi-runwda" ]; then
-    cp "$ROOT/tools/wifi-runwda" "$RES/bin/wifi-runwda"
-  fi
-  if [ -f "$ROOT/tools/wda.ipa" ]; then
-    cp "$ROOT/tools/wda.ipa" "$RES/wda.ipa"
-  elif [ -f "$ROOT/dist/wda.ipa" ]; then
-    cp "$ROOT/dist/wda.ipa" "$RES/wda.ipa"
-  fi
-  chmod +w "$RES/bin/"* "$RES/lib/"*.dylib 2>/dev/null || true
   echo "  ✓ iproxy/ideviceinfo/idevice_id（原样未修改）+ $(find "$RES/lib" -type f | wc -l | tr -d ' ') 个 dylib（DYLD fallback 解析）"
-  [ -x "$RES/bin/ios" ] && echo "  ✓ go-ios（ios runwda）"
-  [ -x "$RES/bin/wifi-runwda" ] && echo "  ✓ wifi-runwda（usbmux Network）"
   [ -x "$RES/bin/ideviceprovision" ] && echo "  ✓ ideviceprovision（自动装描述文件）"
-  [ -f "$RES/wda.ipa" ] && echo "  ✓ wda.ipa"
 else
   echo "  ⚠ 本机无 iproxy（未装 libimobiledevice），USB 隧道需客户自行 brew install libimobiledevice"
 fi
+
+# go-ios / wifi 辅助工具不依赖 iproxy，永远入包（激活 WDA 必需）。
+if [ -x "$ROOT/tools/ios" ]; then
+  cp "$ROOT/tools/ios" "$RES/bin/ios"
+  echo "  ✓ go-ios（ios runwda）"
+fi
+if [ -x "$ROOT/tools/wifi-lockdown" ]; then
+  cp "$ROOT/tools/wifi-lockdown" "$RES/bin/wifi-lockdown"
+fi
+if [ -x "$ROOT/tools/wifi-runwda" ]; then
+  cp "$ROOT/tools/wifi-runwda" "$RES/bin/wifi-runwda"
+  echo "  ✓ wifi-runwda（usbmux Network）"
+fi
+if [ -f "$ROOT/tools/wda.ipa" ]; then
+  cp "$ROOT/tools/wda.ipa" "$RES/wda.ipa"
+elif [ -f "$ROOT/dist/wda.ipa" ]; then
+  cp "$ROOT/dist/wda.ipa" "$RES/wda.ipa"
+fi
+chmod +w "$RES/bin/"* "$RES/lib/"*.dylib 2>/dev/null || true
+[ -f "$RES/wda.ipa" ] && echo "  ✓ wda.ipa"
 
 echo "▶ [5/7] 签名"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"

@@ -522,6 +522,7 @@ func (g *Gateway) deviceList() []map[string]any {
 	}
 	g.ensureUSBTunnelsForList()
 	tunnelSet := liveGoIOSTunnelSet()
+	netSet := usbmuxNetworkUDIDs()
 
 	out := []map[string]any{}
 	emitted := map[string]bool{}
@@ -568,6 +569,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"deletable":    deviceDeletable(busy, healthOK(d.LastHealth), running),
 			"needs_tunnel": needTun,
 			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
+			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 		})
 		emitted[d.UDID] = true
 	}
@@ -611,6 +613,7 @@ func (g *Gateway) deviceList() []map[string]any {
 				"deletable":    deviceDeletable(busy, true, true),
 				"needs_tunnel": needTun,
 				"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
+			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 			})
 			continue
 		}
@@ -628,6 +631,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"deletable":    deviceDeletable(busy, healthOK(dev.LastHealth), running),
 			"needs_tunnel": needTun,
 			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
+			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 		})
 	}
 	return out
