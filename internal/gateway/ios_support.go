@@ -102,8 +102,15 @@ func likelyNeedsTunnel(udid, version string) bool {
 	return strings.TrimSpace(version) == "" && strings.Contains(udid, "-")
 }
 
-// resolveIOSVersion 激活时优先问锁机 ProductVersion，避免缓存停在升级前的大版本。
+// resolveIOSVersion 激活走最短路径：已有版本直接用，避免每次打满 ideviceinfo。
 func resolveIOSVersion(udid, persisted string) string {
+	if v := strings.TrimSpace(persisted); v != "" {
+		rememberIOSVersion(udid, v)
+		return v
+	}
+	if v := cachedIOSVersion(udid); v != "" {
+		return v
+	}
 	if v := strings.TrimSpace(ideviceInfoValue(udid, "ProductVersion")); v != "" {
 		rememberIOSVersion(udid, v)
 		return v
@@ -112,11 +119,7 @@ func resolveIOSVersion(udid, persisted string) string {
 		rememberIOSVersion(udid, v)
 		return v
 	}
-	if v := strings.TrimSpace(persisted); v != "" {
-		rememberIOSVersion(udid, v)
-		return v
-	}
-	return cachedIOSVersion(udid)
+	return ""
 }
 
 func goiosProductVersion(udid string) string {

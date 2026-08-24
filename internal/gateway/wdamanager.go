@@ -198,7 +198,6 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID, wifiIP string
 }
 
 func (m *WDAManager) activateXcodebuild(udid string, port int, reportedUDID string) error {
-	enableWifiLockdown(udid)
 	// 激活前确保 iOS ≤16 老设备（iPhone 7/8/X 等）的 DeveloperDiskImage 就绪：
 	// Xcode 的 DeviceSupport 目录通常缺 DDI，导致 xcodebuild 挂载/安装 WDA 失败。
 	// 幂等；失败仅告警不阻塞（iOS 17+ 走 CoreDevice 原生支持，会静默跳过）。

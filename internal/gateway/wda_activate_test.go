@@ -175,7 +175,7 @@ func TestWifiRunwdaInvocationBuildsArgs(t *testing.T) {
 	}
 }
 
-func TestProtocolCmdPrefersWifiRunwda(t *testing.T) {
+func TestProtocolCmdUSBPrefersRunwdaNotWifiWrapper(t *testing.T) {
 	dir := plantActivateTools(t, true, true)
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
@@ -185,13 +185,14 @@ func TestProtocolCmdPrefersWifiRunwda(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) != "wifi-runwda" {
-		t.Fatalf("bin=%q want wifi-runwda", bin)
+	if filepath.Base(bin) == "wifi-runwda" {
+		t.Fatal("USB activate must not wait on wifi-runwda")
 	}
-	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios"} {
-		if !containsExact(args, want) {
-			t.Fatalf("missing %q in %#v", want, args)
-		}
+	if filepath.Base(bin) != "ios" {
+		t.Fatalf("bin=%q want ios", bin)
+	}
+	if !containsExact(args, "runwda") {
+		t.Fatalf("missing runwda in %#v", args)
 	}
 }
 

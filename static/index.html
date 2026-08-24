@@ -838,7 +838,7 @@ async function act(udid){
       toast(d.via === 'usb' ? '激活成功（USB 直连，IP 自动发现中）' : '激活成功，WDA 已就绪');
     } else if (d.status === 'starting'){
       // 不报成功，保持「启动中」；首次激活含编译，耗时数分钟属正常
-      toast(d.message || 'WDA 启动中…（首次激活需编译 WDA，可能耗时数分钟，请耐心等待）');
+      toast(d.message || 'WDA 启动中…（USB 激活通常十几秒内完成）');
     } else if (d.status === 'failed'){
       settled = true;
       toast('激活未完成：' + (d.message || 'WDA 未能保持运行，请在手机上信任开发者后重试'));

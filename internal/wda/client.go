@@ -145,6 +145,29 @@ func (c *Client) CreateSession(ctx context.Context, bundleID string) (string, er
 	return decodeValue(data)
 }
 
+// CreateBareSession 不拉起/不终止 App，用来点系统权限弹窗。
+func (c *Client) CreateBareSession(ctx context.Context) (string, error) {
+	body := map[string]any{
+		"capabilities": map[string]any{
+			"alwaysMatch": map[string]any{
+				"shouldTerminateApp": false,
+				"forceAppLaunch":     false,
+			},
+		},
+	}
+	data, err := c.do(ctx, http.MethodPost, "/session", body)
+	if err != nil {
+		return "", err
+	}
+	return decodeValue(data)
+}
+
+// AcceptAlert 点系统/应用弹窗的默认接受键（允许、好）。
+func (c *Client) AcceptAlert(ctx context.Context, sessionID string) error {
+	_, err := c.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/alert/accept", map[string]any{})
+	return err
+}
+
 // DeleteSession 结束会话（同时可关闭 App）。
 func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
 	_, err := c.do(ctx, http.MethodDelete, "/session/"+url.PathEscape(sessionID), nil)

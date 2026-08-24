@@ -295,9 +295,12 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
 				return
 			}
-			// 等待就绪（最多 60s；未就绪返回 starting，由前端轮询/看护循环继续跟进）
-			res := g.waitWDAReady(udid, port, 60*time.Second)
-			g.KickWatchdog() // 立即跑一轮看护：USB 隧道问 WDA 自报 IP，秒级完成自动分配
+			// USB 最短路径：WDA 通常数秒内 /status ready；未就绪返回 starting。
+			res := g.waitWDAReady(udid, port, 20*time.Second)
+			if ready, _ := res["ready"].(bool); ready {
+				g.tapAgentPermissions(udid, port)
+			}
+			g.KickWatchdog()
 			writeJSON(w, res)
 		case "stop":
 			dev := g.Cfg.Device(udid)
@@ -441,7 +444,7 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 				"message": "WDA 未能保持运行（进程已退出且 /status 不通）。请确认手机 USB 已连接信任，顶栏出现 Automation Running 后再试",
 			}
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(400 * time.Millisecond)
 	}
 	// Timeout: one last health probe — if /status works, treat as success.
 	if dev := g.Cfg.Device(udid); dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {

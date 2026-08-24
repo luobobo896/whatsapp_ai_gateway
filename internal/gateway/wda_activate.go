@@ -98,7 +98,7 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind,
 		}
 	}
 
-	enableWifiLockdown(udid)
+	// USB 最短路径：不在激活时开无线 lockdown / 不等 Network。
 	if err := m.prepareDeviceForIOS(udid, kind, ver, plan); err != nil {
 		return err
 	}
@@ -126,13 +126,8 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifi
 	bundle := m.wdaBundleID()
 	switch kind {
 	case activatorGoIOS:
-		// iOS 17+ 必须走 go-ios 自己的 RSD 隧道；wifi-runwda 劫持 usbmux 会和它打架。
-		if !needsRemoteXPCTunnel(iosVersion) {
-			if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
-				slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP, "ios", iosVersion)
-				return bin, args, nil
-			}
-		}
+		// 激活固定走 USB 上的 ios runwda。wifi-runwda 会空等 Network 最多 45s，不在点激活路径里用。
+		_ = wifiIP
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
@@ -326,6 +321,11 @@ func (m *WDAManager) ensureRunnerInstalled(udid, kind, iosVersion string) error 
 		}
 		return fmt.Errorf("手机未安装 %s，且找不到 IPA %s。请先在 Mac 上运行 scripts/package-wda-ipa.sh，把打好的包放到该路径", m.wdaBundleID(), ipa)
 	}
+	if needsDeveloperDiskImage(iosVersion) && runtime.GOOS != "darwin" && kind == activatorGoIOS {
+		if err := goiosImageAuto(udid, m.ddiCacheDir()); err != nil {
+			return fmt.Errorf("iOS %s 需要开发者镜像（ios image auto）：%w", verOrUnknown(iosVersion), err)
+		}
+	}
 	return m.installIPA(udid, kind, ipa, iosVersion)
 }
 
@@ -334,7 +334,7 @@ func (m *WDAManager) runnerInstalled(udid, kind, iosVersion string) (bool, error
 	if err != nil {
 		return false, err
 	}
-	out, err := runTool(bin, args, 20*time.Second)
+	out, err := runTool(bin, args, 8*time.Second)
 	if err != nil {
 		return false, err
 	}
@@ -457,37 +457,23 @@ func (m *WDAManager) ddiCacheDir() string {
 	return filepath.Join(os.TempDir(), "wda-ddi")
 }
 
-// prepareDeviceForIOS 按系统版本补齐激活前置：DDI / go-ios 镜像、iOS 17+ 隧道、开发者模式。
+// prepareDeviceForIOS USB 激活前置：只做当前版本真正挡住 runwda 的步骤。
 func (m *WDAManager) prepareDeviceForIOS(udid, kind, ver string, plan iosSupportPlan) error {
-	if plan.NeedDDI {
-		ddiErr := EnsureDeviceSupportDDI(udid)
-		if ddiErr != nil {
-			slog.Warn("EnsureDeviceSupportDDI failed", "udid", shortOf(udid), "error", ddiErr)
-		}
-		// Windows 没有 Xcode DeviceSupport；Mac 上 Xcode 镜像失败时再用 go-ios 下载挂载。
-		if kind == activatorGoIOS && (runtime.GOOS != "darwin" || ddiErr != nil) {
-			if err := goiosImageAuto(udid, m.ddiCacheDir()); err != nil {
-				if runtime.GOOS != "darwin" {
-					return fmt.Errorf("iOS %s 需要开发者镜像（ios image auto）：%w", verOrUnknown(ver), err)
-				}
-				slog.Warn("ios image auto failed", "udid", shortOf(udid), "error", err)
-			}
+	if plan.NeedDDI && runtime.GOOS == "darwin" {
+		if err := EnsureDeviceSupportDDI(udid); err != nil {
+			slog.Warn("EnsureDeviceSupportDDI failed", "udid", shortOf(udid), "error", err)
 		}
 	}
 
-	if plan.NeedTunnel || likelyNeedsTunnel(udid, ver) {
+	if plan.NeedTunnel {
 		if err := goiosTunnel.Ensure(); err != nil {
-			if plan.NeedTunnel {
-				return err
+			return err
+		}
+		if err := goiosTunnel.WaitDevice(udid, 20*time.Second); err != nil {
+			if !plan.UserspaceOK {
+				return fmt.Errorf("iOS %s 的用户态隧道不受 go-ios 支持（需 17.4+）。请升级系统，或先用管理员执行 ios tunnel start（Windows 还需 wintun.dll）。原因：%w", ver, err)
 			}
-			slog.Warn("go-ios tunnel start skipped (version unknown)", "udid", shortOf(udid), "error", err)
-		} else if plan.NeedTunnel {
-			if err := goiosTunnel.WaitDevice(udid, 45*time.Second); err != nil {
-				if !plan.UserspaceOK {
-					return fmt.Errorf("iOS %s 的用户态隧道不受 go-ios 支持（需 17.4+）。请升级系统，或先用管理员执行 ios tunnel start（Windows 还需 wintun.dll）。原因：%w", ver, err)
-				}
-				return err
-			}
+			return err
 		}
 	}
 
@@ -496,6 +482,7 @@ func (m *WDAManager) prepareDeviceForIOS(udid, kind, ver string, plan iosSupport
 			return err
 		}
 	}
+	_ = kind
 	return nil
 }
 
@@ -529,7 +516,7 @@ func ensureDeveloperMode(udid string) error {
 	if bin == "" {
 		return nil
 	}
-	out, err := runTool(bin, []string{"--udid=" + udid, "--pretty", "devmode", "get"}, 20*time.Second)
+	out, err := runTool(bin, []string{"--udid=" + udid, "--pretty", "devmode", "get"}, 5*time.Second)
 	if err != nil {
 		slog.Warn("devmode get failed", "udid", shortOf(udid), "error", err)
 		return nil
