@@ -84,11 +84,28 @@ func (m *WDAManager) wdaBundleID() string {
 }
 
 func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind, wifiIP string) error {
+	ver := resolveIOSVersion(udid, "")
+	plan := planForIOS(ver)
+	slog.Info("ios activate plan", "udid", shortOf(udid), "ios", ver, "major", plan.Major,
+		"ddi", plan.NeedDDI, "tunnel", plan.NeedTunnel, "devmode", plan.NeedDevMode, "userspace_ok", plan.UserspaceOK)
+
+	if plan.NeedTunnel && kind != activatorGoIOS {
+		if lookTool("ios", "ios.exe") != "" {
+			slog.Info("iOS 17+ switching activator to go-ios", "was", kind, "udid", shortOf(udid))
+			kind = activatorGoIOS
+		} else {
+			return fmt.Errorf("iOS %s 需要 go-ios 隧道（ios tunnel start），未找到 ios/ios.exe", verOrUnknown(ver))
+		}
+	}
+
 	enableWifiLockdown(udid)
-	if err := m.ensureRunnerInstalled(udid, kind); err != nil {
+	if err := m.prepareDeviceForIOS(udid, kind, ver, plan); err != nil {
 		return err
 	}
-	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind, wifiIP)
+	if err := m.ensureRunnerInstalled(udid, kind, ver); err != nil {
+		return err
+	}
+	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind, wifiIP, ver)
 	if err != nil {
 		return err
 	}
@@ -105,19 +122,26 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind,
 	return nil
 }
 
-func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifiIP string) (string, []string, error) {
+func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifiIP, iosVersion string) (string, []string, error) {
 	bundle := m.wdaBundleID()
 	switch kind {
 	case activatorGoIOS:
-		if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
-			slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP)
-			return bin, args, nil
+		// iOS 17+ 必须走 go-ios 自己的 RSD 隧道；wifi-runwda 劫持 usbmux 会和它打架。
+		if !needsRemoteXPCTunnel(iosVersion) {
+			if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
+				slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP, "ios", iosVersion)
+				return bin, args, nil
+			}
 		}
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
 		}
-		return bin, goiosArgs(udid, bundle, port, reportedUDID), nil
+		args := goiosArgs(udid, bundle, port, reportedUDID)
+		if needsRemoteXPCTunnel(iosVersion) {
+			args = withGoIOSTunnelPort(args)
+		}
+		return bin, args, nil
 	case activatorTidevice:
 		bin := lookTool("tidevice", "tidevice.exe")
 		if bin == "" {
@@ -228,14 +252,18 @@ func (m *WDAManager) resolvedIPA() string {
 	return p
 }
 
-func (m *WDAManager) installCmd(udid, kind, ipa string) (string, []string, error) {
+func (m *WDAManager) installCmd(udid, kind, ipa, iosVersion string) (string, []string, error) {
 	switch kind {
 	case activatorGoIOS:
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：安装 IPA 需要把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
 		}
-		return bin, goiosInstallArgs(udid, ipa), nil
+		args := goiosInstallArgs(udid, ipa)
+		if needsRemoteXPCTunnel(iosVersion) {
+			args = withGoIOSTunnelPort(args)
+		}
+		return bin, args, nil
 	case activatorTidevice:
 		bin := lookTool("tidevice", "tidevice.exe")
 		if bin == "" {
@@ -247,14 +275,18 @@ func (m *WDAManager) installCmd(udid, kind, ipa string) (string, []string, error
 	}
 }
 
-func (m *WDAManager) listAppsCmd(udid, kind string) (string, []string, error) {
+func (m *WDAManager) listAppsCmd(udid, kind, iosVersion string) (string, []string, error) {
 	switch kind {
 	case activatorGoIOS:
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）")
 		}
-		return bin, goiosAppsArgs(udid), nil
+		args := goiosAppsArgs(udid)
+		if needsRemoteXPCTunnel(iosVersion) {
+			args = withGoIOSTunnelPort(args)
+		}
+		return bin, args, nil
 	case activatorTidevice:
 		bin := lookTool("tidevice", "tidevice.exe")
 		if bin == "" {
@@ -266,8 +298,8 @@ func (m *WDAManager) listAppsCmd(udid, kind string) (string, []string, error) {
 	}
 }
 
-func (m *WDAManager) ensureRunnerInstalled(udid, kind string) error {
-	installed, listErr := m.runnerInstalled(udid, kind)
+func (m *WDAManager) ensureRunnerInstalled(udid, kind, iosVersion string) error {
+	installed, listErr := m.runnerInstalled(udid, kind, iosVersion)
 	if listErr != nil {
 		slog.Warn("list installed apps failed", "udid", shortOf(udid), "error", listErr)
 	}
@@ -287,11 +319,11 @@ func (m *WDAManager) ensureRunnerInstalled(udid, kind string) error {
 		}
 		return fmt.Errorf("手机未安装 %s，且找不到 IPA %s。请先在 Mac 上运行 scripts/package-wda-ipa.sh，把打好的包放到该路径", m.wdaBundleID(), ipa)
 	}
-	return m.installIPA(udid, kind, ipa)
+	return m.installIPA(udid, kind, ipa, iosVersion)
 }
 
-func (m *WDAManager) runnerInstalled(udid, kind string) (bool, error) {
-	bin, args, err := m.listAppsCmd(udid, kind)
+func (m *WDAManager) runnerInstalled(udid, kind, iosVersion string) (bool, error) {
+	bin, args, err := m.listAppsCmd(udid, kind, iosVersion)
 	if err != nil {
 		return false, err
 	}
@@ -302,8 +334,8 @@ func (m *WDAManager) runnerInstalled(udid, kind string) (bool, error) {
 	return appListContains(out, m.wdaBundleID()), nil
 }
 
-func (m *WDAManager) installIPA(udid, kind, ipa string) error {
-	bin, args, err := m.installCmd(udid, kind, ipa)
+func (m *WDAManager) installIPA(udid, kind, ipa, iosVersion string) error {
+	bin, args, err := m.installCmd(udid, kind, ipa, iosVersion)
 	if err != nil {
 		return err
 	}
@@ -360,6 +392,104 @@ func lookTool(unixName, windowsName string) string {
 		}
 	}
 	return ""
+}
+
+func verOrUnknown(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "未知版本"
+	}
+	return v
+}
+
+func (m *WDAManager) ddiCacheDir() string {
+	if m != nil && strings.TrimSpace(m.derivedData) != "" {
+		return filepath.Join(filepath.Dir(m.derivedData), "ddi")
+	}
+	return filepath.Join(os.TempDir(), "wda-ddi")
+}
+
+// prepareDeviceForIOS 按系统版本补齐激活前置：DDI / go-ios 镜像、iOS 17+ 隧道、开发者模式。
+func (m *WDAManager) prepareDeviceForIOS(udid, kind, ver string, plan iosSupportPlan) error {
+	if plan.NeedDDI {
+		ddiErr := EnsureDeviceSupportDDI(udid)
+		if ddiErr != nil {
+			slog.Warn("EnsureDeviceSupportDDI failed", "udid", shortOf(udid), "error", ddiErr)
+		}
+		// Windows 没有 Xcode DeviceSupport；Mac 上 Xcode 镜像失败时再用 go-ios 下载挂载。
+		if kind == activatorGoIOS && (runtime.GOOS != "darwin" || ddiErr != nil) {
+			if err := goiosImageAuto(udid, m.ddiCacheDir()); err != nil {
+				if runtime.GOOS != "darwin" {
+					return fmt.Errorf("iOS %s 需要开发者镜像（ios image auto）：%w", verOrUnknown(ver), err)
+				}
+				slog.Warn("ios image auto failed", "udid", shortOf(udid), "error", err)
+			}
+		}
+	}
+
+	if plan.NeedTunnel || likelyNeedsTunnel(udid, ver) {
+		if err := goiosTunnel.Ensure(); err != nil {
+			if plan.NeedTunnel {
+				return err
+			}
+			slog.Warn("go-ios tunnel start skipped (version unknown)", "udid", shortOf(udid), "error", err)
+		} else if plan.NeedTunnel {
+			if err := goiosTunnel.WaitDevice(udid, 45*time.Second); err != nil {
+				if !plan.UserspaceOK {
+					return fmt.Errorf("iOS %s 的用户态隧道不受 go-ios 支持（需 17.4+）。请升级系统，或先用管理员执行 ios tunnel start（Windows 还需 wintun.dll）。原因：%w", ver, err)
+				}
+				return err
+			}
+		}
+	}
+
+	if plan.NeedDevMode {
+		if err := ensureDeveloperMode(udid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func goiosImageAutoArgs(udid, basedir string) []string {
+	args := []string{"--udid=" + udid, "image", "auto"}
+	if basedir != "" {
+		args = append(args, "--basedir="+basedir)
+	}
+	return args
+}
+
+func goiosImageAuto(udid, basedir string) error {
+	bin := lookTool("ios", "ios.exe")
+	if bin == "" {
+		return fmt.Errorf("未找到 go-ios（ios）")
+	}
+	if basedir != "" {
+		if err := os.MkdirAll(basedir, 0o755); err != nil {
+			return fmt.Errorf("创建开发者镜像目录：%w", err)
+		}
+	}
+	slog.Info("ios image auto", "udid", shortOf(udid), "basedir", basedir)
+	if _, err := runTool(bin, goiosImageAutoArgs(udid, basedir), 3*time.Minute); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureDeveloperMode(udid string) error {
+	bin := lookTool("ios", "ios.exe")
+	if bin == "" {
+		return nil
+	}
+	out, err := runTool(bin, []string{"--udid=" + udid, "--pretty", "devmode", "get"}, 20*time.Second)
+	if err != nil {
+		slog.Warn("devmode get failed", "udid", shortOf(udid), "error", err)
+		return nil
+	}
+	enabled, ok := parseDevModeEnabled(out)
+	if ok && !enabled {
+		return fmt.Errorf("iOS 16+ 未打开开发者模式。请到「设置 → 隐私与安全性 → 开发者模式」打开并重启手机后再激活")
+	}
+	return nil
 }
 
 // pingArgs 探测 IPv4 可达性。Windows 的 ping 开关与 Unix 不同。

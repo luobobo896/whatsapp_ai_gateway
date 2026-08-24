@@ -520,6 +520,7 @@ func (g *Gateway) deviceList() []map[string]any {
 		usbInfo[d.UDID] = d
 	}
 	g.ensureUSBTunnelsForList()
+	tunnelSet := liveGoIOSTunnelSet()
 
 	out := []map[string]any{}
 	emitted := map[string]bool{}
@@ -551,14 +552,21 @@ func (g *Gateway) deviceList() []map[string]any {
 		if deviceAbsent(attached, healthOK(d.LastHealth), busy, running) {
 			continue
 		}
+		iosVer := d.IOSVersion
+		if iosVer == "" {
+			iosVer = cachedIOSVersion(d.UDID)
+		}
+		needTun := needsRemoteXPCTunnel(iosVer)
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
-			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
+			"last_health": d.LastHealth, "ios_version": iosVer,
 			"configured": true, "usb": attached, "conn_type": conn,
 			"wda_running": wdaAppearsRunning(running, d.LastHealth),
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-			"deletable": deviceDeletable(busy, healthOK(d.LastHealth), running),
+			"deletable":    deviceDeletable(busy, healthOK(d.LastHealth), running),
+			"needs_tunnel": needTun,
+			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
 		})
 		emitted[d.UDID] = true
 	}
@@ -587,26 +595,38 @@ func (g *Gateway) deviceList() []map[string]any {
 			}
 			_ = g.Cfg.Save()
 			busy := g.Exec.IsBusy(d.UDID)
+			iosVer := dev.IOSVersion
+			if iosVer == "" {
+				iosVer = cachedIOSVersion(d.UDID)
+			}
+			needTun := needsRemoteXPCTunnel(iosVer)
 			out = append(out, map[string]any{
 				"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": dev.Name, "model": dev.Model,
 				"ip": dev.IP, "port": dev.Port, "auto_reactivate": true, "configured": true,
-				"last_health": dev.LastHealth, "ios_version": dev.IOSVersion,
+				"last_health": dev.LastHealth, "ios_version": iosVer,
 				"usb": true, "conn_type": "usb",
 				"wda_running": true,
 				"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-				"deletable": deviceDeletable(busy, true, true),
+				"deletable":    deviceDeletable(busy, true, true),
+				"needs_tunnel": needTun,
+				"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
 			})
 			continue
 		}
 		busy := g.Exec.IsBusy(d.UDID)
 		running := g.WDA.Running(d.UDID)
+		iosVer := cachedIOSVersion(d.UDID)
+		needTun := needsRemoteXPCTunnel(iosVer)
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
 			"usb": true, "conn_type": "usb", "wda_running": running,
 			"last_health": dev.LastHealth,
+			"ios_version": iosVer,
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-			"deletable": deviceDeletable(busy, healthOK(dev.LastHealth), running),
+			"deletable":    deviceDeletable(busy, healthOK(dev.LastHealth), running),
+			"needs_tunnel": needTun,
+			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
 		})
 	}
 	return out

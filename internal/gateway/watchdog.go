@@ -79,6 +79,8 @@ func (g *Gateway) watchOnceSafe() {
 func (g *Gateway) watchOnce() {
 	cfg := g.Cfg
 	g.refreshSerials() // USB 在线设备补取硬件序列号（缓存过就秒回）
+	g.refreshIOSVersions()
+	goiosTunnel.Supervise()
 	// USB 隧道对账：配置内且 USB 在线的设备起本地隧道，拔线即撤。
 	tunnelPorts := map[string]int{}
 	for _, d := range cfg.Devices {
@@ -515,6 +517,7 @@ func applyHealth(dev *Device, h WDAHealth) {
 	}
 	if h.Version != "" {
 		dev.IOSVersion = h.Version
+		rememberIOSVersion(dev.UDID, h.Version)
 	}
 }
 

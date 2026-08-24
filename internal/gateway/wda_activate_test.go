@@ -116,10 +116,10 @@ func TestProtocolCmdMissingBinary(t *testing.T) {
 	m := NewWDAManager("", "", "")
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS, ""); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS, "", "18.6"); err == nil {
 		t.Fatal("expected error when ios binary is missing")
 	}
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice, ""); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice, "", "15.8.7"); err == nil {
 		t.Fatal("expected error when tidevice binary is missing")
 	}
 }
@@ -157,7 +157,7 @@ func TestProtocolCmdPrefersWifiRunwda(t *testing.T) {
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "4886579a97a96bad83b527862bab409b5a07c741"
-	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237")
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237", "15.8.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "00008120-000865D90A10C01E"
-	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "")
+	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +210,48 @@ func plantActivateTools(t *testing.T, wrap, ios bool) string {
 		}
 	}
 	return dir
+}
+
+func TestProtocolCmdIOS17SkipsWifiRunwda(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	udid := "00008120-000865D90A10C01E"
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237", "18.6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) == "wifi-runwda" {
+		t.Fatal("iOS 17+ must not use wifi-runwda")
+	}
+	if filepath.Base(bin) != "ios" {
+		t.Fatalf("bin=%q want ios", bin)
+	}
+	if !containsExact(args, "runwda") || !containsExact(args, "--tunnel-info-port=28100") {
+		t.Fatalf("runwda tunnel args: %#v", args)
+	}
+}
+
+func TestInstallCmdAddsTunnelPortOnIOS17(t *testing.T) {
+	dir := plantActivateTools(t, false, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	_, args, err := m.installCmd("00008120-000865D90A10C01E", activatorGoIOS, "/tmp/wda.ipa", "17.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsExact(args, "--tunnel-info-port=28100") || !containsExact(args, "install") {
+		t.Fatalf("%v", args)
+	}
+	_, args16, err := m.installCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", activatorGoIOS, "/tmp/wda.ipa", "15.8.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsExact(args16, "--tunnel-info-port=28100") {
+		t.Fatalf("iOS 15 install must not require tunnel port: %v", args16)
+	}
 }
 
 func TestWDABundleIDDefault(t *testing.T) {
@@ -313,7 +355,7 @@ func TestEnsureRunnerInstalledDefersWhenListFails(t *testing.T) {
 	// 本机没有 ios 时 list 失败：不能断定「没装」，缺 IPA 也不硬失败，交给后续 start。
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if err := m.ensureRunnerInstalled("00008120-000865D90A10C01E", activatorGoIOS); err != nil {
+	if err := m.ensureRunnerInstalled("00008120-000865D90A10C01E", activatorGoIOS, "18.0"); err != nil {
 		t.Fatalf("list-failed + missing ipa should defer to start, got %v", err)
 	}
 }
@@ -322,10 +364,10 @@ func TestInstallCmdMissingBinary(t *testing.T) {
 	m := NewWDAManager("", "", "")
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorGoIOS, "/tmp/wda.ipa"); err == nil {
+	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorGoIOS, "/tmp/wda.ipa", "18.0"); err == nil {
 		t.Fatal("expected error when ios binary is missing")
 	}
-	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorTidevice, "/tmp/wda.ipa"); err == nil {
+	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorTidevice, "/tmp/wda.ipa", "15.8.7"); err == nil {
 		t.Fatal("expected error when tidevice binary is missing")
 	}
 }

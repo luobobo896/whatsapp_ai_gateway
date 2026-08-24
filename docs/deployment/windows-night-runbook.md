@@ -56,7 +56,7 @@
 2. 手机：开发者模式开着、已信任此电脑、设置里已信任开发者 App。
 3. Python 3.6+ 后：`pip3 install -U "tidevice[openssl]"`，或下载 [go-ios](https://github.com/danielpaulus/go-ios) 的 `ios.exe`。
 4. Windows 版 `idevice_id` / `iproxy`（libimobiledevice）。放到 `PATH`，或放到网关旁边的 `bin\` 并设 `WDA_GATEWAY_RESOURCES` 指向该目录的上一级。
-5. iOS 17+ 才需要 `wintun.dll`。今晚这台 iPhone 7 是 **iOS 15.8.8，不需要**。
+5. 今晚这台 iPhone 7 是 **iOS 15.8.8，不需要隧道**。iOS 17.4+ 由网关自动 `ios tunnel start --userspace`；只有 17.0–17.3 内核隧道才需要 `wintun.dll`。
 6. 把 `dist/windows-amd64/gateway.exe` 和 `static\` 拷到 Windows。不要拷 `devices.json` / `gateway.db` / 云凭证。
 
 网关默认：Windows 上 `signing.activator=auto` → 有 `ios.exe` 就用它，否则用 `tidevice`。  

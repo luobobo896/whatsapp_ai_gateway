@@ -82,6 +82,7 @@ func main() {
 	exec := gateway.NewExecutor(cfg, wdaMgr, llm, resultsDir)
 	et := gateway.NewEasyTierManager(state, cfg)
 	defer et.Stop() // 网关退出时停掉托管的 easytier-core，避免孤儿进程占用端口
+	defer gateway.StopGoIOSTunnel()
 	gw := gateway.New(cfg, wdaMgr, exec, llm, et)
 
 	// 优雅停机：收到信号后先取消上下文——云会话会正常发送关闭帧再退出，

@@ -736,6 +736,7 @@ function deviceCard(d){
             ${serial && d.name ? `<span class="tag">${esc(d.name)}</span>` : ''}
             <span class="tag">${model}</span>
             ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
+            ${d.needs_tunnel ? (d.tunnel_ready ? '<span class="tag tag-green">iOS17+ 隧道</span>' : '<span class="tag tag-orange">需隧道</span>') : ''}
             ${d.conn_type ? (d.usb ? '<span class="tag tag-accent">USB</span>' : '<span class="tag">Wi-Fi</span>') : ''}
             ${wdaBadge}
           </div>

@@ -77,10 +77,12 @@
 
 本工程 WDA 的 `PRODUCT_BUNDLE_IDENTIFIER` 是 `com.wda.WebRunner`，装到真机上的 UI test runner 一般是 `com.wda.WebRunner.xctrunner`。
 
-iOS 版本差异：
+iOS 版本差异（网关激活时自动分流，iOS 15 → 当前最新正式版）：
 
-- iOS ≤16：还要挂匹配的 Developer Disk Image。Mac 上本仓库已自动从 Xcode 拷；Windows 上要用 go-ios `image` 或预先挂好，不能再读 Xcode 目录。
-- iOS 17+：不再走旧 DDI，要 RemoteXPC 隧道。go-ios 需要 Windows 上的 `wintun.dll`。
+- iOS 15–16：挂匹配的 Developer Disk Image。Mac 从 Xcode DeviceSupport 拷；Windows/Linux 走 `ios image auto --basedir=<state>/ddi`。
+- iOS 16+：激活前读 `ios devmode get`；未开开发者模式直接失败并提示去设置里打开。
+- iOS 17+：不再走旧 DDI。激活前拉起并看护 `ios tunnel start --userspace`（默认绑 127.0.0.1:28100），`tunnel ls` 见到该机再 `install` / `runwda`。iOS 17+ 强制 go-ios，不用 wifi-runwda，也不用 tidevice。
+- 用户态隧道覆盖 iOS 17.4+（含 18 / 26）。**不必**先装 `wintun.dll`。iOS 17.0–17.3 请升级；若必须留在 17.0–17.3，才需要管理员 + 内核隧道 + Windows `wintun.dll`。
 
 ## 4. 本仓库的最小改动
 
@@ -104,7 +106,7 @@ Windows 上 `EnsureDeviceSupportDDI` 直接跳过；`ping` 改用 `-n 1 -w 2000`
 
 1. 安装 Apple Devices / iTunes，确认 USB 枚举（`idevice_id -l` 有 UDID）。
 2. 把 `ios.exe`（或 `tidevice.exe`）和 Windows 版 `iproxy`/`idevice_id`/`ideviceinfo` 放到 `PATH` 或 `WDA_GATEWAY_RESOURCES/bin`。
-3. iOS 17+ 把 `wintun.dll` 放到系统目录，并拉起 go-ios tunnel。
+3. iOS 17.4+ 由网关自动 `ios tunnel start --userspace`，一般不用 wintun。只有卡在 17.0–17.3 且要走内核隧道时，才把 `wintun.dll` 放到系统目录并管理员启动。
 4. 把 `wda.ipa` 放到网关状态目录（或 `-ipa`），手机信任同一张开发者证书。
 5. 交叉编译网关：`GOOS=windows GOARCH=amd64 go build -o gateway.exe ./cmd/gateway`。
 
@@ -116,7 +118,10 @@ Windows 上 `EnsureDeviceSupportDDI` 直接跳过；`ping` 改用 `-n 1 -w 2000`
 - [x] `goiosArgs` / `tideviceArgs` 含 UDID、bundle、USE_PORT、WDA_DEVICE_UDID
 - [x] `goiosInstallArgs` / `tideviceInstallArgs` 与 applist 参数
 - [x] 缺 `ios`/`tidevice` 二进制时 Activate 返回明确错误，不假装成功
+- [x] iOS 版本分流：15–16 DDI / 16+ 开发者模式 / 17+ 用户态隧道 + 强制 go-ios
+- [x] `ios tunnel start --userspace` 守护、复用已有 agent、网关退出停本进程拉起的守护
+- [x] iOS 17+ `install`/`apps`/`runwda` 带 `--tunnel-info-port=28100`；不走 wifi-runwda
 - [ ] Windows 真机：放好 `wda.ipa` 后 `POST /api/devices/{udid}/activate`，未装会 install，然后 `/status` ready
-- [ ] Mac 有 `ios`/`tidevice` 时走 IPA，不再默认 xcodebuild
+- [ ] iOS 17.4+ 真机：点激活后管理页出现「iOS17+ 隧道」且能发出一条消息
 
 回滚：把 `signing.activator` 设为 `xcodebuild`（仅 Mac）。

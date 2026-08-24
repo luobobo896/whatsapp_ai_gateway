@@ -81,7 +81,7 @@ text = f"""WDA Farm Gateway {version} (Windows {arch})
   1. Apple Devices 或 iTunes（提供 usbmux）
   2. iPhone 已配对、已开开发者模式、已信任开发者证书
   3. wda.ipa（或手机上已装着同一签名的 WebDriverAgentRunner，bundle 默认 com.wda.WebRunner.xctrunner）
-  4. iOS 17+ 需要 wintun.dll（go-ios 隧道）
+  4. iOS 17.4+ 由网关自动 ios tunnel start --userspace（一般不用 wintun）。只有 17.0–17.3 内核隧道才需要 wintun.dll
   5. 桌面壳：WebView2 Runtime
 
 连发探针（WDA 已在 127.0.0.1:18100 ready 时）：

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -152,6 +153,45 @@ func (g *Gateway) refreshSerials() {
 			dev.Serial = s
 			_ = g.Cfg.Save()
 		}
+	}
+}
+
+// refreshIOSVersions 给 USB 在线设备补 ProductVersion（激活分流、管理页展示用）。
+func (g *Gateway) refreshIOSVersions() {
+	if g == nil || g.Cfg == nil {
+		return
+	}
+	dirty := false
+	seen := map[string]bool{}
+	for _, u := range USBUDIDs() {
+		seen[u] = true
+		if v := cachedIOSVersion(u); v != "" {
+			if dev := g.Cfg.Device(u); dev != nil && dev.IOSVersion == "" {
+				dev.IOSVersion = v
+				dirty = true
+			}
+			continue
+		}
+		if v := strings.TrimSpace(ideviceInfoValue(u, "ProductVersion")); v != "" {
+			rememberIOSVersion(u, v)
+			if dev := g.Cfg.Device(u); dev != nil && dev.IOSVersion != v {
+				dev.IOSVersion = v
+				dirty = true
+			}
+		}
+	}
+	for i := range g.Cfg.Devices {
+		dev := &g.Cfg.Devices[i]
+		if dev.UDID == "" || !seen[dev.UDID] || dev.IOSVersion != "" {
+			continue
+		}
+		if v := cachedIOSVersion(dev.UDID); v != "" {
+			dev.IOSVersion = v
+			dirty = true
+		}
+	}
+	if dirty {
+		_ = g.Cfg.Save()
 	}
 }
 

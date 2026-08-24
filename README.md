@@ -19,9 +19,13 @@ Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、
 
 ## 机型 / 系统
 
-- iPhone 7 及以上，iOS 15+。iOS 16+ 需打开开发者模式。
+- iPhone 7 及以上，**iOS 15 到当前最新正式版**（含 16 / 17 / 18 / 26）。
+- iOS 16+ 必须打开开发者模式。未开时激活会直接报错，不会假装成功。
 - 老机型（40 位 UDID）激活用 `id=<udid>`；带连字符的新 UDID 用 `platform=iOS,id=` 且大写。
-- 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点激活。未装 Runner 会 `install`，再 `ios runwda` / `tidevice xctest`（不要 `wdaproxy`）。
+- 版本分流（点激活自动做，不要人手跑文章里的命令）：
+  - **iOS 15–16**：补 Developer Disk Image（Mac 拷 Xcode 镜像；Windows 走 `ios image auto`），再 `ios runwda` / `tidevice xctest`。
+  - **iOS 17+**：先拉起并看护 `ios tunnel start --userspace`，等该机出现在隧道列表，再 `ios install` / `ios runwda`。不用 Airtest。iOS 17.0–17.3 的用户态隧道不受 go-ios 支持，请升到 17.4+。
+- 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点激活。未装 Runner 会 `install`，再按上面分流拉起（不要 `wdaproxy`）。
 - 只有 Mac 上没有 `ios`/`tidevice` 时才回退 `xcodebuild`。不要在缺 iOS Platform 时反复 `build-for-testing`（会报 exit 70）。
 
 ## 快速开始（按系统分开）
@@ -120,7 +124,7 @@ go run ./cmd/wda-probe -wda http://127.0.0.1:18100 \
 | GET  | /api/session | 登录状态 |
 | GET  | /api/cloud | 云通道状态 |
 | GET/PUT | /api/cloud/config | 云地址等（脱敏读） |
-| GET  | /api/devices | USB/Wi‑Fi 发现的设备 |
+| GET  | /api/devices | USB/Wi‑Fi 发现的设备（含 `ios_version` / `needs_tunnel` / `tunnel_ready`） |
 | POST | /api/devices/{udid}/activate | 拉起该机 WDA |
 | POST | /api/devices/{udid}/stop | 停止该机 WDA |
 | GET  | /api/devices/{udid}/health | 健康检查 |
