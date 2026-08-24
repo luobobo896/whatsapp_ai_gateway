@@ -4,7 +4,7 @@ __pycache__/
 data/
 .DS_Store
 /gateway
-
+/dist
 # 本地运行时配置（含网关凭证 token，禁止提交）
 devices.json
 scripts/signing.env

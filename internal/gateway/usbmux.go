@@ -19,9 +19,10 @@ import (
 
 // usbTunnelProc 一台设备的 iproxy 进程。
 type usbTunnelProc struct {
-	cmd  *exec.Cmd
-	port int
-	done chan struct{}
+	cmd     *exec.Cmd
+	port    int
+	network bool // true=usbmux Network 隧道（iproxy -n，无线设备），false=USB 隧道
+	done    chan struct{}
 }
 
 type usbTunnelManager struct {
@@ -72,15 +73,19 @@ func freeLocalPort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
-// usbTunnelsToDrop 连续 missLimit 轮不在 USB 列表里的隧道才拆除。
-// 枚举整表为空时也累计 miss，避免拔到另一台电脑后死隧道永不回收。
-func usbTunnelsToDrop(usb map[string]bool, tunneled []string, misses map[string]int, missLimit int) []string {
+// usbTunnelsToDrop 连续 missLimit 轮不在对应在线集合（USB 隧道看 usb，Network 隧道看 netSet）
+// 里的隧道才拆除。枚举整表为空时也累计 miss，避免拔到另一台电脑后死隧道永不回收。
+func usbTunnelsToDrop(usb, netSet map[string]bool, procs map[string]*usbTunnelProc, misses map[string]int, missLimit int) []string {
 	if missLimit < 1 {
 		missLimit = 1
 	}
 	var drop []string
-	for _, udid := range tunneled {
-		if usb[udid] {
+	for udid, proc := range procs {
+		set := usb
+		if proc != nil && proc.network {
+			set = netSet
+		}
+		if set[udid] {
 			delete(misses, udid)
 			continue
 		}
@@ -93,8 +98,11 @@ func usbTunnelsToDrop(usb map[string]bool, tunneled []string, misses map[string]
 	return drop
 }
 
-// EnsureUSBTunnels 按当前 USB 设备与目标端口对账隧道（看护循环每轮调用）。
+// EnsureUSBTunnels 按当前 USB / usbmux Network 设备与目标端口对账隧道（看护循环每轮调用）。
 // 拔线只停 iproxy，不触碰 WDA 激活进程 / 机上 XCTest。
+//  - USB 直连设备：iproxy 走 USB（默认）；
+//  - 无线设备（usbmux ConnectionType=Network、无 USB）：iproxy -n 走 Network 隧道，
+//    让网关能访问 WDA 的 loopback :8100（Wi-Fi 直连受 iOS 本地网络权限/绑定影响，隧道更稳）。
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
 func EnsureUSBTunnels(rawPorts map[string]int) {
 	udids := USBUDIDs()
@@ -111,16 +119,16 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 	for _, u := range udids {
 		usb[normalizeUDID(u)] = true
 	}
+	netSet := map[string]bool{}
+	for u := range usbmuxNetworkUDIDs() {
+		netSet[normalizeUDID(u)] = true
+	}
 	if len(udids) == 0 && len(m.procs) > 0 {
 		// 整表为空：可能是 ioreg 抖动，也可能是手机都拔到别的电脑。
 		// 仍走连续 miss 拆除，禁止跳过对账把死隧道留到永远。
 		slog.Warn("usb discovery empty with active tunnels, counting misses")
 	}
-	tunneled := make([]string, 0, len(m.procs))
-	for udid := range m.procs {
-		tunneled = append(tunneled, udid)
-	}
-	for _, udid := range usbTunnelsToDrop(usb, tunneled, m.misses, 2) {
+	for _, udid := range usbTunnelsToDrop(usb, netSet, m.procs, m.misses, 2) {
 		if p := m.procs[udid]; p != nil && p.cmd.Process != nil {
 			_ = p.cmd.Process.Signal(os.Interrupt)
 		}
@@ -134,29 +142,56 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 		if _, ok := m.procs[udid]; ok {
 			continue
 		}
-		if !usb[udid] {
+		if usb[udid] {
+			// USB 直连隧道
+			local, err := freeLocalPort()
+			if err != nil {
+				continue
+			}
+			args := []string{"-u", udid}
+			if runtime.GOOS == "windows" {
+				// Windows 版 libimobiledevice iproxy 只认两个独立参数，
+				// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
+				args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
+			} else {
+				args = append(args, fmt.Sprintf("%d:%d", local, devPort))
+			}
+			cmd := exec.Command(bin, args...)
+			cmd.Env = append(os.Environ(), bundleLibFallback()...)
+			if err := cmd.Start(); err != nil {
+				continue
+			}
+			p := &usbTunnelProc{cmd: cmd, port: local, done: make(chan struct{})}
+			m.procs[udid] = p
+			slog.Info("usb tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
+			go func() {
+				_ = cmd.Wait()
+				close(p.done)
+				m.mu.Lock()
+				if cur, ok := m.procs[udid]; ok && cur == p {
+					delete(m.procs, udid)
+				}
+				m.mu.Unlock()
+			}()
+			continue
+		}
+		// 无线设备：usbmux Network 隧道（iproxy -n，仅 macOS/Linux；Windows 走 go-ios/tidevice）
+		if !netSet[udid] || runtime.GOOS == "windows" {
 			continue
 		}
 		local, err := freeLocalPort()
 		if err != nil {
 			continue
 		}
-		args := []string{"-u", udid}
-		if runtime.GOOS == "windows" {
-			// Windows 版 libimobiledevice iproxy 只认两个独立参数，
-			// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
-			args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
-		} else {
-			args = append(args, fmt.Sprintf("%d:%d", local, devPort))
-		}
+		args := []string{"-u", udid, "-n", fmt.Sprintf("%d:%d", local, devPort)}
 		cmd := exec.Command(bin, args...)
 		cmd.Env = append(os.Environ(), bundleLibFallback()...)
 		if err := cmd.Start(); err != nil {
 			continue
 		}
-		p := &usbTunnelProc{cmd: cmd, port: local, done: make(chan struct{})}
+		p := &usbTunnelProc{cmd: cmd, port: local, network: true, done: make(chan struct{})}
 		m.procs[udid] = p
-		slog.Info("usb tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
+		slog.Info("network tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
 		go func() {
 			_ = cmd.Wait()
 			close(p.done)

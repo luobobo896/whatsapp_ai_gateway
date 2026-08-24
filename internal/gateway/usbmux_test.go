@@ -7,14 +7,17 @@ import (
 
 func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
 	misses := map[string]int{}
-	tunnels := []string{"u1", "u2"}
-	if got := usbTunnelsToDrop(nil, tunnels, misses, 2); len(got) != 0 {
+	procs := map[string]*usbTunnelProc{
+		"u1": {port: 1, done: make(chan struct{})},
+		"u2": {port: 2, done: make(chan struct{})},
+	}
+	if got := usbTunnelsToDrop(nil, nil, procs, misses, 2); len(got) != 0 {
 		t.Fatalf("first empty round must keep tunnels, got %v", got)
 	}
 	if misses["u1"] != 1 || misses["u2"] != 1 {
 		t.Fatalf("misses=%v", misses)
 	}
-	got := usbTunnelsToDrop(nil, tunnels, misses, 2)
+	got := usbTunnelsToDrop(nil, nil, procs, misses, 2)
 	if len(got) != 2 {
 		t.Fatalf("second empty round must drop both, got %v", got)
 	}
@@ -25,12 +28,37 @@ func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
 
 func TestUSBTunnelsToDropResetsWhenRediscovered(t *testing.T) {
 	misses := map[string]int{"u1": 1}
-	got := usbTunnelsToDrop(map[string]bool{"u1": true}, []string{"u1"}, misses, 2)
+	procs := map[string]*usbTunnelProc{"u1": {port: 1, done: make(chan struct{})}}
+	got := usbTunnelsToDrop(map[string]bool{"u1": true}, nil, procs, misses, 2)
 	if len(got) != 0 {
 		t.Fatalf("rediscovered must not drop: %v", got)
 	}
 	if _, ok := misses["u1"]; ok {
 		t.Fatalf("misses should reset: %v", misses)
+	}
+}
+
+func TestNetworkTunnelsToDropUsesNetSet(t *testing.T) {
+	misses := map[string]int{}
+	procs := map[string]*usbTunnelProc{
+		"u1": {port: 1, network: true, done: make(chan struct{})},
+	}
+	// u1 不在 netSet：第一轮 miss=1 keep，第二轮 drop
+	if got := usbTunnelsToDrop(nil, nil, procs, misses, 2); len(got) != 0 {
+		t.Fatalf("first round must keep, got %v", got)
+	}
+	if misses["u1"] != 1 {
+		t.Fatalf("misses=%v", misses)
+	}
+	got := usbTunnelsToDrop(nil, nil, procs, misses, 2)
+	if len(got) != 1 {
+		t.Fatalf("second round must drop network tunnel, got %v", got)
+	}
+	// 在 netSet 中：keep + reset
+	misses = map[string]int{}
+	procs = map[string]*usbTunnelProc{"u1": {port: 1, network: true, done: make(chan struct{})}}
+	if got := usbTunnelsToDrop(nil, map[string]bool{"u1": true}, procs, misses, 2); len(got) != 0 {
+		t.Fatalf("network rediscovered must not drop, got %v", got)
 	}
 }
 

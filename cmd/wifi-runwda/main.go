@@ -86,6 +86,9 @@ func main() {
 		"--env=USE_PORT=" + strconv.Itoa(*port),
 		"--env=WDA_DEVICE_UDID=" + *udid,
 	}
+	// 注意：不要注入 USE_IP。隧道（USB/Network iproxy）都转发设备的 loopback:8100，
+	// WDA 绑定 Wi-Fi IP 会让 loopback 不再监听、隧道全部失效；而 Wi-Fi 直连又依赖
+	// iOS「本地网络」权限。保持 WDA 监听 loopback，靠 usbmux 隧道访问最稳。
 	cmd := exec.Command(*iosBin, args...)
 	cmd.Env = append(os.Environ(), "USBMUXD_SOCKET_ADDRESS="+muxAddr)
 	cmd.Stdout = os.Stdout
