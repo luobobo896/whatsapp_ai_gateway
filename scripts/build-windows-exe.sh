@@ -19,7 +19,7 @@ ARCH="${GOARCH:-amd64}"
 case "$ARCH" in
   amd64|386|arm64) ;;
   *)
-    echo "不支持的 GOARCH=$ARCH（只用 amd64 / 386 / arm64）" >&2
+    echo "不支持的 GOARCH=${ARCH}（只用 amd64 / 386 / arm64）" >&2
     exit 1
     ;;
 esac
@@ -37,11 +37,29 @@ else
   echo "  跳过测试（SKIP_TESTS=1）"
 fi
 
-echo "▶ [2/4] 交叉编译 GOOS=windows GOARCH=$ARCH（gateway + probe）"
+echo "▶ [2/4] 交叉编译 GOOS=windows GOARCH=${ARCH}（gateway + probe）"
 mkdir -p "$OUT/static"
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$EXE" ./cmd/gateway
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" -o "$OUT/wda-probe.exe" ./cmd/wda-probe
 cp "$ROOT/static/index.html" "$OUT/static/index.html"
+
+echo "▶ [2.5/4] 激活辅助二进制（wifi-runwda 源构建，避免跑到旧包）"
+# Windows 激活走 usbmux Network / USB 回退，必须用仓库当前源码编出的 wifi-runwda.exe，
+# 否则即便 gateway.exe 是新版，Helper 仍会用旧逻辑。
+mkdir -p "$OUT/bin"
+CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
+  -o "$OUT/bin/wifi-runwda.exe" ./cmd/wifi-runwda
+# wifi-lockdown 是独立模块（源码未改，沿用仓库 tools/ 的 Windows 版）；go-ios 用仓库工具。
+cp "$ROOT/tools/wifi-lockdown.exe" "$OUT/bin/wifi-lockdown.exe" 2>/dev/null || true
+for b in ios.exe idevice_id.exe ideviceinfo.exe iproxy.exe; do
+  [ -x "$ROOT/tools/$b" ] && cp "$ROOT/tools/$b" "$OUT/bin/" 2>/dev/null || true
+done
+if [ -f "$ROOT/tools/wda.ipa" ]; then
+  cp "$ROOT/tools/wda.ipa" "$OUT/wda.ipa"
+elif [ -f "$ROOT/dist/wda.ipa" ]; then
+  cp "$ROOT/dist/wda.ipa" "$OUT/wda.ipa"
+fi
+ls "$OUT/bin/" 2>/dev/null || true
 
 echo "▶ [3/4] 桌面壳 WDAFarmGateway.exe（WebView2 + 托盘）"
 if [ "${SKIP_DESKTOP:-0}" != "1" ]; then
