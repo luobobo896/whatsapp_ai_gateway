@@ -93,7 +93,7 @@ flowchart TD
 - **第一份包、证书到期、换账号，还是要回苹果电脑重新编译签名。** 不是「办了企业账号就永远不用 Mac」。
 - 苹果说发行证书从签发日起大约三年有效，但会员资格一断或被吊销，包立刻不能用。
 - 企业证书一旦被吊销，**所有用这张证签过的包一起失效**，所有已经装上的手机一起打不开。对外卖设备、给客户装，就是在赌这一下。
-- 本仓库默认路径仍按个人账号写（先登记 UDID 再出包）。没有单独的「企业出包」脚本；真要换企业证书，是换签名身份后再跑同一套 `package-wda-ipa.sh`，不是换一种激活方式。
+- 出包是同一条脚本 `scripts/package-wda-ipa.sh`。个人 / 企业用 `SIGN_MODE` 切换，不要另写一套打包。激活方式不变，变的是 IPA 里的描述文件。
 
 企业账号里如果只做开发 / Ad Hoc 测试、不用 In-House 内部包，苹果同样要求登记设备，额度也是每类设备每年 100 台。那种用法和新机规则跟个人账号一样，没有「免登记」这回事。
 
@@ -124,14 +124,24 @@ flowchart TD
 sh scripts/package-wda-ipa.sh
 ```
 
-默认产出：`dist/wda.ipa`。
+默认产出：`dist/wda.ipa`。个人账号可直接跑。企业账号先拷配置再出包：
+
+```bash
+cp scripts/signing.env.example scripts/signing.env
+# 编辑 SIGN_MODE=enterprise、TEAM、IDENTITY、PROFILE 或 PROFILE_SPECIFIER
+sh scripts/package-wda-ipa.sh
+```
+
+`scripts/signing.env` 含证书信息，不要提交。
 
 脚本会：
 
-1. 先找已经编过、签过名的 `WebDriverAgentRunner-Runner.app`（常见位置：本机网关 derived、仓库 `derived`、`/tmp/WebDriverAgentFarmDerived`）。
-2. 找不到再调用 `xcodebuild build-for-testing` 编一次（需要本机有对应 iOS Platform；缺了会报 exit 70，不要反复点）。
-3. 把 Runner.app 打成标准 IPA：`Payload/WebDriverAgentRunner-Runner.app`。
-4. 装到手机上的 bundle 是 `com.wda.WebRunner.xctrunner`。
+1. 读 `SIGNING_ENV`（默认 `scripts/signing.env`）和命令行环境变量，收成 `personal` 或 `enterprise`。
+2. 先找已经编过、签过名的 `WebDriverAgentRunner-Runner.app`。签名模式和目标不一致就重编。
+3. 找不到再调用 `xcodebuild build-for-testing`（需要本机有对应 iOS Platform；缺了会报 exit 70，不要反复点）。
+4. 个人：自动签名 + `-allowProvisioningUpdates`。企业：手工 `CODE_SIGN_STYLE=Manual`，不更新开发描述文件。
+5. 把 Runner.app 打成标准 IPA，并用 `ipa-inspect` 核对描述文件：企业必须 `ProvisionsAllDevices` 且设备数为 0。
+6. 装到手机上的 bundle 是 `com.wda.WebRunner.xctrunner`。
 
 可选环境变量：
 
@@ -140,8 +150,14 @@ sh scripts/package-wda-ipa.sh
 | `OUT` | 输出路径，默认 `dist/wda.ipa` |
 | `PROJECT` | WDA 工程目录，默认仓库旁 `../whatsapp_ai_ios/WhatsAppDeviceAgent` |
 | `DERIVED` | 已有编译产物目录；指定后优先用这里的 Runner.app |
-| `TEAM` | `DEVELOPMENT_TEAM`；空则用工程里写死的值 |
+| `TEAM` | `DEVELOPMENT_TEAM`；空则用工程里写死的值，或从企业描述文件补 |
+| `SIGN_MODE` | `auto`（默认）/ `personal` / `enterprise` |
+| `IDENTITY` | `CODE_SIGN_IDENTITY`；企业必填 |
+| `PROFILE` | In-House `.mobileprovision` 路径或 UUID |
+| `PROFILE_SPECIFIER` | Xcode 里的描述文件名 |
+| `SIGNING_ENV` | 额外 env 文件，默认 `scripts/signing.env` |
 | `SKIP_BUILD=1` | 只打包已有 Runner.app，不跑 xcodebuild |
+| `FORCE_BUILD=1` | 忽略已有 Runner.app，按当前模式重编 |
 
 已经有签过名的 derived、本机又缺 iOS Platform 时，用这一条，避免再踩 exit 70：
 
@@ -202,7 +218,7 @@ Payload/WebDriverAgentRunner-Runner.app/PlugIns/WebDriverAgentRunner.xctest/
 | `找不到 WDA 工程` | 设置 `PROJECT`，或先在 Xcode 编出 Runner.app 再设 `DERIVED` |
 | `build-for-testing` exit 70 | 本机缺对应 iOS Platform。用已有 derived + `SKIP_BUILD=1`，不要反复编 |
 | 包打出来了，Windows 装不进这台新手机 | 个人账号：没登记这台 UDID，或登记后还在用旧包。企业账号：先确认是不是拿内部包给外面的人装 |
-| 装上了但启动立刻退出 | 手机里还没信任这个开发者（设置 → 通用 → VPN 与设备管理） |
+| 装上了但启动立刻退出 | 网关激活会自动装描述文件并尝试点「信任」。若仍退出，看手机是否弹出锁屏密码，或开发者是否出现在「VPN 与设备管理」 |
 | 把 Xcode 工程目录拷到 Windows 当日常路径 | 错了。Windows 要的是 `wda.ipa`，不是 `-project` |
 
 ---

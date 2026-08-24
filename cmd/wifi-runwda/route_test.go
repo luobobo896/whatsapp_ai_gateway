@@ -73,4 +73,20 @@ func TestWaitPreferNetworkUSBFallback(t *testing.T) {
 	if !ok || got.Type != "USB" {
 		t.Fatalf("got %#v ok=%v", got, ok)
 	}
+	if err := requireMuxNetwork(udid, got, ok); err == nil {
+		t.Fatal("USB-only is not Network (unplug unsafe)")
+	}
+}
+
+func TestRequireMuxNetwork(t *testing.T) {
+	udid := "5060c403afdee4c15a0edeab69dba0524e2ce592"
+	if err := requireMuxNetwork(udid, muxDevice{}, false); err == nil {
+		t.Fatal("missing device must fail")
+	}
+	if err := requireMuxNetwork(udid, muxDevice{ID: 1, Type: "USB"}, true); err == nil {
+		t.Fatal("USB must fail")
+	}
+	if err := requireMuxNetwork(udid, muxDevice{ID: 2, Type: "Network"}, true); err != nil {
+		t.Fatal(err)
+	}
 }

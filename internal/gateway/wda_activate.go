@@ -98,7 +98,11 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind,
 		}
 	}
 
-	// USB 最短路径：不在激活时开无线 lockdown / 不等 Network。
+	// iOS 15–16：先打开无线 lockdown，再等 usbmux Network 拉起 XCTest。
+	// 走 USB 也能看到 Automation Running，但拔线会拆 testmanagerd。
+	if !plan.NeedTunnel {
+		enableWifiLockdown(udid)
+	}
 	if err := m.prepareDeviceForIOS(udid, kind, ver, plan); err != nil {
 		return err
 	}
@@ -126,16 +130,20 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifi
 	bundle := m.wdaBundleID()
 	switch kind {
 	case activatorGoIOS:
-		// 激活固定走 USB 上的 ios runwda。wifi-runwda 会空等 Network 最多 45s，不在点激活路径里用。
-		_ = wifiIP
+		// iOS 17+ 必须走 go-ios RSD 隧道；wifi-runwda 劫持 usbmux 会和它打架。
+		if !needsRemoteXPCTunnel(iosVersion) {
+			if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
+				slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP, "ios", iosVersion)
+				return bin, args, nil
+			}
+			return "", nil, fmt.Errorf("未找到 wifi-runwda：iOS %s 必须走 usbmux Network 激活，否则拔 USB 会拆掉 Automation Running", verOrUnknown(iosVersion))
+		}
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
 		}
 		args := goiosArgs(udid, bundle, port, reportedUDID)
-		if needsRemoteXPCTunnel(iosVersion) {
-			args = withGoIOSTunnelPort(args)
-		}
+		args = withGoIOSTunnelPort(args)
 		return bin, args, nil
 	case activatorTidevice:
 		bin := lookTool("tidevice", "tidevice.exe")
@@ -167,6 +175,7 @@ func wifiRunwdaInvocation(udid, wifiIP string, port int, reportedUDID, bundleID 
 		"-port", strconv.Itoa(port),
 		"-bundle", bundleID,
 		"-ios", iosBin,
+		"-wait-network", "8s",
 	}
 	if wifiIP != "" {
 		args = append(args, "-ip", wifiIP)
@@ -326,6 +335,7 @@ func (m *WDAManager) ensureRunnerInstalled(udid, kind, iosVersion string) error 
 			return fmt.Errorf("iOS %s 需要开发者镜像（ios image auto）：%w", verOrUnknown(iosVersion), err)
 		}
 	}
+	m.installSigningProfile(udid, kind, iosVersion, ipa)
 	return m.installIPA(udid, kind, ipa, iosVersion)
 }
 

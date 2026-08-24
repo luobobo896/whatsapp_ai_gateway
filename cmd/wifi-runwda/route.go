@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // muxLockdownPort is go-ios Lockdownport (htons 62078 on little-endian).
 const muxLockdownPortA uint16 = 32498
@@ -51,6 +54,21 @@ func muxPortToTCP(p uint16) uint16 {
 // waitPreferNetwork polls usbmux until a Network entry appears (or timeout).
 // EnableWifiConnections 写入后，无线设备常要数秒到数十秒才挂上；立刻选 USB
 // 会让 testmanagerd 仍绑死线缆，拔线必拆 XCTest。
+// requireMuxNetwork 拒绝 USB 回退：没有 Network 条目时 XCTest 绑死线缆，拔线必拆 Automation Running。
+func requireMuxNetwork(udid string, dev muxDevice, found bool) error {
+	if !found {
+		return fmt.Errorf("usbmux 没有设备 %s", short(udid))
+	}
+	if dev.Type != "Network" {
+		have := dev.Type
+		if have == "" {
+			have = "unknown"
+		}
+		return fmt.Errorf("usbmux 没有 Network 条目（%s 当前是 %s）。请打开 Finder/Xcode「在无线局域网上显示此 iPhone」，等 ios list 出现 Network 后再激活；USB 激活拔线会拆掉 Automation Running", short(udid), have)
+	}
+	return nil
+}
+
 func waitPreferNetwork(udid string, timeout time.Duration, list func() []muxDevice) (muxDevice, bool) {
 	if list == nil {
 		list = listRealDevices

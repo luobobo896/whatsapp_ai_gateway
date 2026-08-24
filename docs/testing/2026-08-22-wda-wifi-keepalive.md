@@ -139,7 +139,7 @@ Macaca **没有**「激活后拔 USB、调试会话改走无线」的实现。�
 - 拔 USB：只拆 `iproxy` 隧道，**不** `Stop` 机上 WDA；探活/发消息回退 `http://手机Wi-Fi:8100`。
 - 存活判定：机上 `/status`（或主机激活进程仍在），**不以 USB 在线为前提**；40 位 UDID 与新机型同一套。
 - 重拉起：USB **或** Wi-Fi 可达即可尝试（已去掉「老机型无 USB 必跳过」）。
-- 激活：优先 `wifi-lockdown` + `wifi-runwda`（默认等待 usbmux `Network` 最多 45s），再 `ios runwda`；无 Network 时回退 USB 并打 WARN。
+- 激活：`wifi-lockdown` + `wifi-runwda`（等待 usbmux `Network` 最多 45s）。无 Network **失败**，不回退 USB（USB 回退拔线必拆 XCTest）。
 
 ## 2026-08-23 00:42 审计补丁（群发死隧道窗口）
 

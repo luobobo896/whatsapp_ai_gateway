@@ -1,25 +1,15 @@
-# 2026-08-24 USB 最短激活
+# 2026-08-24 USB 最短激活（已撤销）
 
 - 日期：2026-08-24
-- 目的：点激活尽快出现 Automation Running；Agent 已去掉扫码注册，只点网络等权限按钮
+- 状态：**已撤销**。USB 最短路径能很快出现 Automation Running，但 XCTest 绑死 USB，拔线即死，违反核心需求。
 
-## 最短路径
+## 为何撤销
 
-USB 已插、Runner 已装：
+同晚对照：
 
-`读缓存版本 →（仅 17+ 起隧道）→ ios runwda → 最多 20s 探 /status（400ms 间隔）→ 点允许/本地网络`
+- Plus-2 `4886579a…`：`wifi-runwda via=Network`，拔 USB 后 `http://192.168.10.237:8100/status` 仍 ready。
+- iPhone 7 `5060c403…`：等 45s 后 USB 回退，`via=USB`，拔线 testmanagerd EOF，Automation Running 消失。
 
-不再做：
+产品要求与 Plus-2 一致：激活成功后必须能拔 USB，改走 Wi-Fi。
 
-- `wifi-lockdown` + 固定 2s
-- `wifi-runwda -wait-network` 45s
-- 每次 `ios image auto`
-- 扫码 / 注册按钮
-
-## 验证
-
-```bash
-go test ./internal/gateway ./internal/wda -count=1
-```
-
-2026-08-24：通过。`TestProtocolCmdUSBPrefersRunwdaNotWifiWrapper`、`TestIsPermissionAllowLabel` 覆盖「不走无线包装器、不点扫码注册」。
+现行路径见 [2026-08-24-network-unplug.md](2026-08-24-network-unplug.md)。

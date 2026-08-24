@@ -26,9 +26,16 @@ func (g *Gateway) tapAgentPermissions(udid string, port int) {
 	if base == "" || base == "http://:8100" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	client := wda.NewClient(base, 4*time.Second)
 	wda.TapPermissionAllows(ctx, client)
-	slog.Info("tapped agent permission buttons", "udid", shortOf(udid))
+	team := ""
+	if g.WDA != nil {
+		team = teamNameFromIPA(g.WDA.resolvedIPA())
+	}
+	if err := wda.TrustDeveloper(ctx, client, team); err != nil {
+		slog.Warn("auto trust developer skipped", "udid", shortOf(udid), "error", err)
+	}
+	slog.Info("tapped agent permission and developer trust", "udid", shortOf(udid))
 }

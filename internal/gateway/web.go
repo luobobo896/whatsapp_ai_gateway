@@ -295,8 +295,8 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
 				return
 			}
-			// USB 最短路径：WDA 通常数秒内 /status ready；未就绪返回 starting。
-			res := g.waitWDAReady(udid, port, 20*time.Second)
+			// wifi-runwda 先等 Network 再可能 USB 回退；成功标准是 /status，不是主机进程还在。
+			res := g.waitWDAReady(udid, port, 70*time.Second)
 			if ready, _ := res["ready"].(bool); ready {
 				g.tapAgentPermissions(udid, port)
 			}
@@ -422,10 +422,8 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 				}
 				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via}
 			}
-		} else if g.WDA.Running(udid) {
-			// USB 直连、尚未配 IP：主机进程在即视为激活成功；Wi-Fi IP 由看护补。
-			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "usb"}
 		}
+		// 主机进程在只表示还在等 Network / 正在拉起，不能当激活成功。
 		if !g.WDA.Running(udid) {
 			// Final HTTP check before declaring failure (process gone but phone WDA may still answer).
 			if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
@@ -441,7 +439,7 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 			}
 			return map[string]any{
 				"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true,
-				"message": "WDA 未能保持运行（进程已退出且 /status 不通）。请确认手机 USB 已连接信任，顶栏出现 Automation Running 后再试",
+				"message": "WDA 未能保持运行（进程已退出且 /status 不通）。请确认 USB 已插并信任此电脑；有 usbmux Network 时拔线后仍可走 Wi-Fi",
 			}
 		}
 		time.Sleep(400 * time.Millisecond)
@@ -460,7 +458,7 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 	}
 	return map[string]any{
 		"udid": udid, "status": "starting", "ready": false, "auto_reactivate": true,
-		"message": "WDA 仍在启动，请稍候刷新；若一直未就绪，请检查 USB/信任与 Automation Running",
+		"message": "WDA 仍在启动（可能在等 usbmux Network），请稍候刷新；若一直未就绪，检查「在无线局域网上显示此 iPhone」与 Automation Running",
 	}
 }
 

@@ -23,7 +23,7 @@ Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、
 - iOS 16+ 必须打开开发者模式。未开时激活会直接报错，不会假装成功。
 - 老机型（40 位 UDID）激活用 `id=<udid>`；带连字符的新 UDID 用 `platform=iOS,id=` 且大写。
 - 版本分流（点激活自动做，不要人手跑文章里的命令）：
-  - **激活一律 USB 最短路径**：直接 `ios runwda`（或 tidevice）。不等无线 Network，不跑 `wifi-runwda`。WDA 起来后只点「允许 / 本地网络」等权限键，不走扫码注册。
+  - **iOS 15–16 激活优先 usbmux Network**：`wifi-lockdown` + `wifi-runwda` 先等 Network 再 `ios runwda`，没有则 USB 回退（插着能激活，拔线会拆 XCTest）。有 Network 时 Automation Running 后可拔 USB，改走手机 Wi-Fi `:8100`。WDA 起来后只点「允许 / 本地网络」等权限键，并尝试自动信任开发者。
   - **iOS 15–16**：Mac 补 Xcode 开发者镜像；Windows 仅在需要新装 IPA 时才 `ios image auto`。
   - **iOS 17+**：先拉起 `ios tunnel start --userspace` 再 `runwda`。iOS 17.0–17.3 请升到 17.4+。
 - 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点激活。未装 Runner 会 `install`，再按上面分流拉起（不要 `wdaproxy`）。
@@ -62,7 +62,7 @@ Windows 走 `ios.exe runwda` / `tidevice`，**不跑 xcodebuild**，不必准备
 桌面端：打开 `WDAFarmGateway.app`。配置在  
 `~/Library/Application Support/WDAFarmGateway/gateway.db`。
 
-打控制器安装包（只需在有 Xcode、且目标手机 UDID 已登记的苹果电脑上做）。完整步骤见 [Mac 出包独立章节](docs/design/mac-wda-ipa-package.md)：
+打控制器安装包（只需在有 Xcode 的苹果电脑上做）。个人账号要先登记目标手机 UDID；企业 In-House 用同一脚本设 `SIGN_MODE=enterprise`，不必登记设备。完整步骤见 [Mac 出包独立章节](docs/design/mac-wda-ipa-package.md)：
 
 ```bash
 sh scripts/package-wda-ipa.sh

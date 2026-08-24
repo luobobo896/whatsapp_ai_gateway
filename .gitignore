@@ -7,6 +7,7 @@ data/
 
 # 本地运行时配置（含网关凭证 token，禁止提交）
 devices.json
+scripts/signing.env
 
 # 桌面壳构建与打包产物（签名好的控制器放 tools/wda.ipa，不进 dist/）
 desktop/.build/

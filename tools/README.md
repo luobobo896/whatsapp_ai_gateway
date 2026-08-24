@@ -6,9 +6,9 @@
 |---|---|---|
 | `ios` | go-ios 1.3.2，`runwda` / `tunnel start` / `install` | macOS universal (arm64 + x86_64) |
 | `ios.exe` | 同上 | Windows amd64 |
-| `wifi-runwda` / `wifi-runwda.exe` | 优先走 usbmux Network 拉起 WDA（iOS 15–16） | Mac arm64 / Windows amd64 |
+| `wifi-runwda` / `wifi-runwda.exe` | 必须走 usbmux Network 拉起 WDA（iOS 15–16）；没有 Network 则失败 | Mac arm64 / Windows amd64 |
 | `wifi-lockdown` / `wifi-lockdown.exe` | 打开手机「通过网络连接」 | Mac arm64 / Windows amd64 |
-| `wda.ipa` | 已签名的 WebDriverAgent Runner，激活时自动安装 | 所有主机（描述文件须含该机 UDID） |
+| `wda.ipa` | 已签名的 WebDriverAgent Runner，激活时自动安装 | 所有主机。个人包描述文件须含该机 UDID；企业 In-House 包不绑设备 |
 | `easytier/easytier-core`、`easytier-cli` | 可选组网；打 Mac DMG 需要 | macOS arm64 |
 
 源码运行（仓库根目录）：

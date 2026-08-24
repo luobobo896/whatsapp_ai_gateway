@@ -78,8 +78,10 @@ if command -v iproxy >/dev/null 2>&1; then
   QUEUE=("$IPROXY")
   IDEV="$(dirname "$IPROXY")/ideviceinfo"
   IDEVID="$(dirname "$IPROXY")/idevice_id"
+  IDEVPROV="$(dirname "$IPROXY")/ideviceprovision"
   [ -x "$IDEV" ] && QUEUE+=("$IDEV")
   [ -x "$IDEVID" ] && QUEUE+=("$IDEVID")
+  [ -x "$IDEVPROV" ] && QUEUE+=("$IDEVPROV")
   while [ ${#QUEUE[@]} -gt 0 ]; do
     CUR="${QUEUE[0]}"; QUEUE=("${QUEUE[@]:1}")
     for DEP in $(collect_libs "$CUR"); do
@@ -99,6 +101,7 @@ if command -v iproxy >/dev/null 2>&1; then
   cp "$IPROXY" "$RES/bin/iproxy"
   [ -x "$IDEV" ] && cp "$IDEV" "$RES/bin/ideviceinfo"
   [ -x "$IDEVID" ] && cp "$IDEVID" "$RES/bin/idevice_id"
+  [ -x "$IDEVPROV" ] && cp "$IDEVPROV" "$RES/bin/ideviceprovision"
   if [ -x "$ROOT/tools/ios" ]; then
     cp "$ROOT/tools/ios" "$RES/bin/ios"
   fi
@@ -108,9 +111,17 @@ if command -v iproxy >/dev/null 2>&1; then
   if [ -x "$ROOT/tools/wifi-runwda" ]; then
     cp "$ROOT/tools/wifi-runwda" "$RES/bin/wifi-runwda"
   fi
+  if [ -f "$ROOT/tools/wda.ipa" ]; then
+    cp "$ROOT/tools/wda.ipa" "$RES/wda.ipa"
+  elif [ -f "$ROOT/dist/wda.ipa" ]; then
+    cp "$ROOT/dist/wda.ipa" "$RES/wda.ipa"
+  fi
   chmod +w "$RES/bin/"* "$RES/lib/"*.dylib 2>/dev/null || true
   echo "  ✓ iproxy/ideviceinfo/idevice_id（原样未修改）+ $(find "$RES/lib" -type f | wc -l | tr -d ' ') 个 dylib（DYLD fallback 解析）"
   [ -x "$RES/bin/ios" ] && echo "  ✓ go-ios（ios runwda）"
+  [ -x "$RES/bin/wifi-runwda" ] && echo "  ✓ wifi-runwda（usbmux Network）"
+  [ -x "$RES/bin/ideviceprovision" ] && echo "  ✓ ideviceprovision（自动装描述文件）"
+  [ -f "$RES/wda.ipa" ] && echo "  ✓ wda.ipa"
 else
   echo "  ⚠ 本机无 iproxy（未装 libimobiledevice），USB 隧道需客户自行 brew install libimobiledevice"
 fi
@@ -156,7 +167,7 @@ WDA Farm Gateway（${VERSION}）安装说明
 四、登录与设备
   - 管理页账号与云平台一致（邮箱/密码）；
   - 插上 iPhone 后在设备列表点「激活」安装 WDA；
-  - 首次激活后需在 iPhone「设置 → 通用 → VPN与设备管理」里信任开发者证书，再重新激活；
+  - 激活会自动安装描述文件并尝试点「信任」（个人/企业同一套）。若手机弹出锁屏密码请输入；
   - 激活 WDA 首次会编译（数分钟），之后秒级。
 
 五、机型/系统兼容

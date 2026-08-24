@@ -168,14 +168,14 @@ func TestWifiRunwdaInvocationBuildsArgs(t *testing.T) {
 	if bin == "" {
 		t.Fatal("empty wrapper path")
 	}
-	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237"} {
+	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237", "-wait-network", "8s"} {
 		if !containsExact(args, want) {
 			t.Fatalf("missing %q in %#v", want, args)
 		}
 	}
 }
 
-func TestProtocolCmdUSBPrefersRunwdaNotWifiWrapper(t *testing.T) {
+func TestProtocolCmdIOS15UsesWifiRunwda(t *testing.T) {
 	dir := plantActivateTools(t, true, true)
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
@@ -185,14 +185,25 @@ func TestProtocolCmdUSBPrefersRunwdaNotWifiWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) == "wifi-runwda" {
-		t.Fatal("USB activate must not wait on wifi-runwda")
+	if filepath.Base(bin) != "wifi-runwda" {
+		t.Fatalf("bin=%q want wifi-runwda so XCTest can survive USB unplug", bin)
 	}
-	if filepath.Base(bin) != "ios" {
-		t.Fatalf("bin=%q want ios", bin)
+	if !containsExact(args, "-wait-network") || !containsExact(args, "8s") {
+		t.Fatalf("must briefly wait for usbmux Network then USB: %#v", args)
 	}
-	if !containsExact(args, "runwda") {
-		t.Fatalf("missing runwda in %#v", args)
+}
+
+func TestProtocolCmdIOS15RequiresWifiRunwda(t *testing.T) {
+	dir := plantActivateTools(t, false, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	_, _, err := m.protocolCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", 8100, "", activatorGoIOS, "", "15.8.7")
+	if err == nil {
+		t.Fatal("iOS 15 without wifi-runwda must not silently USB-activate")
+	}
+	if !strings.Contains(err.Error(), "wifi-runwda") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -202,21 +213,15 @@ func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "00008120-000865D90A10C01E"
-	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "", "")
+	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "", "18.6")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if filepath.Base(bin) != "ios" {
 		t.Fatalf("bin=%q want ios", bin)
 	}
-	want := goiosArgs(udid, defaultWDABundleID, 8100, "")
-	if len(args) != len(want) {
-		t.Fatalf("args %#v want %#v", args, want)
-	}
-	for i := range want {
-		if args[i] != want[i] {
-			t.Fatalf("args[%d]=%q want %q", i, args[i], want[i])
-		}
+	if !containsExact(args, "runwda") || !containsExact(args, "--tunnel-info-port=28100") {
+		t.Fatalf("iOS 17+ without wrapper must still use tunnel runwda: %#v", args)
 	}
 }
 
@@ -394,6 +399,41 @@ func TestInstallCmdMissingBinary(t *testing.T) {
 	}
 	if _, _, err := m.installCmd("00008120-000865D90A10C01E", activatorTidevice, "/tmp/wda.ipa", "15.8.7"); err == nil {
 		t.Fatal("expected error when tidevice binary is missing")
+	}
+}
+
+func TestIdeviceProvisionArgs(t *testing.T) {
+	udid := "5060c403afdee4c15a0edeab69dba0524e2ce592"
+	got := ideviceProvisionInstallArgs(udid, "/tmp/a.mobileprovision")
+	want := []string{"-u", udid, "install", "/tmp/a.mobileprovision"}
+	if len(got) != len(want) {
+		t.Fatalf("%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+	list := ideviceProvisionListArgs(udid)
+	if !containsExact(list, "-u") || !containsExact(list, udid) || !containsExact(list, "list") {
+		t.Fatalf("%v", list)
+	}
+	add := goiosProfileAddArgs(udid, "/tmp/a.mobileprovision")
+	if !containsExact(add, "profile") || !containsExact(add, "add") || !containsExact(add, "/tmp/a.mobileprovision") {
+		t.Fatalf("%v", add)
+	}
+}
+
+func TestProvisionListHasUUID(t *testing.T) {
+	out := "Device has 1 provisioning profiles installed:\n525db3c4-5160-4f45-98d4-7af12951b306 - iOS Team Provisioning Profile: *\n"
+	if !provisionListHasUUID(out, "525db3c4-5160-4f45-98d4-7af12951b306") {
+		t.Fatal("should find uuid")
+	}
+	if provisionListHasUUID(out, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") {
+		t.Fatal("must not match other uuid")
+	}
+	if provisionListHasUUID(out, "") {
+		t.Fatal("empty uuid")
 	}
 }
 

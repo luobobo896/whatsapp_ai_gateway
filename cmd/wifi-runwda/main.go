@@ -30,7 +30,7 @@ func main() {
 	port := flag.Int("port", 8100, "USE_PORT")
 	iosBin := flag.String("ios", "ios", "go-ios binary")
 	serveOnly := flag.Bool("serve", false, "only run usbmux proxy")
-	waitNet := flag.Duration("wait-network", 45*time.Second, "wait for usbmux Network before falling back to USB")
+	waitNet := flag.Duration("wait-network", 8*time.Second, "wait for usbmux Network, then USB if still missing")
 	flag.Parse()
 	if *udid == "" {
 		fmt.Fprintln(os.Stderr, "usage: wifi-runwda -udid <udid> [-ip wifi-ip] [-bundle id] [-port 8100] [-ios ios]")
@@ -45,12 +45,11 @@ func main() {
 	}
 	dev, ok := waitPreferNetwork(*udid, *waitNet, nil)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "usbmux has no device %s\n", short(*udid))
+		fmt.Fprintf(os.Stderr, "usbmux 没有设备 %s\n", short(*udid))
 		os.Exit(1)
 	}
-	if dev.Type != "Network" {
-		log.Printf("WARN usbmux only has %s for %s; unplug will kill WDA. Enable Finder/Xcode Connect via network and retry",
-			dev.Type, short(*udid))
+	if err := requireMuxNetwork(*udid, dev, ok); err != nil {
+		log.Printf("WARN %s; activating over USB (unplug will stop Automation Running)", err)
 	}
 	log.Printf("using usbmux id=%d type=%s udid=%s", dev.ID, dev.Type, short(*udid))
 
