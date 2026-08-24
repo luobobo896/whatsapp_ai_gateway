@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>WDA Farm Gateway</title>
 <style>
+  html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility}
   :root{
     --bg:#f5f6f8; --bg-grad-1:#fbfbfd; --bg-grad-2:#eef0f4;
     --card:#ffffff; --card-2:#f7f8fa;
@@ -720,7 +721,8 @@ function deviceCard(d){
   let actions = '';
   if (d.busy) {
     actions = `<button class="btn sm" disabled style="opacity:.5;cursor:not-allowed">忙碌中</button>`;
-  } else if (running && healthy) {
+  } else if (healthy) {
+    // /status 已通：视为已激活，只展示停止，不再展示激活。
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
   } else {
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;

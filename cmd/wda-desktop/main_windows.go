@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +51,8 @@ var (
 	pGlobalLock          = kernel32.NewProc("GlobalLock")
 	pGlobalUnlock        = kernel32.NewProc("GlobalUnlock")
 	pGlobalFree          = kernel32.NewProc("GlobalFree")
+
+	shellLogFile *os.File
 )
 
 func main() {
@@ -74,6 +77,7 @@ func main() {
 		_ = os.MkdirAll(filepath.Join(state, sub), 0o755)
 	}
 	setupFileLog(filepath.Join(state, "logs", "shell.log"))
+	enableHighDPI()
 	shellLog("start: state=%s port=%d", state, port)
 
 	gw := newGatewayProcess(state, port)
@@ -129,7 +133,19 @@ func (a *desktopApp) onTrayReady() {
 	go func() {
 		if err := a.waitReady(readyTimeout); err != nil {
 			shellLog("ready wait: %v", err)
-			systray.SetTooltip("网关启动超时 — 见 logs/shell.log")
+			if !a.gw.isRunning() {
+				shellLog("ready wait: gateway exited, auto-restart once")
+				_ = a.gw.cleanupStale()
+				if err2 := a.gw.start(); err2 != nil {
+					shellLog("auto-restart start failed: %v", err2)
+					systray.SetTooltip("网关启动失败 — 见 logs/shell.log")
+				} else if err2 := a.waitReady(readyTimeout); err2 != nil {
+					shellLog("auto-restart ready: %v", err2)
+					systray.SetTooltip("网关启动超时 — 见 logs/shell.log")
+				}
+			} else {
+				systray.SetTooltip("网关启动超时 — 见 logs/shell.log")
+			}
 		}
 		a.openWindow()
 	}()
@@ -206,6 +222,7 @@ func (a *desktopApp) openWindow() {
 				Title:  appName,
 				Width:  1280,
 				Height: 860,
+				IconId: 2, // winres RT_GROUP_ICON #2 (title bar / taskbar)
 				Center: true,
 			},
 		})
@@ -222,10 +239,20 @@ func (a *desktopApp) openWindow() {
 		a.mu.Unlock()
 
 		w.SetSize(1280, 860, webview2.HintNone)
-		if a.gw.isRunning() {
-			w.Navigate(fmt.Sprintf("http://127.0.0.1:%d/", a.port))
+		if !a.gw.isRunning() {
+			shellLog("webview: gateway not running, attempting restart before navigate")
+			_ = a.gw.cleanupStale()
+			if err := a.gw.start(); err != nil {
+				shellLog("webview: restart start failed: %v", err)
+				w.SetHtml(loadingHTML("后台服务未运行，自动重启失败：" + err.Error() + "。请从托盘「重启后台服务」"))
+			} else if err := a.waitReady(30 * time.Second); err != nil {
+				shellLog("webview: restart ready failed: %v", err)
+				w.SetHtml(loadingHTML("后台服务未运行，请从托盘「重启后台服务」"))
+			} else {
+				w.Navigate(fmt.Sprintf("http://127.0.0.1:%d/", a.port))
+			}
 		} else {
-			w.SetHtml(loadingHTML("后台服务未运行，请从托盘「重启后台服务」"))
+			w.Navigate(fmt.Sprintf("http://127.0.0.1:%d/", a.port))
 		}
 		shellLog("webview: open http://127.0.0.1:%d/", a.port)
 		w.Run()
@@ -235,6 +262,7 @@ func (a *desktopApp) openWindow() {
 
 func (a *desktopApp) restartGateway() {
 	a.gw.terminateGracefully()
+	_ = a.gw.cleanupStale()
 	if err := a.gw.start(); err != nil {
 		shellLog("restart failed: %v", err)
 		return
@@ -372,15 +400,157 @@ func (g *gatewayProcess) terminateGracefully() {
 	}
 }
 
+// cleanupStale frees listen port before start: kill holders of the port and any
+// leftover gateway.exe from the same install directory, then wait until Listen works.
 func (g *gatewayProcess) cleanupStale() error {
+	g.killPortHolders()
+	g.killStaleGatewayExe()
+
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(g.port))
-	ln, err := net.Listen("tcp", addr)
-	if err == nil {
-		_ = ln.Close()
-		return nil
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			shellLog("cleanup: port %d free", g.port)
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
 	}
-	shellLog("cleanup: port %d busy (%v)", g.port, err)
-	return nil
+	shellLog("cleanup: port %d still busy (%v)", g.port, lastErr)
+	return lastErr
+}
+
+func (g *gatewayProcess) ownPID() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cmd != nil && g.cmd.Process != nil {
+		return g.cmd.Process.Pid
+	}
+	return 0
+}
+
+func (g *gatewayProcess) killPortHolders() {
+	out, err := exec.Command("netstat", "-ano").CombinedOutput()
+	if err != nil {
+		shellLog("cleanup: netstat failed: %v", err)
+		return
+	}
+	portSuffix := fmt.Sprintf(":%d", g.port)
+	own := g.ownPID()
+	self := os.Getpid()
+	seen := map[int]struct{}{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(strings.ToUpper(line), "LISTEN") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		local := fields[1]
+		if !strings.HasSuffix(local, portSuffix) {
+			// also match [::]:8300 / 0.0.0.0:8300 already covered by suffix
+			continue
+		}
+		pid, err := strconv.Atoi(fields[len(fields)-1])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if pid == own || pid == self {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		shellLog("cleanup: killing pid=%d holding port %d", pid, g.port)
+		_ = exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
+	}
+}
+
+func (g *gatewayProcess) killStaleGatewayExe() {
+	bin, err := findGatewayExe()
+	if err != nil {
+		return
+	}
+	want, err := filepath.Abs(bin)
+	if err != nil {
+		want = bin
+	}
+	want = strings.ToLower(filepath.Clean(want))
+	own := g.ownPID()
+	self := os.Getpid()
+
+	out, err := exec.Command("wmic", "process", "where", "name='gateway.exe'", "get", "ProcessId,ExecutablePath", "/FORMAT:CSV").CombinedOutput()
+	if err != nil {
+		// Fallback: taskkill by image name is too broad; try powershell CIM
+		ps := fmt.Sprintf(
+			`$want=%s; Get-CimInstance Win32_Process -Filter "Name='gateway.exe'" | ForEach-Object { if ($_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath).ToLower() -eq $want)) { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Output ("killed "+$_.ProcessId) } }`,
+			strconv.Quote(want),
+		)
+		o2, err2 := exec.Command("powershell.exe", "-NoProfile", "-Command", ps).CombinedOutput()
+		if err2 != nil {
+			shellLog("cleanup: stale gateway lookup failed: %v / %v", err, err2)
+			return
+		}
+		if t := strings.TrimSpace(string(o2)); t != "" {
+			shellLog("cleanup: %s", t)
+		}
+		return
+	}
+	// CSV: Node,ExecutablePath,ProcessId
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "node,") {
+			continue
+		}
+		parts := parseCSVLine(line)
+		if len(parts) < 3 {
+			continue
+		}
+		path := strings.TrimSpace(parts[len(parts)-2])
+		pidStr := strings.TrimSpace(parts[len(parts)-1])
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 || pid == own || pid == self {
+			continue
+		}
+		if path == "" {
+			continue
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+		if strings.ToLower(filepath.Clean(abs)) != want {
+			continue
+		}
+		shellLog("cleanup: killing stale gateway.exe pid=%d path=%s", pid, path)
+		_ = exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run()
+	}
+}
+
+func parseCSVLine(line string) []string {
+	var fields []string
+	var cur strings.Builder
+	inQuotes := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case c == '"':
+			inQuotes = !inQuotes
+		case c == ',' && !inQuotes:
+			fields = append(fields, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	fields = append(fields, cur.String())
+	return fields
 }
 
 func findGatewayExe() (string, error) {
@@ -414,6 +584,43 @@ func stateDir() string {
 	return dir
 }
 
+
+// enableHighDPI: declare Per-Monitor V2 DPI awareness before any window is created.
+// Manifest (winres, dpi-awareness=per monitor v2) is primary. Runtime API is backup;
+// ACCESS_DENIED usually means the manifest already locked awareness — that is success.
+func enableHighDPI() {
+	const (
+		dpiAwarenessContextPerMonitorAwareV2 = ^uintptr(3) // DPI_AWARENESS_CONTEXT(-4)
+		processPerMonitorDPIAware             = 2
+	)
+	u32 := windows.NewLazySystemDLL("user32.dll")
+	if proc := u32.NewProc("SetProcessDpiAwarenessContext"); proc.Find() == nil {
+		r, _, err := proc.Call(dpiAwarenessContextPerMonitorAwareV2)
+		if r != 0 {
+			shellLog("dpi: PerMonitorV2 via SetProcessDpiAwarenessContext")
+			return
+		}
+		if err == windows.ERROR_ACCESS_DENIED {
+			shellLog("dpi: PerMonitorV2 already set (embedded manifest)")
+			return
+		}
+		shellLog("dpi: SetProcessDpiAwarenessContext failed: %v", err)
+	}
+	shcore := windows.NewLazySystemDLL("shcore.dll")
+	if proc := shcore.NewProc("SetProcessDpiAwareness"); proc.Find() == nil {
+		r, _, err := proc.Call(uintptr(processPerMonitorDPIAware))
+		if r == 0 { // S_OK
+			shellLog("dpi: PerMonitor via SetProcessDpiAwareness")
+			return
+		}
+		shellLog("dpi: SetProcessDpiAwareness failed: %v", err)
+	}
+	if proc := u32.NewProc("SetProcessDPIAware"); proc.Find() == nil {
+		proc.Call()
+		shellLog("dpi: fallback SetProcessDPIAware")
+	}
+}
+
 func ensureSingleInstance() (func(), bool) {
 	name, err := windows.UTF16PtrFromString(mutexName)
 	if err != nil {
@@ -438,12 +645,16 @@ func setupFileLog(path string) {
 	if err != nil {
 		return
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	shellLogFile = f
+	log.SetOutput(io.MultiWriter(f, os.Stderr))  // file first: windowsgui stderr may error and MultiWriter would skip later writers
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
 func shellLog(format string, args ...any) {
 	log.Printf("[shell] "+format, args...)
+	if shellLogFile != nil {
+		_ = shellLogFile.Sync()
+	}
 }
 
 func fatalDialog(msg string) {

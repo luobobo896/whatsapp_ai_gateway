@@ -19,3 +19,5 @@ dist/
 *.ipa
 tools/wifi-lockdown
 tools/wifi-runwda
+
+tools/webview2/
