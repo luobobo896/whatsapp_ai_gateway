@@ -94,6 +94,7 @@ func main() {
 		et.Recover()
 	}
 	go gw.WatchdogLoop(ctx)
+	go gw.UsbmuxNetLoop(ctx)
 	gw.SetAppContext(ctx)
 	gw.EnsureCloudLoop() // 云通道已启用则启动；未启用时由「云通道设置」保存后热拉起
 

@@ -63,7 +63,11 @@ func parseUsbmuxConnectionTypes(raw string) map[string]string {
 		if d.Udid == "" {
 			continue
 		}
-		out[strings.ToUpper(d.Udid)] = d.ConnectionType
+		u := strings.ToUpper(d.Udid)
+		// 同一 UDID 可能同时有 Network + USB 两行：Network 一定优先，避免被 USB 覆盖。
+		if d.ConnectionType == "Network" || out[u] == "" {
+			out[u] = d.ConnectionType
+		}
 	}
 	return out
 }

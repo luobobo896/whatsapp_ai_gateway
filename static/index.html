@@ -267,6 +267,20 @@
       </div>
     </div>
 
+    <!-- 无线保活（usbmux ConnectionType=Network 自动修复） -->
+    <div class="panel" id="usbmuxNetPanel" style="margin-bottom:16px">
+      <div class="panel-head"><span style="font-size:13px;font-weight:600">无线保活 · usbmux Network 自动修复</span><span style="font-size:11px;color:var(--text-3)">检测「插着 USB 但缺 Network 条目」的设备，自动重启系统 usbmuxd 让其进入 Network；iOS≤16 拔线保活的前提</span></div>
+      <div class="panel-body" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center">
+        <label class="switch" title="开启后：检测到待修复设备时自动重启 usbmuxd" style="justify-self:start">
+          <input type="checkbox" id="usbmuxSwitch" onchange="saveUsbmuxNet()">
+          <span class="slider"></span>
+        </label>
+        <div id="usbmuxStatus" style="font-size:12px;color:var(--text-2);min-width:0">加载中…</div>
+        <button class="btn sm" onclick="usbmuxRepair()">立即修复</button>
+        <button class="btn sm ghost" onclick="loadUsbmuxNet()">刷新</button>
+      </div>
+    </div>
+
     <div class="section-head">
       <h3>设备</h3>
       <span class="count" id="deviceCount"></span>
@@ -807,7 +821,55 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm(), loadUsbmuxNet()]); }
+
+let usbmuxBusy = false;
+async function loadUsbmuxNet(){
+  try{
+    const r = await api('/api/usbmux-net');
+    const st = await r.json();
+    const sw = document.getElementById('usbmuxSwitch');
+    if (sw) sw.checked = !!st.auto_repair;
+    renderUsbmuxNetStatus(st);
+  }catch(e){ /* 静默；无线保活读取失败不打断整体刷新 */ }
+}
+function renderUsbmuxNetStatus(st){
+  const el = document.getElementById('usbmuxStatus');
+  if (!el) return;
+  const d = document.createElement('span');
+  const net = +st.network || 0, total = +st.total || 0, usb = +st.usb_only || 0;
+  d.innerHTML = `已进入 Network <b>${net}</b> / <b>${total}</b>` +
+    (usb > 0 ? `，缺 Network <b style="color:var(--orange)">${usb}</b>` : '') +
+    (st.needs_repair ? '，<b style="color:var(--orange)">待修复</b>' : '');
+  if (st.last_result){ const s = document.createElement('span'); s.style.cssText = 'color:var(--text-3)'; s.textContent = ' | ' + st.last_result; d.appendChild(s); }
+  el.replaceChildren(d);
+}
+async function saveUsbmuxNet(){
+  const sw = document.getElementById('usbmuxSwitch');
+  const val = !!(sw && sw.checked);
+  try{
+    const r = await api('/api/usbmux-net', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({auto_repair: val})});
+    const st = await r.json();
+    if (!r.ok) throw new Error((st && (st.error || st.detail)) || '保存失败');
+    if (sw) sw.checked = !!st.auto_repair;
+    renderUsbmuxNetStatus(st);
+    toast(val ? '已开启自动修复' : '已关闭自动修复');
+  }catch(e){ toast((e && e.message) || '保存失败'); }
+}
+async function usbmuxRepair(){
+  if (usbmuxBusy) return;
+  usbmuxBusy = true;
+  try{
+    const r = await api('/api/usbmux-net', {method:'POST'});
+    const out = await r.json();
+    if (!r.ok) throw new Error((out && (out.error || out.detail)) || '修复失败');
+    toast('已触发修复，正在等待 Network 条目出现…');
+    if (out.status) renderUsbmuxNetStatus(out.status);
+    await new Promise(res => setTimeout(res, 3000));
+    loadUsbmuxNet();
+  }catch(e){ toast((e && e.message) || '修复失败'); }
+  finally{ usbmuxBusy = false; }
+}
 
 async function loadLlm(){
   try{

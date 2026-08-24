@@ -44,6 +44,11 @@ type Gateway struct {
 
 	cloudReconnect chan struct{} // 触发 CloudLoop 立即重连（登录自动签发凭证后）
 	kickWatchdog   chan struct{} // 触发看护循环立即跑一轮（激活成功后立刻发现 IP，不等 30s 周期）
+
+	usbmuxMu         sync.Mutex // 保护 usbmux 自动修复状态
+	usbmuxRepairRun  bool       // 是否正在执行一次修复（防并发）
+	lastUsbmuxRepair time.Time  // 上次自动修复时间（冷却用）
+	lastUsbmuxResult string     // 上次修复结果描述
 }
 
 // New 构造网关。

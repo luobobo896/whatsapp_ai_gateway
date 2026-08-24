@@ -2,6 +2,11 @@
 
 日期：2026-08-24
 
+> ⚠️ 2026-08-25 更新：本文记录的“5060 一直 USB only”已在次日修复。
+> 根因是主机侧系统 usbmuxd 未重新做网络发现；重启 usbmuxd 后两台均已得到 Network 条目。
+> 完整修复与可复现步骤见
+> [2026-08-25-connection-type-network-usbmuxd-restart-fix.md](2026-08-25-connection-type-network-usbmuxd-restart-fix.md)。
+
 ## 协议事实
 
 [appium-ios-remotexpc](https://github.com/appium/appium-ios-remotexpc) 的 `Connect` **没有** `ConnectionType` 字段，只有 `DeviceID` + `PortNumber`。

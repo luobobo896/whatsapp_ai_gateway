@@ -32,6 +32,7 @@ type Config struct {
 	LLM            LLMConfig     `json:"llm,omitempty"`
 	Web            WebConfig     `json:"web,omitempty"`
 	Signing        SigningConfig `json:"signing,omitempty"`
+	UsbmuxNet      UsbmuxNetConfig `json:"usbmux_net,omitempty"`
 }
 
 // SigningConfig 构建/签名配置（打包交付用）。
@@ -58,6 +59,13 @@ type WebConfig struct {
 	// ChatListMaxFriends 未指定号码时，聊天列表最多发送多少个 1:1 好友。
 	// 0 或负数按默认 30；超过硬顶 100 按 100，避免名单过长转圈发不完。
 	ChatListMaxFriends int `json:"chat_list_max_friends,omitempty"`
+}
+
+// UsbmuxNetConfig usbmux 无线调试（ConnectionType=Network）自动修复设置。
+type UsbmuxNetConfig struct {
+	// AutoRepair 开启后，后台周期检测「USB 已接入但缺 usbmux Network 条目」的设备，
+	// 满足条件时自动重启系统 usbmuxd 触发网络发现，并校验 Network 条目重新出现。
+	AutoRepair bool `json:"auto_repair"`
 }
 
 // CloudConfig 云通道（平台网关 WSS）。
@@ -294,6 +302,13 @@ func (c *Config) load() error {
 			return fmt.Errorf("config.signing: %w", err)
 		}
 	}
+	if v, ok, err := c.readKey("usbmux_net"); err != nil {
+		return err
+	} else if ok {
+		if err := json.Unmarshal([]byte(v), &c.UsbmuxNet); err != nil {
+			return fmt.Errorf("config.usbmux_net: %w", err)
+		}
+	}
 	if v, ok, err := c.readKey("health_interval"); err != nil {
 		return err
 	} else if ok {
@@ -462,6 +477,14 @@ func (c *Config) SetLLM(cfg LLMConfig) error {
 	defer c.mu.Unlock()
 	c.LLM = cfg
 	return c.writeKey("llm", c.LLM)
+}
+
+// SetUsbmuxNet 保存「usbmux Network 自动修复」开关，立即持久化。
+func (c *Config) SetUsbmuxNet(autoRepair bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.UsbmuxNet.AutoRepair = autoRepair
+	return c.writeKey("usbmux_net", c.UsbmuxNet)
 }
 
 // ReadExtra 读取附加配置 kv（如 easytier），value 为 JSON 文本；不存在返回 ok=false。

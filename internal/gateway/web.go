@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -237,6 +238,38 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			return
 		}
 		writeJSON(w, map[string]any{"ok": ok, "running": g.EasyTier.Running()})
+	})
+
+	// /api/usbmux-net usbmux 无线保活：GET 状态+配置，PUT 改开关，POST 立即修复。
+	mux.HandleFunc("/api/usbmux-net", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, g.usbmuxNetStatus())
+		case http.MethodPut:
+			var body struct {
+				AutoRepair bool `json:"auto_repair"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "请求体格式错误"})
+				return
+			}
+			if err := g.Cfg.SetUsbmuxNet(body.AutoRepair); err != nil {
+				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			slog.Info("usbmux-net config updated", "auto_repair", body.AutoRepair)
+			writeJSON(w, g.usbmuxNetStatus())
+		case http.MethodPost:
+			ctx, cancel := context.WithTimeout(context.Background(), usbmuxNetVerifyTimeout+5*time.Second)
+			defer cancel()
+			if err := g.usbmuxNetRepair(ctx); err != nil {
+				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "status": g.usbmuxNetStatus()})
+		default:
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
 	})
 
 	mux.HandleFunc("/api/devices/", func(w http.ResponseWriter, r *http.Request) {
