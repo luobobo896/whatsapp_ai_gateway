@@ -124,6 +124,8 @@
 |---|---|
 | `internal/gateway/config.go` | `UsbmuxNetConfig` + `SetUsbmuxNet` + load 读取 |
 | `internal/gateway/usbmux_net.go` | 连接集读取、状态计算、重启 usbmuxd、自动/手动修复、后台循环 |
+| `internal/gateway/usbmux_net_repair_unix.go` | macOS/Linux 重启 usbmuxd（root / sudo -n / osascript 授权） |
+| `internal/gateway/usbmux_net_repair_windows.go` | Windows 重启 Apple 设备服务（需以管理员运行网关） |
 | `internal/gateway/network_safety.go` | `parseUsbmuxConnectionTypes` 修正为 **Network 优先** |
 | `internal/gateway/gateway.go` | Gateway 增加 usbmux 修复状态字段（冷却/结果/并发） |
 | `internal/gateway/web.go` | `/api/usbmux-net` 三端点 |
@@ -166,7 +168,43 @@ idevice_id -l -n | grep '(Network)'
 6. **并发保护**：手动 + 自动不会同时执行第二次（`usbmuxRepairRun` 哨兵）。
 7. **授权撤销**：`sudo rm -f /etc/sudoers.d/wda-gateway-usbmux`。
 
-## 11. 回滚
+## 11. Windows 支持
+
+功能在 Windows 同样生效（后台检测、开关、手动修复、状态展示一致），但“修复动作”按平台不同：
+
+### 11.1 前置条件（Windows）
+
+- 已安装 **Apple Devices** 或 **iTunes**（提供 Windows 侧 usbmux / Apple 服务）。
+- 已装 `ios.exe` / `tidevice` / `iproxy`（libimobiledevice），位于 `PATH` 或 `WDA_GATEWAY_RESOURCES\bin`。
+- **以管理员身份运行网关**（否则重启 Apple 服务会因权限失败）；Windows 无 `setup-usbmux-sudo.sh`，也不适用。
+- 手机侧与 macOS 相同：已配对、解锁、与 Mac 同 Wi-Fi、`EnableWifiConnections` + `EnableWifiDebugging` 均为 true、`手机IP:62078` 单播通。
+
+### 11.2 修复动作差异
+
+- macOS/Linux：`restartUsbmuxd()` 重启系统 `usbmuxd`。
+- Windows：`restartUsbmuxd()` 重启提供 usbmux 的 **Apple Mobile Device Service**（`sc stop` + `sc start`）。候选服务名：
+  `Apple Mobile Device Service`、`Apple Mobile Device`、`Apple Devices Service`、`Apple Devices`。
+
+### 11.3 手动验证（Windows）
+
+```bat
+REM 1. 查当前连接类型
+ios list --details
+idevice_id -l -n
+REM 2. 手动重启 Apple 服务（需管理员）
+net stop "Apple Mobile Device Service" & net start "Apple Mobile Device Service"
+REM 3. 再查 Network
+ios list --details
+```
+
+### 11.4 已知不确定点
+
+> ⚠️ Windows 上的“服务名取值”与“重启后是否立即出现 Network 条目”**需在 Windows 实机验证一次**
+> （不同 Apple 版本服务名可能不同）。检测/开关/手动修复/状态展示逻辑与 macOS 共用、已在 macOS 完整验证；
+> Windows 分支按上述服务名实现，若实际服务名不同，按 11.3 手动命令查询后把正确服务名加入
+> `usbmux_net_repair_windows.go` 的候选即可。
+
+## 12. 回滚
 
 - 把开关关掉（`{"auto_repair":false}`）即停止自动修复；手动修复仍可用。
 - 代码回退：还原上述文件即可，无数据库结构变更（config 行删除即恢复默认）。
