@@ -428,25 +428,61 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		dev := g.Cfg.Device(udid)
+		// Source of truth: /status reachable (USB tunnel or Wi-Fi IP). Host process may exit while XCTest stays up.
 		if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
 			h := g.checkWDA(dev)
 			if h.OK {
 				applyHealth(dev, h)
 				if h.IP != "" {
 					_ = syncStoredWifiIP(dev, h.IP)
+					_ = g.Cfg.Save()
 				}
-				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true}
+				via := "http"
+				if TunnelAddr(udid) != "" {
+					via = "usb"
+				}
+				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via}
 			}
 		} else if g.WDA.Running(udid) {
 			// USB 直连、尚未配 IP：主机进程在即视为激活成功；Wi-Fi IP 由看护补。
 			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "usb"}
 		}
 		if !g.WDA.Running(udid) {
-			return map[string]any{"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true}
+			// Final HTTP check before declaring failure (process gone but phone WDA may still answer).
+			if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
+				h := g.checkWDA(dev)
+				if h.OK {
+					applyHealth(dev, h)
+					if h.IP != "" {
+						_ = syncStoredWifiIP(dev, h.IP)
+						_ = g.Cfg.Save()
+					}
+					return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "http-orphan"}
+				}
+			}
+			return map[string]any{
+				"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true,
+				"message": "WDA 未能保持运行（进程已退出且 /status 不通）。请确认手机 USB 已连接信任，顶栏出现 Automation Running 后再试",
+			}
 		}
 		time.Sleep(3 * time.Second)
 	}
-	return map[string]any{"udid": udid, "status": "starting", "ready": false, "auto_reactivate": true}
+	// Timeout: one last health probe — if /status works, treat as success.
+	if dev := g.Cfg.Device(udid); dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
+		h := g.checkWDA(dev)
+		if h.OK {
+			applyHealth(dev, h)
+			if h.IP != "" {
+				_ = syncStoredWifiIP(dev, h.IP)
+				_ = g.Cfg.Save()
+			}
+			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "http"}
+		}
+	}
+	return map[string]any{
+		"udid": udid, "status": "starting", "ready": false, "auto_reactivate": true,
+		"message": "WDA 仍在启动，请稍候刷新；若一直未就绪，请检查 USB/信任与 Automation Running",
+	}
 }
 
 func (g *Gateway) deviceList() []map[string]any {

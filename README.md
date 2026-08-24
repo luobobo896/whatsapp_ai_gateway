@@ -43,7 +43,11 @@ gateway.exe -state . -listen 0.0.0.0:8300
 Windows 走 `ios.exe runwda` / `tidevice`，**不跑 xcodebuild**，不必准备 WDA 工程源码。  
 把 Mac 打好的 `wda.ipa` 放到 `-state` 目录（或 `-ipa` 指定）。手机还没装控制器时，点激活会先安装再启动。
 
-打包启动：把 `dist/windows-amd64/gateway.exe` 拷过来双击（可在 Mac 上 `sh scripts/build-windows-exe.sh` 交叉编译）。  
+打包启动：
+- **桌面壳（推荐）**：`dist/windows-amd64/WDAFarmGateway.exe` 双击 → 托盘 + WebView2 管理窗（不必手动开浏览器）。说明见 [docs/deployment/windows-desktop-shell.md](docs/deployment/windows-desktop-shell.md)。
+- **仅网关**：`dist/windows-amd64/gateway.exe` 双击后浏览器打开 http://127.0.0.1:8300/。
+
+构建：`sh scripts/build-windows-exe.sh`（Mac/Linux 交叉编译，含桌面壳）。  
 当晚步骤：[docs/deployment/windows-night-runbook.md](docs/deployment/windows-night-runbook.md)。
 
 **Mac（出包 / 开发）**
