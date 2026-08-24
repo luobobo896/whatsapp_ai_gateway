@@ -241,15 +241,6 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 
 	mux.HandleFunc("/api/devices/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/api/devices/")
-		// 隐藏（已删除）设备列表：供前端渲染"已隐藏设备"恢复入口。
-		if rest == "ignored" {
-			if r.Method != http.MethodGet {
-				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-				return
-			}
-			writeJSON(w, g.Cfg.Ignored)
-			return
-		}
 		parts := strings.SplitN(rest, "/", 2)
 		udid := parts[0]
 		if udid == "" {
@@ -275,16 +266,11 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			if dev == nil {
 				dev = &Device{UDID: udid, Port: port, AutoReactivate: true}
 				g.Cfg.Devices = append(g.Cfg.Devices, *dev)
-				// 新设备立即持久化（此前依赖 UnignoreDevice 的隐式 saveLocked，
-				// 若隐藏列表已无该设备导致逻辑分支异常，auto_reactivate 可能丢失，
-				// 重启后 watchdog 不再自动拉起）。
 				_ = g.Cfg.Save()
 			} else {
 				dev.AutoReactivate = true
 				_ = g.Cfg.Save()
 			}
-			// 激活即恢复显示：从隐藏列表移除，USB 在线设备重新出现在列表。
-			_ = g.Cfg.UnignoreDevice(udid)
 			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
 			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
 			// /status reachable via Wi-Fi IP or USB tunnel => already activated (no re-launch).
@@ -317,37 +303,22 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			dev := g.Cfg.Device(udid)
 			if dev != nil {
 				dev.AutoReactivate = false
+				// 停止后立刻视为未激活，避免残留 last_health.ok 把删除继续拦住。
+				applyHealth(dev, WDAHealth{OK: false, Error: "stopped"})
 				_ = g.Cfg.Save()
 			}
 			stopped := g.WDA.Stop(udid)
 			writeJSON(w, map[string]any{"udid": udid, "status": "stopped", "auto_reactivate": false, "stopped": stopped})
 		case "delete":
-			// 删除 = 移除配置（IP/身份/自动拉起）+ 停掉网关托管的 WDA 进程 + 加入隐藏列表。
-			// 隐藏后即使 USB 仍连接也不在设备列表出现（此前 USB 在线设备会以「未配置」
-			// 身份立刻重新出现，用户反馈"删除没用"）；重新激活/恢复后重新显示。
-			if g.Exec.IsBusy(udid) {
-				writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "设备正在执行任务，不能删除"})
-				return
-			}
-			stopped := g.WDA.Stop(udid)
-			removed, err := g.Cfg.RemoveAndIgnoreDevice(udid)
+			// 仅未激活设备可物理删除；已激活必须先停止。USB 仍连接时下一轮发现会重新出现。
+			removed, stopped, err := g.purgeUnactivatedDevice(udid)
 			if err != nil {
-				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "删除失败：" + err.Error()})
+				writeJSONStatus(w, http.StatusConflict, map[string]string{"error": err.Error()})
 				return
 			}
 			writeJSON(w, map[string]any{
 				"udid": udid, "status": "deleted", "removed": removed, "stopped": stopped,
-				"hidden": true,
 			})
-		case "unignore":
-			// 恢复显示被手动删除（隐藏）的设备：仅取消隐藏，不自动激活。
-			// USB 在线设备随即以「未配置」状态重新出现在列表，可再点激活。
-			if r.Method != http.MethodPost {
-				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-				return
-			}
-			_ = g.Cfg.UnignoreDevice(udid)
-			writeJSON(w, map[string]any{"udid": udid, "status": "unignored", "visible": true})
 		case "health":
 			dev := g.Cfg.Device(udid)
 			if dev == nil || dev.IP == "" {
@@ -490,7 +461,6 @@ func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map
 	}
 }
 
-
 // ensureUSBTunnelsForList builds iproxy for configured + currently attached USB devices.
 
 // healthCheckStale reports whether last_health is missing or older than maxAgeSec (failed checks are retried).
@@ -541,8 +511,7 @@ func (g *Gateway) recognizeLiveWDA(dev *Device) WDAHealth {
 }
 
 func (g *Gateway) deviceList() []map[string]any {
-	// 设备列表实时获取：USB 直连（idevice_id/ioreg/devicectl）与 Wi-Fi 在线（WDA 健康）才算在线；
-	// 离线设备不再出现（不在线就没有数据）。
+	// USB 直连与 Wi-Fi（WDA 健康）实时同步；掉线设备不出现在列表。
 	usb := Discover()
 	usbSet := map[string]bool{}
 	usbInfo := map[string]DiscoveredDevice{}
@@ -556,13 +525,9 @@ func (g *Gateway) deviceList() []map[string]any {
 	emitted := map[string]bool{}
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
-		if d.UDID == "" || g.Cfg.IsIgnored(d.UDID) {
+		if d.UDID == "" {
 			continue
 		}
-		// 已配置设备始终显示：拔掉 USB 后设备转 Wi-Fi（或离线）不消失，
-		// 在线状态由 last_health 表达；彻底离线的设备仍保留，可手动删除。
-		// （此前 `!usbSet && !healthOK` 直接把离线设备从列表/云上报过滤，
-		//   导致拔 USB 且 Wi-Fi 探活失败时设备“被自动删除”。）
 		name, model := d.Name, d.Model
 		if info, ok := usbInfo[d.UDID]; ok {
 			if name == "" {
@@ -581,18 +546,24 @@ func (g *Gateway) deviceList() []map[string]any {
 		if (attached || TunnelAddr(d.UDID) != "" || d.IP != "") && !healthOK(d.LastHealth) && !g.Exec.IsBusy(d.UDID) && healthCheckStale(d.LastHealth, 8) {
 			g.recognizeLiveWDA(d)
 		}
+		busy := g.Exec.IsBusy(d.UDID)
+		running := g.WDA.Running(d.UDID)
+		if deviceAbsent(attached, healthOK(d.LastHealth), busy, running) {
+			continue
+		}
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
 			"last_health": d.LastHealth, "ios_version": d.IOSVersion,
 			"configured": true, "usb": attached, "conn_type": conn,
-			"wda_running": wdaAppearsRunning(g.WDA.Running(d.UDID), d.LastHealth),
-			"metrics":     g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
+			"wda_running": wdaAppearsRunning(running, d.LastHealth),
+			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
+			"deletable": deviceDeletable(busy, healthOK(d.LastHealth), running),
 		})
 		emitted[d.UDID] = true
 	}
 	for _, d := range usb {
-		if emitted[d.UDID] || g.Cfg.IsIgnored(d.UDID) {
+		if emitted[d.UDID] {
 			continue
 		}
 		// Unconfigured USB device: if phone WDA /status is already up, adopt it (IP + activated) instead of showing "activate".
@@ -615,22 +586,27 @@ func (g *Gateway) deviceList() []map[string]any {
 				dev = existing
 			}
 			_ = g.Cfg.Save()
+			busy := g.Exec.IsBusy(d.UDID)
 			out = append(out, map[string]any{
 				"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": dev.Name, "model": dev.Model,
 				"ip": dev.IP, "port": dev.Port, "auto_reactivate": true, "configured": true,
 				"last_health": dev.LastHealth, "ios_version": dev.IOSVersion,
 				"usb": true, "conn_type": "usb",
 				"wda_running": true,
-				"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
+				"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
+				"deletable": deviceDeletable(busy, true, true),
 			})
 			continue
 		}
+		busy := g.Exec.IsBusy(d.UDID)
+		running := g.WDA.Running(d.UDID)
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
-			"usb": true, "conn_type": "usb", "wda_running": g.WDA.Running(d.UDID),
+			"usb": true, "conn_type": "usb", "wda_running": running,
 			"last_health": dev.LastHealth,
-			"metrics": g.Exec.Metrics(d.UDID), "busy": g.Exec.IsBusy(d.UDID),
+			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
+			"deletable": deviceDeletable(busy, healthOK(dev.LastHealth), running),
 		})
 	}
 	return out

@@ -140,19 +140,18 @@ func TestWDACloudStatusTunnelCountsAsAttached(t *testing.T) {
 	}
 }
 
-func TestDeviceListReportSkipsIgnored(t *testing.T) {
+func TestDeviceListReportIncludesConfiguredOnline(t *testing.T) {
 	g, wdaMgr, _ := newStatusTestGateway(t)
 	g.Cfg.Devices = []Device{
 		{UDID: "u-keep", LastHealth: map[string]any{"ok": true}},
-		{UDID: "u-hidden", LastHealth: map[string]any{"ok": true}},
+		{UDID: "u-also", LastHealth: map[string]any{"ok": true}},
 	}
-	g.Cfg.Ignored = []string{"u-hidden"}
 	setWDA(t, wdaMgr, "u-keep", true)
-	setWDA(t, wdaMgr, "u-hidden", true)
+	setWDA(t, wdaMgr, "u-also", true)
 
 	got := g.deviceListReport()
-	if len(got) != 1 || got[0]["udid"] != "u-keep" {
-		t.Fatalf("report = %+v, want only u-keep", got)
+	if len(got) != 2 {
+		t.Fatalf("report = %+v, want both configured online devices", got)
 	}
 }
 

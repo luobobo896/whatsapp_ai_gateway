@@ -360,7 +360,7 @@ func (g *Gateway) deviceListReport() []map[string]any {
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
 	for i := range g.Cfg.Devices {
 		d := &g.Cfg.Devices[i]
-		if d.UDID == "" || g.Cfg.IsIgnored(d.UDID) {
+		if d.UDID == "" {
 			continue
 		}
 		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")

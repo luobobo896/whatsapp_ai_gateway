@@ -398,6 +398,20 @@ func (e *Executor) Status() map[string]any {
 	return map[string]any{"busy_udids": busy, "queued": queued}
 }
 
+// forgetMetrics 删除某设备当日分桶统计并落盘，避免删除后残留脏计数。
+func (e *Executor) forgetMetrics(udid string) {
+	if e == nil || udid == "" {
+		return
+	}
+	e.metricsMu.Lock()
+	defer e.metricsMu.Unlock()
+	if _, ok := e.metrics[udid]; !ok {
+		return
+	}
+	delete(e.metrics, udid)
+	e.persistMetricsLocked()
+}
+
 // Metrics 返回某 UDID 本地统计快照。
 func (e *Executor) Metrics(udid string) Metrics {
 	e.metricsMu.Lock()

@@ -178,7 +178,7 @@ func TestConfigAtomicUpdates(t *testing.T) {
 	// SetCloudToken/SetLLM 不应清掉设备（只写各自 key）
 }
 
-func TestRemoveAndIgnoreDevicePersists(t *testing.T) {
+func TestRemoveDevicePersistsWithoutIgnore(t *testing.T) {
 	dir := t.TempDir()
 	c, err := OpenConfig(dir)
 	if err != nil {
@@ -192,15 +192,11 @@ func TestRemoveAndIgnoreDevicePersists(t *testing.T) {
 	if err := c.Save(); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := c.RemoveAndIgnoreDevice("00008120-000865d90a10c01e")
-	if err != nil || !removed {
-		t.Fatalf("RemoveAndIgnoreDevice: removed=%v err=%v", removed, err)
+	if !c.RemoveDevice("00008120-000865d90a10c01e") {
+		t.Fatal("RemoveDevice = false")
 	}
 	if c.Device("00008120-000865d90a10c01e") != nil {
 		t.Fatal("deleted device still in memory")
-	}
-	if !c.IsIgnored("00008120-000865d90a10c01e") {
-		t.Fatal("deleted device must be ignored")
 	}
 	if c.Device("4886579a97a96bad83b527862bab409b5a07c741") == nil {
 		t.Fatal("other device must stay")
@@ -214,8 +210,10 @@ func TestRemoveAndIgnoreDevicePersists(t *testing.T) {
 	if c2.Device("00008120-000865d90a10c01e") != nil {
 		t.Fatal("deleted device came back after reopen")
 	}
-	if !c2.IsIgnored("00008120-000865d90a10c01e") {
-		t.Fatal("ignored list lost after reopen")
+	if _, ok, err := c2.readKey("ignored"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("delete must not write ignored list")
 	}
 	if len(c2.Devices) != 1 || c2.Devices[0].UDID != "4886579a97a96bad83b527862bab409b5a07c741" {
 		t.Fatalf("remaining devices = %+v", c2.Devices)

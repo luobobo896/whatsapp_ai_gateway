@@ -229,7 +229,7 @@
   <div id="viewDevices">
     <div class="hero">
       <h2>设备总览</h2>
-      <p>管理本地连接的 iPhone 与 WebDriverAgent，数据每5秒自动刷新</p>
+      <p>通过 USB 与 Wi-Fi 实时同步本地 iPhone；掉线自动删除，数据每5秒刷新</p>
     </div>
 
     <div class="model-bar">
@@ -275,15 +275,7 @@
     <div class="empty" id="empty" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6M10 4v4M14 4v4"/><rect x="5" y="8" width="14" height="13" rx="2"/><path d="M9 12v3M12 12v3M15 12v3"/></svg>
       <h4>暂无已连接设备</h4>
-      <p>将 iPhone 接入 USB 并配置后，设备会出现在这里</p>
-    </div>
-    <div class="hidden-devices" id="hiddenDevices" style="display:none;margin-top:20px">
-      <div class="section-head">
-        <h4 style="margin:0">已隐藏设备</h4>
-        <span class="count" id="hiddenCount"></span>
-      </div>
-      <p style="font-size:12px;color:var(--text-2);margin:4px 0 10px">手动删除的设备会隐藏在这里（USB 仍连接也不会出现在上方列表）；点击「恢复」可重新显示。</p>
-      <div class="devices" id="hiddenList"></div>
+      <p>将 iPhone 接入 USB，或确保已激活设备的 Wi-Fi WDA 在线后，会出现在这里</p>
     </div>
   </div>
 
@@ -728,7 +720,8 @@ function deviceCard(d){
     actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
   }
   actions += ` <button class="btn sm ghost" onclick="showDeviceItems('${d.udid}')">明细</button>`;
-  if (!d.busy) {
+  const canDelete = d.deletable != null ? !!d.deletable : (!d.busy && !running);
+  if (canDelete) {
     actions += ` <button class="btn sm ghost danger" onclick="delDevice('${d.udid}')">删除</button>`;
   }
   return `
@@ -813,7 +806,7 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadIgnored(), loadEt(), loadMetrics(), loadLlm()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm()]); }
 
 async function loadLlm(){
   try{
@@ -899,52 +892,15 @@ function confirmOk(){
 async function delDevice(udid){
   const d = devicesCache.find(x => x.udid === udid) || {};
   const label = d.serial || d.name || udid.slice(0, 8);
-  showConfirm('删除并隐藏设备', `确定删除并隐藏设备「${label}」？\n删除后该设备从列表消失（即使 USB 仍连接也不显示），可在下方「已隐藏设备」中恢复。`, '删除', async () => {
+  showConfirm('删除设备', `确定删除未激活设备「${label}」？\n将彻底清除本机配置与缓存，不可恢复。已激活设备请先停止。若 USB 仍连接，下一轮同步会作为新发现设备再次出现。`, '删除', async () => {
     try{
       const r = await api('/api/devices/' + encodeURIComponent(udid) + '/delete', {method:'POST'});
       let dd = {}; try{ dd = await r.json(); }catch(e){}
       if(!r.ok){ toast('删除失败：' + apiErr(dd, r.status)); return; }
-      toast('已删除并隐藏设备');
+      toast('已删除设备');
     }catch(e){ toast('删除失败'); }
     refreshAll();
   });
-}
-/* ---------- 已隐藏设备管理 ---------- */
-let ignoredCache = [];
-async function loadIgnored(){
-  try{
-    ignoredCache = await (await api('/api/devices/ignored')).json();
-  }catch(e){ ignoredCache = []; }
-  renderIgnored(ignoredCache);
-}
-function renderIgnored(list){
-  const box = $('hiddenDevices');
-  if (!box) return;
-  if (!list || !list.length){ box.style.display = 'none'; return; }
-  box.style.display = 'block';
-  $('hiddenCount').textContent = '共 ' + list.length + ' 台';
-  $('hiddenList').innerHTML = list.map(u => {
-    const short = u.length > 12 ? u.slice(0, 12) + '…' : u;
-    return `<div class="device-row">
-      <div class="device-cell device-id">
-        <div class="device-info">
-          <div class="device-title"><span class="device-name">已隐藏设备</span><span class="tag">${esc(short)}</span></div>
-          <div class="device-meta"><span>${esc(u)}</span></div>
-        </div>
-      </div>
-      <div class="device-cell device-actions">
-        <button class="btn sm" onclick="unignore('${esc(u)}')">恢复</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-async function unignore(udid){
-  try{
-    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/unignore', {method:'POST'});
-    if(!r.ok){ let d={}; try{ d = await r.json(); }catch(e){} toast('恢复失败：' + apiErr(d, r.status)); return; }
-    toast('已恢复显示（USB 在线设备会重新出现在列表）');
-  }catch(e){ toast('恢复失败'); }
-  refreshAll();
 }
 /* ---------- 发送明细（按设备分组，本地落盘 results） ---------- */
 let itemFilter = ''; // 当前按设备过滤（'' = 全部设备）

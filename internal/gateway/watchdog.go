@@ -193,6 +193,11 @@ func (g *Gateway) watchOnce() {
 	}
 	_ = g.autoAssignIP()
 	_ = g.followNetworkChange()
+	usbSet := map[string]bool{}
+	for _, d := range Discover() {
+		usbSet[d.UDID] = true
+	}
+	g.pruneOfflineDevices(usbSet)
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
