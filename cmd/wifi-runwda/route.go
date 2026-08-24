@@ -15,6 +15,14 @@ type muxDevice struct {
 	Type string
 }
 
+// connectRoute is how we honor usbmux ConnectionType=Network.
+// remotexpc Connect has no ConnectionType field: listDevices(), then
+// Connect the DeviceID whose Properties.ConnectionType is Network.
+type connectRoute struct {
+	Target muxDevice
+	Via    string // usbmux-network | usbmux-usb
+}
+
 // pickDevice prefers usbmux Network so testmanagerd DTX rides Wi-Fi.
 // USB is only used when the host has not attached a network device yet.
 func pickDevice(devs []muxDevice, udid string) (muxDevice, bool) {
@@ -34,6 +42,21 @@ func pickDevice(devs []muxDevice, udid string) (muxDevice, bool) {
 		return usb, true
 	}
 	return muxDevice{}, false
+}
+
+// chooseNetworkRoute explicitly selects ConnectionType=Network.
+// usbmuxd ListDevices is the only place that field exists; Connect only
+// takes DeviceID+PortNumber. Raw TCP to :62078 can talk lockdown but
+// testmanagerd/installation_proxy ports RST unless usbmuxd itself attached
+// the Network DeviceID (see appium-ios-remotexpc README).
+func chooseNetworkRoute(dev muxDevice, found bool) connectRoute {
+	if found && dev.Type == "Network" && dev.ID > 0 {
+		return connectRoute{Target: dev, Via: "usbmux-network"}
+	}
+	if found {
+		return connectRoute{Target: dev, Via: "usbmux-usb"}
+	}
+	return connectRoute{}
 }
 
 func htons(p uint16) uint16 {

@@ -90,3 +90,22 @@ func TestRequireMuxNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestChooseNetworkRouteUsbmuxNetworkWins(t *testing.T) {
+	dev := muxDevice{ID: 101, UDID: "4886579a97a96bad83b527862bab409b5a07c741", Type: "Network"}
+	got := chooseNetworkRoute(dev, true)
+	if got.Via != "usbmux-network" || got.Target.ID != 101 {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestChooseNetworkRouteUSBWhenNoNetworkRow(t *testing.T) {
+	dev := muxDevice{ID: 111, UDID: "5060c403afdee4c15a0edeab69dba0524e2ce592", Type: "USB"}
+	got := chooseNetworkRoute(dev, true)
+	if got.Via != "usbmux-usb" || got.Target.ID != 111 {
+		t.Fatalf("no Network row must stay USB DeviceID, got %#v", got)
+	}
+	if empty := chooseNetworkRoute(muxDevice{}, false); empty.Via != "" {
+		t.Fatalf("missing device must be empty, got %#v", empty)
+	}
+}

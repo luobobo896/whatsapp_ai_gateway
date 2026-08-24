@@ -187,7 +187,7 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID, wifiIP string
 	cool := m.crashUntil[udid]
 	m.mu.Unlock()
 	if time.Now().Before(cool) {
-		return fmt.Errorf("WDA 上次启动后很快退出，%.0f 秒内暂停自动重激活（疑似签名/信任问题，需在设备上信任开发者后重试）", time.Until(cool).Seconds())
+		return fmt.Errorf("WDA 激活后未保持运行（原因见激活日志；常见为设备锁屏/未解锁、未授权自动化，或无线调试配对缺失）。%.0f 秒内暂停自动重激活；处理后可点“激活”立即重试", time.Until(cool).Seconds())
 	}
 
 	kind := resolveActivator(m.activator)
@@ -267,7 +267,8 @@ func (m *WDAManager) track(udid string, cmd *exec.Cmd) {
 				slog.Info("WDA host process exited after USB detach; device WDA may stay on Wi-Fi",
 					"udid", shortOf(udid), "error", err)
 			} else {
-				slog.Warn("WDA process exited", "udid", shortOf(udid), "error", err)
+				slog.Warn("WDA process exited", "udid", shortOf(udid), "error", err,
+					"detail", activationFailureDetail(udid))
 			}
 		}
 	}()
@@ -286,6 +287,46 @@ func hostProcDetachExpected(err error) bool {
 	return strings.Contains(s, "exit status 75") ||
 		strings.Contains(s, "was disconnected") ||
 		strings.Contains(s, "not connected")
+}
+
+// activationFailureDetail 从本次激活日志（<TMPDIR>/wda-<udid>.log）里取最后一条
+// ERROR / “Failed running WDA” 的可读描述，把 go-ios 的真实原因带进网关日志，
+// 避免只看到 exit status 1 而误判成“签名/信任问题”。
+func activationFailureDetail(udid string) string {
+	logPath := filepath.Join(os.TempDir(), "wda-"+shortOf(udid)+".log")
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		if strings.Contains(l, `"level":"ERROR"`) || strings.Contains(l, "Failed running WDA") {
+			if m := extractJSONField(l, "error"); m != "" {
+				return m
+			}
+			if m := extractJSONField(l, "msg"); m != "" {
+				return m
+			}
+			return strings.TrimSpace(l)
+		}
+	}
+	return ""
+}
+
+// extractJSONField 从一行 JSON 里取 `"field":"..."` 的值（忽略转义引号）。
+func extractJSONField(line, field string) string {
+	key := `"` + field + `":"`
+	i := strings.Index(line, key)
+	if i < 0 {
+		return ""
+	}
+	rest := line[i+len(key):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 // ResetCrashCooldown 清除某设备的崩溃冷却（管理页手动「激活」时调用，允许人工立即重试）。

@@ -23,6 +23,10 @@ const (
 	// Xcode 安装 UI test runner 时会加 .xctrunner 后缀。
 	defaultWDABundleID  = "com.wda.WebRunner.xctrunner"
 	defaultXCTestConfig = "WebDriverAgentRunner.xctest"
+	// defaultWifiNetworkWait usbmux Network 条目的等待窗口。
+	// 设备已有 Network 会立即命中；没有的门控设备（如 iOS 15 老机型）不必死等太久，
+	// 尽快回退 USB 让“激活→Automation Running”更短。有 Network 的机器秒级命中，不受此值影响。
+	defaultWifiNetworkWait = 10 * time.Second
 )
 
 // resolveActivator 把配置值收成实际后端。
@@ -175,7 +179,7 @@ func wifiRunwdaInvocation(udid, wifiIP string, port int, reportedUDID, bundleID 
 		"-port", strconv.Itoa(port),
 		"-bundle", bundleID,
 		"-ios", iosBin,
-		"-wait-network", "8s",
+		"-wait-network", defaultWifiNetworkWait.String(),
 	}
 	if wifiIP != "" {
 		args = append(args, "-ip", wifiIP)

@@ -168,7 +168,7 @@ func TestWifiRunwdaInvocationBuildsArgs(t *testing.T) {
 	if bin == "" {
 		t.Fatal("empty wrapper path")
 	}
-	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237", "-wait-network", "8s"} {
+	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237", "-wait-network", "10s"} {
 		if !containsExact(args, want) {
 			t.Fatalf("missing %q in %#v", want, args)
 		}
@@ -188,8 +188,8 @@ func TestProtocolCmdIOS15UsesWifiRunwda(t *testing.T) {
 	if filepath.Base(bin) != "wifi-runwda" {
 		t.Fatalf("bin=%q want wifi-runwda so XCTest can survive USB unplug", bin)
 	}
-	if !containsExact(args, "-wait-network") || !containsExact(args, "8s") {
-		t.Fatalf("must briefly wait for usbmux Network then USB: %#v", args)
+	if !containsExact(args, "-wait-network") || !containsExact(args, "10s") {
+		t.Fatalf("must briefly wait for usbmux Network then USB-fallback: %#v", args)
 	}
 }
 

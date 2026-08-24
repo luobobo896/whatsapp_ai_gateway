@@ -30,7 +30,7 @@ func main() {
 	port := flag.Int("port", 8100, "USE_PORT")
 	iosBin := flag.String("ios", "ios", "go-ios binary")
 	serveOnly := flag.Bool("serve", false, "only run usbmux proxy")
-	waitNet := flag.Duration("wait-network", 8*time.Second, "wait for usbmux Network, then USB if still missing")
+	waitNet := flag.Duration("wait-network", 10*time.Second, "wait up to this long for usbmux ConnectionType=Network DeviceID; fall back to USB if still missing (USB unplug would stop Automation Running)")
 	flag.Parse()
 	if *udid == "" {
 		fmt.Fprintln(os.Stderr, "usage: wifi-runwda -udid <udid> [-ip wifi-ip] [-bundle id] [-port 8100] [-ios ios]")
@@ -41,17 +41,24 @@ func main() {
 	}
 
 	if *waitNet > 0 {
-		log.Printf("waiting up to %s for usbmux Network on %s", *waitNet, short(*udid))
+		log.Printf("waiting up to %s for usbmux ConnectionType=Network on %s", *waitNet, short(*udid))
 	}
 	dev, ok := waitPreferNetwork(*udid, *waitNet, nil)
-	if !ok {
+	route := chooseNetworkRoute(dev, ok)
+	if route.Via == "" {
 		fmt.Fprintf(os.Stderr, "usbmux 没有设备 %s\n", short(*udid))
 		os.Exit(1)
 	}
-	if err := requireMuxNetwork(*udid, dev, ok); err != nil {
-		log.Printf("WARN %s; activating over USB (unplug will stop Automation Running)", err)
+	if route.Via != "usbmux-network" {
+		if err := requireMuxNetwork(*udid, route.Target, true); err != nil {
+			// 拿不到 usbmux Network（无线调试配对未建立）。回退 USB 激活，
+			// 让设备能先跑起来（Automation Running / 可发消息）；系统按
+			// usbmuxNetworkUDIDs() 判 `unplugSafeFor=false`，UI 会标记为非拔线保活。
+			log.Printf("WARN %s; 无线调试 Network 条目缺失，回退 USB 激活（拔 USB 会拆掉 Automation Running）", err)
+		}
 	}
-	log.Printf("using usbmux id=%d type=%s udid=%s", dev.ID, dev.Type, short(*udid))
+	log.Printf("using ConnectionType=%s via=%s usbmux_id=%d udid=%s",
+		route.Target.Type, route.Via, route.Target.ID, short(*udid))
 
 	ln, muxAddr, err := listenMux(*udid)
 	if err != nil {
@@ -60,7 +67,7 @@ func main() {
 	}
 	defer func() { _ = ln.Close(); cleanupMux(muxAddr) }()
 
-	st := &muxState{udid: *udid, target: dev}
+	st := &muxState{udid: *udid, target: route.Target}
 	go serveMux(ln, st)
 	if *serveOnly {
 		fmt.Println(muxAddr)
@@ -87,7 +94,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "start ios: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("wifi-runwda started pid=%d udid=%s mux=%s via=%s", cmd.Process.Pid, short(*udid), muxAddr, dev.Type)
+	log.Printf("wifi-runwda started pid=%d udid=%s mux=%s ConnectionType=%s via=%s",
+		cmd.Process.Pid, short(*udid), muxAddr, route.Target.Type, route.Via)
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
@@ -220,8 +228,11 @@ func cleanupMux(muxAddr string) {
 }
 
 func handleConnect(c net.Conn, h muxHeader, req map[string]any, st *muxState) {
+	// usbmux Connect has no ConnectionType field. Selecting the Network
+	// DeviceID is how remotexpc / Appium specify wireless.
 	req["DeviceID"] = uint32(st.target.ID)
-	log.Printf("connect %s muxport=%d -> usbmux id=%d", st.target.Type, plistUint16(req["PortNumber"]), st.target.ID)
+	log.Printf("connect ConnectionType=%s muxport=%d -> usbmux DeviceID=%d",
+		st.target.Type, plistUint16(req["PortNumber"]), st.target.ID)
 	forwardConnectUSB(c, h, req)
 }
 
