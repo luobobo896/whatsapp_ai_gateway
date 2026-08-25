@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 	"testing"
 )
 
@@ -16,11 +17,21 @@ func TestChannelReachableForVia(t *testing.T) {
 	if !channelReachableForVia(activateViaNetwork, false, true, false) {
 		t.Fatal("Network via accepts usbmux Network")
 	}
-	if !channelReachableForVia(activateViaNetwork, false, false, true) {
-		t.Fatal("Network via accepts Wi-Fi IP")
-	}
 	if channelReachableForVia(activateViaNetwork, true, false, false) {
 		t.Fatal("Network via must not relaunch on USB cable alone")
+	}
+	if runtime.GOOS == "windows" {
+		t.Setenv(netmuxdEnvName, "tcp://127.0.0.1:27016")
+		if channelReachableForVia(activateViaNetwork, false, false, true) {
+			t.Fatal("Windows netmuxd must not reactivate on Wi-Fi IP alone (needs Network entry)")
+		}
+		if !channelReachableForVia(activateViaNetwork, false, true, false) {
+			t.Fatal("Windows netmuxd accepts usbmux Network entry")
+		}
+		t.Setenv(netmuxdEnvName, "")
+	}
+	if !channelReachableForVia(activateViaNetwork, false, false, true) {
+		t.Fatal("Network via accepts Wi-Fi IP (non-netmuxd path)")
 	}
 }
 

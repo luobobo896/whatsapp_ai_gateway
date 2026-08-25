@@ -124,6 +124,7 @@ func TestPruneOfflineDevicesRemovesOnlyAbsent(t *testing.T) {
 	g.Cfg.Devices = []Device{
 		{UDID: "u-usb", LastHealth: map[string]any{"ok": false}},
 		{UDID: "u-wifi", LastHealth: map[string]any{"ok": true}},
+		{UDID: "u-wifi-debug", WifiDebug: true, LastHealth: map[string]any{"ok": false}},
 		{UDID: "u-busy", LastHealth: map[string]any{"ok": false}},
 		{UDID: "u-run", LastHealth: map[string]any{"ok": false}},
 		{UDID: "u-gone", LastHealth: map[string]any{"ok": false}},
@@ -140,7 +141,7 @@ func TestPruneOfflineDevicesRemovesOnlyAbsent(t *testing.T) {
 	if g.Cfg.Device("u-gone") != nil {
 		t.Fatal("offline device still in config")
 	}
-	for _, u := range []string{"u-usb", "u-wifi", "u-busy", "u-run"} {
+	for _, u := range []string{"u-usb", "u-wifi", "u-wifi-debug", "u-busy", "u-run"} {
 		if g.Cfg.Device(u) == nil {
 			t.Fatalf("%s must stay", u)
 		}

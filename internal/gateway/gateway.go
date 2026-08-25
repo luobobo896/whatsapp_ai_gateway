@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,6 +50,10 @@ type Gateway struct {
 	usbmuxRepairRun  bool       // 是否正在执行一次修复（防并发）
 	lastUsbmuxRepair time.Time  // 上次自动修复时间（冷却用）
 	lastUsbmuxResult string     // 上次修复结果描述
+
+	netmuxdMu   sync.Mutex    // 保护 netmuxd 进程
+	netmuxdCmd  *exec.Cmd     // 当前 netmuxd 进程
+	netmuxdDone chan struct{} // netmuxd 退出信号（退出后看护下一轮拉起）
 }
 
 // New 构造网关。

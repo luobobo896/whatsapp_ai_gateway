@@ -98,7 +98,7 @@ func usbTunnelsToDrop(usb, netSet map[string]bool, procs map[string]*usbTunnelPr
 		if proc != nil && proc.network {
 			set = netSet
 		}
-		if set[udid] {
+		if set[udidKey(udid)] {
 			delete(misses, udid)
 			continue
 		}
@@ -114,8 +114,10 @@ func usbTunnelsToDrop(usb, netSet map[string]bool, procs map[string]*usbTunnelPr
 // EnsureUSBTunnels 按当前 USB / usbmux Network 设备与目标端口对账隧道（看护循环每轮调用）。
 // 拔线只停 iproxy，不触碰 WDA 激活进程 / 机上 XCTest。
 //   - USB 直连设备：iproxy 走 USB（默认）；
-//   - 无线设备（usbmux ConnectionType=Network、无 USB）：iproxy -n 走 Network 隧道，
-//     让网关能访问 WDA 的 loopback :8100（Wi-Fi 直连受 iOS 本地网络权限/绑定影响，隧道更稳）。
+//   - 无线设备（usbmux ConnectionType=Network、无 USB）：ios forward 走 Network 隧道
+//     （经 netmuxd 转发到手机 Wi-Fi），让网关能访问 WDA 的 loopback :8100。
+//     Windows 上不用 iproxy -n：libimobiledevice 不读 USBMUXD_SOCKET_ADDRESS，
+//     连 AMDS 看不到 Network 条目，隧道建不起来；go-ios forward 读该环境变量。
 //
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
 func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
@@ -135,14 +137,14 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 	}
 	usb := map[string]bool{}
 	for _, u := range udids {
-		usb[normalizeUDID(u)] = true
+		usb[udidKey(u)] = true
 	}
 	netSet := map[string]bool{}
 	for u := range usbmuxNetworkUDIDs() {
-		netSet[normalizeUDID(u)] = true
+		netSet[udidKey(u)] = true
 	}
 	for _, u := range NetworkUDIDs() {
-		netSet[normalizeUDID(u)] = true
+		netSet[udidKey(u)] = true
 	}
 	if len(udids) == 0 && len(m.procs) > 0 {
 		// 整表为空：可能是 ioreg 抖动，也可能是手机都拔到别的电脑。
@@ -156,9 +158,6 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 		delete(m.procs, udid)
 	}
 	bin := iproxyBin()
-	if bin == "" {
-		return
-	}
 	for udid, devPort := range ports {
 		via, configured := viaOf[udid]
 		wantNet := configured && via == activateViaNetwork
@@ -174,19 +173,23 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 		}
 		useNetwork := wantNet
 		if !configured {
-			useNetwork = !usb[udid] && netSet[udid]
+			useNetwork = !usb[udidKey(udid)] && netSet[udidKey(udid)]
 		}
 		if useNetwork {
-			if !netSet[udid] {
+			if !netSet[udidKey(udid)] {
 				continue
 			}
 			local, err := freeLocalPort()
 			if err != nil {
 				continue
 			}
-			args := iproxyForwardArgs(udid, local, devPort, true)
-			cmd := exec.Command(bin, args...)
-			cmd.Env = append(os.Environ(), bundleLibFallback()...)
+			fwdBin := goIOSForwardBin()
+			if fwdBin == "" {
+				continue
+			}
+			args := []string{"forward", "--udid=" + udid, strconv.Itoa(local), strconv.Itoa(devPort)}
+			cmd := exec.Command(fwdBin, args...)
+			// 继承 os.Environ()：网关已注入 USBMUXD_SOCKET_ADDRESS=netmuxd。
 			if err := cmd.Start(); err != nil {
 				continue
 			}
@@ -204,7 +207,10 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 			}()
 			continue
 		}
-		if !usb[udid] {
+		if !usb[udidKey(udid)] {
+			continue
+		}
+		if bin == "" {
 			continue
 		}
 		local, err := freeLocalPort()
@@ -230,6 +236,11 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 			m.mu.Unlock()
 		}()
 	}
+}
+
+// goIOSForwardBin 定位 go-ios 的 ios 可执行文件（Network 隧道用，读 USBMUXD_SOCKET_ADDRESS）。
+func goIOSForwardBin() string {
+	return lookTool("ios", "ios.exe")
 }
 
 // TunnelAddr 返回某 UDID 的本地隧道地址（"127.0.0.1:port"）；无可用隧道返回空串。

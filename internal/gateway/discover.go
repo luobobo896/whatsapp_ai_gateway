@@ -456,6 +456,47 @@ func ScanLANWDA(timeout time.Duration) []FoundWDA {
 	return scanSubnets(privateSubnets(), timeout)
 }
 
+// wifiScanCache 局域网扫描结果缓存（10s），避免前端每轮轮询都全量扫网。
+var wifiScanCache struct {
+	mu  sync.Mutex
+	at  time.Time
+	res []FoundWDA
+}
+
+// wifiScanned 返回缓存 10s 的局域网 WDA 扫描结果。
+func wifiScanned() []FoundWDA {
+	wifiScanCache.mu.Lock()
+	defer wifiScanCache.mu.Unlock()
+	if !wifiScanCache.at.IsZero() && time.Since(wifiScanCache.at) < 10*time.Second {
+		return wifiScanCache.res
+	}
+	wifiScanCache.res = ScanLANWDA(500 * time.Millisecond)
+	wifiScanCache.at = time.Now()
+	return wifiScanCache.res
+}
+
+// wifiMatchByVendorUUID 把局域网扫描到的 WDA 按 VendorUUID 强匹配回已配置设备。
+// 返回 UDID(大写) -> 扫描结果；只匹配已有 VendorUUID 的设备，避免认错机器。
+// 未配置设备拿不到 UDID（WDA 只暴露 identifierForVendor），必须先 USB 首配。
+func wifiMatchByVendorUUID(devices []Device, scanned []FoundWDA) map[string]FoundWDA {
+	byUUID := map[string]FoundWDA{}
+	for _, f := range scanned {
+		if f.UUID != "" {
+			byUUID[strings.ToUpper(f.UUID)] = f
+		}
+	}
+	out := map[string]FoundWDA{}
+	for _, d := range devices {
+		if d.UDID == "" || d.VendorUUID == "" {
+			continue
+		}
+		if f, ok := byUUID[strings.ToUpper(d.VendorUUID)]; ok {
+			out[udidKey(d.UDID)] = f
+		}
+	}
+	return out
+}
+
 // scanSubnets 并发扫描指定网段列表的 8100 端口（物理网卡快路径与全网段共用）。
 func scanSubnets(subs []string, timeout time.Duration) []FoundWDA {
 	httpClient := &http.Client{Timeout: timeout}

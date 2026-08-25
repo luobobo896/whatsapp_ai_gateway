@@ -7,13 +7,32 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
+
+var netmuxdNetCache struct {
+	mu  sync.Mutex
+	at  time.Time
+	set map[string]bool
+}
 
 // usbmuxNetworkUDIDs 返回 usbmux 里带有 Network（无线调试）条目的设备 UDID 集合（大写）。
 // iOS ≤16 拔线保活的先决条件就是 usbmux 有 Network 条目：wifi-runwda 会优先选它，
 // 让 XCTest 会话骑在 WiFi 上，拔 USB 才不会拆。返回空集合表示「无该条目 → 拔线必断」。
+// 结果缓存 1s，避免看护每轮/每台设备重复拉起 `ios list --details` 子进程。
 func usbmuxNetworkUDIDs() map[string]bool {
+	netmuxdNetCache.mu.Lock()
+	defer netmuxdNetCache.mu.Unlock()
+	if !netmuxdNetCache.at.IsZero() && time.Since(netmuxdNetCache.at) < time.Second {
+		return netmuxdNetCache.set
+	}
+	set := usbmuxNetworkUDIDsUncached()
+	netmuxdNetCache.set, netmuxdNetCache.at = set, time.Now()
+	return set
+}
+
+func usbmuxNetworkUDIDsUncached() map[string]bool {
 	out := map[string]bool{}
 	bin := lookTool("ios", "ios.exe")
 	if bin == "" {

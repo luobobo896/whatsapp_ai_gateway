@@ -206,8 +206,16 @@ func TestIsDevicePasscodeOutput(t *testing.T) {
 
 func TestEnableWifiLockdownPasscodeError(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\necho 'set EnableWifiDebugging: Failed setting with err: PasscodeRequired' >&2\nexit 3\n"
-	if err := os.WriteFile(filepath.Join(dir, "wifi-lockdown"), []byte(script), 0o755); err != nil {
+	name := "wifi-lockdown"
+	var script string
+	if runtime.GOOS == "windows" {
+		// Windows 的 LookPath 只认 PATHEXT（.exe/.cmd 等），且 CreateProcess 可直接跑 .cmd。
+		name = "wifi-lockdown.cmd"
+		script = "@echo off\r\necho set EnableWifiDebugging: Failed setting with err: PasscodeRequired 1>&2\r\nexit /b 3\r\n"
+	} else {
+		script = "#!/bin/sh\necho 'set EnableWifiDebugging: Failed setting with err: PasscodeRequired' >&2\nexit 3\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
@@ -279,7 +287,7 @@ func TestProtocolCmdIOS15USBUsesGoIOS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) != "ios" {
+	if baseTool(bin) != "ios" {
 		t.Fatalf("USB activate must use ios runwda, bin=%q", bin)
 	}
 	if !containsExact(args, "runwda") {
@@ -300,11 +308,33 @@ func TestProtocolCmdIOS15NetworkUsesWifiRunwda(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) != "wifi-runwda" {
+	if baseTool(bin) != "wifi-runwda" {
 		t.Fatalf("bin=%q want wifi-runwda", bin)
 	}
 	if !containsExact(args, "-require-network") || !containsExact(args, "30s") {
 		t.Fatalf("Network activate must require usbmux Network: %#v", args)
+	}
+}
+
+// TestProtocolCmdWindowsNetmuxdNetworkUsesGoIOS：Windows 上 netmuxd 提供
+// Network 条目后，Network 激活直接走 ios runwda（不再套 wifi-runwda 代理）。
+func TestProtocolCmdWindowsNetmuxdNetworkUsesGoIOS(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows netmuxd 路径")
+	}
+	t.Setenv("USBMUXD_SOCKET_ADDRESS", "tcp://127.0.0.1:27016")
+	t.Setenv("WDA_GATEWAY_RESOURCES", "")
+	m := NewWDAManager("", "", "")
+	udid := "4886579a97a96bad83b527862bab409b5a07c741"
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "15.8.8", activateViaNetwork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) != "ios.exe" {
+		t.Fatalf("bin=%q, want ios.exe", bin)
+	}
+	if !containsExact(args, "runwda") {
+		t.Fatalf("args missing runwda: %#v", args)
 	}
 }
 
@@ -331,7 +361,7 @@ func TestProtocolCmdIOS15USBWorksWithoutWifiRunwda(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) != "ios" || !containsExact(args, "runwda") {
+	if baseTool(bin) != "ios" || !containsExact(args, "runwda") {
 		t.Fatalf("USB activate should be ios runwda: bin=%q args=%#v", bin, args)
 	}
 }
@@ -346,7 +376,7 @@ func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) != "ios" {
+	if baseTool(bin) != "ios" {
 		t.Fatalf("bin=%q want ios", bin)
 	}
 	if !containsExact(args, "runwda") || !containsExact(args, "--tunnel-info-port=28100") {
@@ -354,17 +384,28 @@ func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
 	}
 }
 
+// baseTool 返回可执行文件基名（Windows 上去掉 .exe，便于与 unix 名称断言对齐）。
+func baseTool(p string) string {
+	return strings.TrimSuffix(filepath.Base(p), ".exe")
+}
+
 func plantActivateTools(t *testing.T, wrap, ios bool) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := "#!/bin/sh\nexit 0\n"
+	exe := func(name string) string {
+		if runtime.GOOS == "windows" {
+			return name + ".exe"
+		}
+		return name
+	}
 	if wrap {
-		if err := os.WriteFile(filepath.Join(dir, "wifi-runwda"), []byte(script), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, exe("wifi-runwda")), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if ios {
-		if err := os.WriteFile(filepath.Join(dir, "ios"), []byte(script), 0o755); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, exe("ios")), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -393,10 +434,10 @@ func TestProtocolCmdIOS17USBUsesGoIOS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(bin) == "wifi-runwda" {
+	if baseTool(bin) == "wifi-runwda" {
 		t.Fatal("USB via must not use wifi-runwda")
 	}
-	if filepath.Base(bin) != "ios" {
+	if baseTool(bin) != "ios" {
 		t.Fatalf("bin=%q want ios", bin)
 	}
 	if !containsExact(args, "runwda") || !containsExact(args, "--tunnel-info-port=28100") {

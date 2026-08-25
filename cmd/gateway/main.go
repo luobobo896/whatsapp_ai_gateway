@@ -84,6 +84,7 @@ func main() {
 	defer et.Stop() // 网关退出时停掉托管的 easytier-core，避免孤儿进程占用端口
 	defer gateway.StopGoIOSTunnel()
 	gw := gateway.New(cfg, wdaMgr, exec, llm, et)
+	defer gw.StopNetmuxd() // 网关退出时停掉 netmuxd（Windows 无线 Network 代理）
 
 	// 优雅停机：收到信号后先取消上下文——云会话会正常发送关闭帧再退出，
 	// 平台侧立即释放会话，避免重启期间旧连接残留导致新连接被拒/告警。

@@ -199,3 +199,38 @@ func TestLanFingerprintStableFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestWifiMatchByVendorUUID(t *testing.T) {
+	devices := []Device{
+		{UDID: "4886579a97a96bad83b527862bab409b5a07c741", VendorUUID: "AAAA-BBBB-CCCC"},
+		{UDID: "no-uuid-device", VendorUUID: ""},
+		{UDID: "other-device", VendorUUID: "DDDD-EEEE"},
+	}
+	scanned := []FoundWDA{
+		{UUID: "AAAA-BBBB-CCCC", IP: "192.168.10.237", IOSIP: "192.168.10.237", IOSVersion: "15.8.8"},
+		{UUID: "NOT-MATCHED", IP: "192.168.10.99"},
+		{IP: "192.168.10.88"}, // 无 UUID 的扫描结果不参与匹配
+	}
+	got := wifiMatchByVendorUUID(devices, scanned)
+	if len(got) != 1 {
+		t.Fatalf("matched = %d, want 1: %#v", len(got), got)
+	}
+	f, ok := got["4886579A97A96BAD83B527862BAB409B5A07C741"]
+	if !ok {
+		t.Fatalf("expected first device matched, got %#v", got)
+	}
+	if f.IP != "192.168.10.237" {
+		t.Fatalf("ip = %q, want 192.168.10.237", f.IP)
+	}
+}
+
+func TestWifiMatchByVendorUUIDEmpty(t *testing.T) {
+	got := wifiMatchByVendorUUID(nil, []FoundWDA{{UUID: "AAAA", IP: "10.0.0.2"}})
+	if len(got) != 0 {
+		t.Fatalf("matched = %#v, want none", got)
+	}
+	got = wifiMatchByVendorUUID([]Device{{UDID: "u", VendorUUID: "AAAA"}}, nil)
+	if len(got) != 0 {
+		t.Fatalf("matched = %#v, want none", got)
+	}
+}

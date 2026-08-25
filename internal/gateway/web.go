@@ -610,14 +610,27 @@ func (g *Gateway) deviceList() []map[string]any {
 		presentSet[udidKey(d.UDID)] = true
 		usbInfo[udidKey(d.UDID)] = d
 	}
+	// Windows netmuxd 通过 mDNS 发现的 Network 设备：USB 不在也保持列表可见，
+	// 用户可点 Network 激活（netmuxd 负责无线转发与心跳保活）。
+	netSet := usbmuxNetworkUDIDs()
+	for u := range netSet {
+		presentSet[u] = true
+	}
 	usbSet := map[string]bool{}
 	for _, u := range USBUDIDs() {
 		usbSet[udidKey(u)] = true
 	}
+	// Windows 无 usbmux Network 条目：已配置设备（记录过 VendorUUID）拔线后，
+	// 只要手机 Wi-Fi 上 WDA 在跑，就靠局域网扫描把它带回列表并恢复 IP。
+	var wifiByUDID map[string]FoundWDA
+	for i := range g.Cfg.Devices {
+		if g.Cfg.Devices[i].VendorUUID != "" {
+			wifiByUDID = wifiMatchByVendorUUID(g.Cfg.Devices, wifiScanned())
+			break
+		}
+	}
 	g.ensureUSBTunnelsForList()
 	tunnelSet := liveGoIOSTunnelSet()
-	netSet := usbmuxNetworkUDIDs()
-
 	out := []map[string]any{}
 	emitted := map[string]bool{}
 	for i := range g.Cfg.Devices {
@@ -635,6 +648,18 @@ func (g *Gateway) deviceList() []map[string]any {
 			}
 		}
 		present, attached, conn := muxPresence(udidKey(d.UDID), usbSet, presentSet, usbTunnelAlive(d.UDID), TunnelAddr(d.UDID) != "")
+		if !present {
+			if f, ok := wifiByUDID[udidKey(d.UDID)]; ok {
+				present = true
+				conn = "wifi"
+				if ip := preferredWifiIP(f.IP, f.IOSIP); ip != "" && ip != d.IP {
+					d.IP = ip
+					d.Port = 8100
+					_ = g.Cfg.Save()
+					slog.Info("wifi device seen via LAN scan", "udid", shortOf(d.UDID), "ip", ip)
+				}
+			}
+		}
 		// USB/tunnel/IP available but not yet healthy: probe /status (throttled) and adopt as activated when ready.
 		// 用户点停止后不再用残留 /status 把设备救活。
 		if !userStopped(d, g.WDA.Running(d.UDID)) && (present || d.IP != "") && !healthOK(d.LastHealth) && !g.Exec.IsBusy(d.UDID) && healthCheckStale(d.LastHealth, 8) {

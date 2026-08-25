@@ -300,6 +300,18 @@ func splice(a, b net.Conn) {
 }
 
 func realMuxDial() (net.Conn, error) {
+	// USBMUXD_SOCKET_ADDRESS 可指向 netmuxd（Windows 上提供 Network 条目并保活），
+	// 否则保持平台默认（Windows AMDS / Unix usbmuxd）。
+	if addr := os.Getenv("USBMUXD_SOCKET_ADDRESS"); addr != "" {
+		switch {
+		case strings.HasPrefix(addr, "unix://"):
+			return net.DialTimeout("unix", strings.TrimPrefix(addr, "unix://"), time.Second)
+		case strings.HasPrefix(addr, "tcp://"):
+			return net.DialTimeout("tcp", strings.TrimPrefix(addr, "tcp://"), time.Second)
+		default:
+			return net.DialTimeout("tcp", addr, time.Second)
+		}
+	}
 	if runtime.GOOS == "windows" {
 		return net.DialTimeout("tcp", "127.0.0.1:27015", time.Second)
 	}

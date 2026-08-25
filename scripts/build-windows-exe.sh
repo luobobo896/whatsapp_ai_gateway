@@ -43,12 +43,19 @@ CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w -X 
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" -o "$OUT/wda-probe.exe" ./cmd/wda-probe
 cp "$ROOT/static/index.html" "$OUT/static/index.html"
 
-echo "▶ [2.5/4] 激活辅助二进制（与 Mac 同一套业务逻辑，必须从当前源码编）"
+echo "▶ [2.5/4] 激活辅助二进制（Mac/Windows 同一套业务逻辑；netmuxd 随仓分发）"
 mkdir -p "$OUT/bin"
+# 清理已被 netmuxd 取代的旧 usbmux-bridge 残留（历史构建可能还在）。
+rm -f "$OUT/bin/usbmux-bridge.exe"
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
   -o "$OUT/bin/wifi-runwda.exe" ./cmd/wifi-runwda
 ( cd "$ROOT/cmd/wifi-lockdown" && CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
   -o "$OUT/bin/wifi-lockdown.exe" . )
+# netmuxd：Windows 上提供 ConnectionType=Network 条目（mDNS 发现 + heartbeat 保活），
+# USB 经 shim 模式转发 AMDS，使无线 WDA 拔掉 USB 后不断开。二进制来自官方 release，
+# 随 tools/ 分发（LGPL-2.1，附 netmuxd-LICENSE.txt）。
+cp "$ROOT/tools/netmuxd.exe" "$OUT/bin/netmuxd.exe"
+[ -f "$ROOT/tools/netmuxd-LICENSE.txt" ] && cp "$ROOT/tools/netmuxd-LICENSE.txt" "$OUT/bin/"
 cp "$OUT/bin/wifi-runwda.exe" "$ROOT/tools/wifi-runwda.exe"
 cp "$OUT/bin/wifi-lockdown.exe" "$ROOT/tools/wifi-lockdown.exe"
 for b in ios.exe idevice_id.exe ideviceinfo.exe iproxy.exe; do

@@ -20,6 +20,11 @@ sh scripts/build-windows-exe.sh
 Windows 主机上的 USB 发现 / 激活依赖另行安装的 Apple Devices + `ios.exe` / `tidevice` / `iproxy`，不随本脚本打包。  
 桌面壳还需要本机 **WebView2 Runtime**（见 [windows-desktop-shell.md](./windows-desktop-shell.md)）。
 
+无线 Network 保活组件已随包分发：`bin/netmuxd.exe`（含 LGPL-2.1 许可）由网关自动拉起，
+提供 usbmux `ConnectionType=Network` 条目，拔掉 USB 后无线 WDA 不断开
+（见 [windows-netmuxd-network-keepalive](../testing/2026-08-25-windows-netmuxd-network-keepalive.md)）。
+`netmuxd.go` 等文件带 `//go:build windows` 构建标签，macOS 交叉编译不受影响。
+
 当晚回家按 [windows-night-runbook.md](./windows-night-runbook.md) 验收。设计说明见 [windows-wda-activation.md](../design/windows-wda-activation.md)。
 
 ## 后续 MSI

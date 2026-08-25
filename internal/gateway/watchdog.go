@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +93,7 @@ func (g *Gateway) watchOnceSafe() {
 
 func (g *Gateway) watchOnce() {
 	cfg := g.Cfg
+	g.syncNetmuxd()
 	g.refreshSerials() // USB 在线设备补取硬件序列号（缓存过就秒回）
 	g.refreshIOSVersions()
 	goiosTunnel.Supervise()
@@ -217,13 +220,21 @@ func (g *Gateway) watchOnce() {
 	for _, d := range Discover() {
 		usbSet[d.UDID] = true
 	}
+	for u := range usbmuxNetworkUDIDs() {
+		usbSet[u] = true // netmuxd 无线 Network 在线，防 watchdog 误删
+	}
 	g.pruneOfflineDevices(usbSet)
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
 // channelReachableForVia：只看本通道。USB 不因 Wi-Fi 可达而重拉；Network 不因 USB 线而重拉。
+// Windows netmuxd 下 Network 激活必须能看到 usbmux ConnectionType=Network 条目
+// （mDNS 广播）；仅 IP 可 ping 不代表无线会话可用，避免手机熄屏期间空转重激活。
 func channelReachableForVia(via string, usbOK, netOK, wifiOK bool) bool {
 	if parseActivateVia(via) == activateViaNetwork {
+		if runtime.GOOS == "windows" && os.Getenv(netmuxdEnvName) != "" {
+			return netOK
+		}
 		return netOK || wifiOK
 	}
 	return usbOK

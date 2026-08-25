@@ -132,6 +132,13 @@ func isDevicePasscodeErr(err error) bool {
 }
 
 func hasMuxNetwork(udid string) bool {
+	// Windows 上 idevice_id 连 AMDS 看不到 netmuxd 的无线设备，必须用 go-ios
+	// （读 USBMUXD_SOCKET_ADDRESS）的 ios list 结果；Mac 直接用 NetworkUDIDs()。
+	if runtime.GOOS == "windows" {
+		if m := usbmuxNetworkUDIDs(); m[udidKey(udid)] {
+			return true
+		}
+	}
 	for _, u := range NetworkUDIDs() {
 		if strings.EqualFold(u, udid) {
 			return true
@@ -254,6 +261,16 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, iosV
 		if via == activateViaNetwork {
 			if needsRemoteXPCTunnel(iosVersion) {
 				return "", nil, fmt.Errorf("iOS %s 的 Network 激活不能走 go-ios 隧道（那是 USB/CoreDevice 通道，不会回退）", verOrUnknown(iosVersion))
+			}
+			// Windows：netmuxd 已提供 ConnectionType=Network 条目，直接 ios runwda 走无线
+			// testmanagerd（wifi-runwda 的双层 usbmux 代理在 netmuxd 下会中止连接）。
+			if runtime.GOOS == "windows" && os.Getenv("USBMUXD_SOCKET_ADDRESS") != "" {
+				bin := lookTool("ios", "ios.exe")
+				if bin == "" {
+					return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
+				}
+				slog.Info("activate via network (netmuxd)", "udid", shortOf(udid), "ios", iosVersion)
+				return bin, goiosArgs(udid, bundle, port, reportedUDID), nil
 			}
 			if bin, args, ok := wifiRunwdaInvocation(udid, port, bundle, true); ok {
 				slog.Info("activate via network", "udid", shortOf(udid), "ios", iosVersion)

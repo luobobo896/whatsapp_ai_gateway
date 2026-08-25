@@ -55,7 +55,7 @@ func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
 func TestUSBTunnelsToDropResetsWhenRediscovered(t *testing.T) {
 	misses := map[string]int{"u1": 1}
 	procs := map[string]*usbTunnelProc{"u1": {port: 1, done: make(chan struct{})}}
-	got := usbTunnelsToDrop(map[string]bool{"u1": true}, nil, procs, misses, 2)
+	got := usbTunnelsToDrop(map[string]bool{udidKey("u1"): true}, nil, procs, misses, 2)
 	if len(got) != 0 {
 		t.Fatalf("rediscovered must not drop: %v", got)
 	}

@@ -38,6 +38,12 @@ func (g *Gateway) pruneOfflineDevices(usbSet map[string]bool) []string {
 		if d.UDID == "" {
 			continue
 		}
+		// 已授权无线调试的设备随时可能从 Wi-Fi 回来：掉线只隐藏不物理删除，
+		// 否则 iOS 空闲关闭无线会话后配置（activate_via/wifi_debug/ip）丢失，
+		// 手机重新广播时还得插 USB 重新授权才能自愈。
+		if d.WifiDebug {
+			continue
+		}
 		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
 		busy := g.Exec != nil && g.Exec.IsBusy(d.UDID)
 		running := g.WDA != nil && g.WDA.Running(d.UDID)
