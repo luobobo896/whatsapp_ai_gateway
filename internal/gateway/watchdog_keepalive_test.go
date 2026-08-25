@@ -6,15 +6,21 @@ import (
 	"testing"
 )
 
-func TestChannelReachableForRelaunch(t *testing.T) {
-	if !channelReachableForRelaunch(true, false) {
-		t.Fatal("USB alone is enough to relaunch")
+func TestChannelReachableForVia(t *testing.T) {
+	if !channelReachableForVia(activateViaUSB, true, false, false) {
+		t.Fatal("USB via needs USB")
 	}
-	if !channelReachableForRelaunch(false, true) {
-		t.Fatal("Wi-Fi alone is enough to relaunch (incl. 40-hex devices)")
+	if channelReachableForVia(activateViaUSB, false, true, true) {
+		t.Fatal("USB via must not relaunch on Network/Wi-Fi")
 	}
-	if channelReachableForRelaunch(false, false) {
-		t.Fatal("no USB and no Wi-Fi must not relaunch")
+	if !channelReachableForVia(activateViaNetwork, false, true, false) {
+		t.Fatal("Network via accepts usbmux Network")
+	}
+	if !channelReachableForVia(activateViaNetwork, false, false, true) {
+		t.Fatal("Network via accepts Wi-Fi IP")
+	}
+	if channelReachableForVia(activateViaNetwork, true, false, false) {
+		t.Fatal("Network via must not relaunch on USB cable alone")
 	}
 }
 

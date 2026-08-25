@@ -3,6 +3,7 @@ package gateway
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -25,13 +26,13 @@ import (
 type Config struct {
 	mu             sync.Mutex
 	db             *sql.DB
-	dir            string        // state 目录（gateway.db、data/ 的锚点）
-	Cloud          CloudConfig   `json:"cloud"`
-	Devices        []Device      `json:"devices"`
-	HealthInterval float64       `json:"health_interval"`
-	LLM            LLMConfig     `json:"llm,omitempty"`
-	Web            WebConfig     `json:"web,omitempty"`
-	Signing        SigningConfig `json:"signing,omitempty"`
+	dir            string          // state 目录（gateway.db、data/ 的锚点）
+	Cloud          CloudConfig     `json:"cloud"`
+	Devices        []Device        `json:"devices"`
+	HealthInterval float64         `json:"health_interval"`
+	LLM            LLMConfig       `json:"llm,omitempty"`
+	Web            WebConfig       `json:"web,omitempty"`
+	Signing        SigningConfig   `json:"signing,omitempty"`
 	UsbmuxNet      UsbmuxNetConfig `json:"usbmux_net,omitempty"`
 }
 
@@ -82,11 +83,15 @@ type CloudConfig struct {
 
 // Device 单台手机。
 type Device struct {
-	UDID             string         `json:"udid"`
-	Serial           string         `json:"serial,omitempty"` // 硬件序列号（USB 时经 ideviceinfo 取得，插一次即永久缓存）
-	IP               string         `json:"ip"`
-	Port             int            `json:"port"`
-	AutoReactivate   bool           `json:"auto_reactivate"`
+	UDID           string `json:"udid"`
+	Serial         string `json:"serial,omitempty"` // 硬件序列号（USB 时经 ideviceinfo 取得，插一次即永久缓存）
+	IP             string `json:"ip"`
+	Port           int    `json:"port"`
+	AutoReactivate bool   `json:"auto_reactivate"`
+	// ActivateVia 上次手动选择的激活通道：usb 或 network。自动重激活沿用此值。
+	ActivateVia string `json:"activate_via,omitempty"`
+	// WifiDebug 首次授权已写入 EnableWifiConnections + EnableWifiDebugging。不含锁屏密码。
+	WifiDebug        bool           `json:"wifi_debug,omitempty"`
 	VendorUUID       string         `json:"vendor_uuid,omitempty"`
 	IOSVersion       string         `json:"ios_version,omitempty"`
 	Name             string         `json:"name,omitempty"`
@@ -359,6 +364,9 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, string(b))
 
 // saveLocked 全量落库（调用方需持有 mu）。
 func (c *Config) saveLocked() error {
+	if c == nil || c.db == nil {
+		return errors.New("config db not open")
+	}
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err

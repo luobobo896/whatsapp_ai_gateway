@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,11 +24,32 @@ const (
 	// Xcode 安装 UI test runner 时会加 .xctrunner 后缀。
 	defaultWDABundleID  = "com.wda.WebRunner.xctrunner"
 	defaultXCTestConfig = "WebDriverAgentRunner.xctest"
-	// defaultWifiNetworkWait usbmux Network 条目的等待窗口。
-	// 设备已有 Network 会立即命中；没有的门控设备（如 iOS 15 老机型）不必死等太久，
-	// 尽快回退 USB 让“激活→Automation Running”更短。有 Network 的机器秒级命中，不受此值影响。
-	defaultWifiNetworkWait = 10 * time.Second
+	// defaultWifiNetworkWait 手动 Network 激活等待 usbmux Network 条目的窗口。
+	defaultWifiNetworkWait = 30 * time.Second
+
+	activateViaUSB     = "usb"
+	activateViaNetwork = "network"
+
+	// wifiLockdownTimeout 覆盖 wifi-lockdown 默认 60s 等手机输锁屏密码。
+	wifiLockdownTimeout = 75 * time.Second
 )
+
+// errDevicePasscodeNeeded 写 EnableWifiDebugging 时 iPhone 弹出锁屏密码框，用户尚未在手机上输入。
+var errDevicePasscodeNeeded = errors.New("请看 iPhone：若弹出锁屏密码框，请在手机上输入以开启无线调试。若尚未设置锁屏密码，先到「设置 → 面容 ID 与密码 / 触控 ID 与密码」设置 4 位数字密码。密码只在手机上输入，不要发给电脑")
+
+// errNeedWifiAuth Network 激活前必须先经 USB 完成首次授权。
+var errNeedWifiAuth = errors.New("请先插 USB，在手机上设置锁屏密码后点「首次授权」，才能开启无线调试并使用 Network")
+
+// errWifiAuthNeedUSB 写 EnableWifiConnections/Debugging 必须走 USB，不能走 Network。
+var errWifiAuthNeedUSB = errors.New("首次授权必须连接 USB 线，并先在手机上设置锁屏密码，才能开启 EnableWifiConnections/EnableWifiDebugging")
+
+// parseActivateVia 只接受 usb / network；空或其它值一律当 usb（自动激活默认）。
+func parseActivateVia(s string) string {
+	if strings.EqualFold(strings.TrimSpace(s), activateViaNetwork) {
+		return activateViaNetwork
+	}
+	return activateViaUSB
+}
 
 // resolveActivator 把配置值收成实际后端。
 // auto：有 go-ios 用 goios，否则有 tidevice 用 tidevice；都没有时 Windows 仍选 goios（启动时报缺二进制），Mac 才回退 xcodebuild。
@@ -61,23 +83,93 @@ func autoActivatorFor(hasGoIOS, hasTidevice bool, goos string) string {
 	return activatorXcodebuild
 }
 
-// enableWifiLockdown 打开 lockdown EnableWifiConnections（Xcode「Connect via network」）。
-// 不打开时拔 USB 会拆掉 testmanagerd，机上 WDA 一起死。没有辅助程序就跳过。
-func enableWifiLockdown(udid string) {
+// enableWifiLockdown 仅 USB 下打开 EnableWifiConnections / EnableWifiDebugging。
+// 必须已插 USB，且手机已设锁屏密码；写 Debugging 时手机再弹密码框。密码不进本机。
+func enableWifiLockdown(udid string) error {
+	return enableWifiLockdownOn(udid, usbPresent(udid))
+}
+
+func enableWifiLockdownOn(udid string, usb bool) error {
 	if udid == "" {
-		return
+		return fmt.Errorf("缺少 UDID")
+	}
+	if !usb {
+		return errWifiAuthNeedUSB
 	}
 	bin := lookTool("wifi-lockdown", "wifi-lockdown.exe")
 	if bin == "" {
-		return
+		return fmt.Errorf("未找到 wifi-lockdown，无法开启 EnableWifiConnections/EnableWifiDebugging")
 	}
-	if _, err := runTool(bin, []string{udid}, 15*time.Second); err != nil {
+	out, err := runTool(bin, []string{udid}, wifiLockdownTimeout)
+	if err != nil {
+		if isDevicePasscodeOutput(err.Error(), out) {
+			slog.Warn("wifi lockdown waiting for device passcode", "udid", shortOf(udid))
+			return errDevicePasscodeNeeded
+		}
 		slog.Warn("enable wifi lockdown failed", "udid", shortOf(udid), "error", err)
-		return
+		return fmt.Errorf("开启无线调试失败：%w", err)
 	}
 	// 给 usbmuxd 一点时间挂上 Network 条目；真正的等待在 wifi-runwda -wait-network。
 	time.Sleep(2 * time.Second)
 	slog.Info("wifi lockdown enabled", "udid", shortOf(udid))
+	return nil
+}
+
+func isDevicePasscodeOutput(parts ...string) bool {
+	s := strings.Join(parts, "\n")
+	return strings.Contains(s, "NEED_DEVICE_PASSCODE") ||
+		strings.Contains(s, "PasscodeRequired") ||
+		strings.Contains(s, "PasswordProtected") ||
+		strings.Contains(s, "0xe80000ee") ||
+		strings.Contains(s, "e80000ee")
+}
+
+func isDevicePasscodeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errDevicePasscodeNeeded) || isDevicePasscodeOutput(err.Error())
+}
+
+func hasMuxNetwork(udid string) bool {
+	for _, u := range NetworkUDIDs() {
+		if strings.EqualFold(u, udid) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseWifiLockdownStatus(raw string) (connections, debugging bool) {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.Contains(line, "EnableWifiConnections="):
+			connections = wifiLockdownValueTrue(line)
+		case strings.Contains(line, "EnableWifiDebugging="):
+			debugging = wifiLockdownValueTrue(line)
+		}
+	}
+	return connections, debugging
+}
+
+func wifiLockdownValueTrue(line string) bool {
+	i := strings.LastIndex(line, "=")
+	if i < 0 {
+		return false
+	}
+	v := strings.TrimSpace(line[i+1:])
+	return strings.EqualFold(v, "true") || v == "1"
+}
+
+// wifiDebugReady 只认 USB 首次授权留下的标记，不把 usbmux Network 当成已授权。
+func wifiDebugReady(udid string, flagged bool) bool {
+	_ = udid
+	return flagged
+}
+
+func needWifiAuth(usbAttached, authorized bool) bool {
+	return usbAttached && !authorized
 }
 
 func (m *WDAManager) wdaBundleID() string {
@@ -87,10 +179,38 @@ func (m *WDAManager) wdaBundleID() string {
 	return defaultWDABundleID
 }
 
-func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind, wifiIP string) error {
+func usbPresent(udid string) bool {
+	for _, u := range USBUDIDs() {
+		if strings.EqualFold(u, udid) {
+			return true
+		}
+	}
+	return false
+}
+
+func userStopped(d *Device, running bool) bool {
+	return d != nil && !d.AutoReactivate && !running
+}
+
+func tunnelVias(devs []Device) map[string]string {
+	out := map[string]string{}
+	for _, d := range devs {
+		if d.UDID == "" {
+			continue
+		}
+		out[normalizeUDID(d.UDID)] = parseActivateVia(d.ActivateVia)
+	}
+	return out
+}
+
+func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind, via string) error {
+	via = parseActivateVia(via)
+	if via == activateViaUSB && !usbPresent(udid) {
+		return fmt.Errorf("USB 激活需要 USB 连接，不会回退 Network")
+	}
 	ver := resolveIOSVersion(udid, "")
 	plan := planForIOS(ver)
-	slog.Info("ios activate plan", "udid", shortOf(udid), "ios", ver, "major", plan.Major,
+	slog.Info("ios activate plan", "udid", shortOf(udid), "ios", ver, "via", via, "major", plan.Major,
 		"ddi", plan.NeedDDI, "tunnel", plan.NeedTunnel, "devmode", plan.NeedDevMode, "userspace_ok", plan.UserspaceOK)
 
 	if plan.NeedTunnel && kind != activatorGoIOS {
@@ -102,18 +222,14 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind,
 		}
 	}
 
-	// iOS 15–16：先打开无线 lockdown，再等 usbmux Network 拉起 XCTest。
-	// 走 USB 也能看到 Automation Running，但拔线会拆 testmanagerd。
-	if !plan.NeedTunnel {
-		enableWifiLockdown(udid)
-	}
+	// 两个无线开关只允许 USB 首次授权写入；Network 激活不再写、不兜底。
 	if err := m.prepareDeviceForIOS(udid, kind, ver, plan); err != nil {
 		return err
 	}
 	if err := m.ensureRunnerInstalled(udid, kind, ver); err != nil {
 		return err
 	}
-	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind, wifiIP, ver)
+	bin, args, err := m.protocolCmd(udid, port, reportedUDID, kind, ver, via)
 	if err != nil {
 		return err
 	}
@@ -130,26 +246,36 @@ func (m *WDAManager) activateProtocol(udid string, port int, reportedUDID, kind,
 	return nil
 }
 
-func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifiIP, iosVersion string) (string, []string, error) {
+func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, iosVersion, via string) (string, []string, error) {
+	via = parseActivateVia(via)
 	bundle := m.wdaBundleID()
 	switch kind {
 	case activatorGoIOS:
-		// iOS 17+ 必须走 go-ios RSD 隧道；wifi-runwda 劫持 usbmux 会和它打架。
-		if !needsRemoteXPCTunnel(iosVersion) {
-			if bin, args, ok := wifiRunwdaInvocation(udid, wifiIP, port, reportedUDID, bundle); ok {
-				slog.Info("activate via wifi-runwda", "udid", shortOf(udid), "ip", wifiIP, "ios", iosVersion)
+		if via == activateViaNetwork {
+			if needsRemoteXPCTunnel(iosVersion) {
+				return "", nil, fmt.Errorf("iOS %s 的 Network 激活不能走 go-ios 隧道（那是 USB/CoreDevice 通道，不会回退）", verOrUnknown(iosVersion))
+			}
+			if bin, args, ok := wifiRunwdaInvocation(udid, port, bundle, true); ok {
+				slog.Info("activate via network", "udid", shortOf(udid), "ios", iosVersion)
 				return bin, args, nil
 			}
-			return "", nil, fmt.Errorf("未找到 wifi-runwda：iOS %s 必须走 usbmux Network 激活，否则拔 USB 会拆掉 Automation Running", verOrUnknown(iosVersion))
+			return "", nil, fmt.Errorf("未找到 wifi-runwda：iOS %s 的 Network 激活需要它（不会回退 USB）", verOrUnknown(iosVersion))
 		}
+		// USB：iOS 17+ 走 go-ios RSD 隧道；iOS ≤16 走 ios runwda。都不走 wifi-runwda。
 		bin := lookTool("ios", "ios.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 go-ios（ios）：请把它放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
 		}
 		args := goiosArgs(udid, bundle, port, reportedUDID)
-		args = withGoIOSTunnelPort(args)
+		if needsRemoteXPCTunnel(iosVersion) {
+			args = withGoIOSTunnelPort(args)
+		}
+		slog.Info("activate via usb", "udid", shortOf(udid), "ios", iosVersion)
 		return bin, args, nil
 	case activatorTidevice:
+		if via == activateViaNetwork {
+			return "", nil, fmt.Errorf("Network 激活不能走 tidevice（tidevice 走 USB，不会回退）")
+		}
 		bin := lookTool("tidevice", "tidevice.exe")
 		if bin == "" {
 			return "", nil, fmt.Errorf("未找到 tidevice：请安装后放到 PATH 或 WDA_GATEWAY_RESOURCES/bin")
@@ -160,9 +286,9 @@ func (m *WDAManager) protocolCmd(udid string, port int, reportedUDID, kind, wifi
 	}
 }
 
-// wifiRunwdaInvocation 在本机同时有 wifi-runwda 和 ios 时，用包装器拉起 go-ios。
-// 包装器会优先走 usbmux Network，让 XCTest 调试会话不绑死 USB。
-func wifiRunwdaInvocation(udid, wifiIP string, port int, reportedUDID, bundleID string) (string, []string, bool) {
+// wifiRunwdaInvocation 仅用于手动 Network 激活：必须等 usbmux Network，禁止 USB 回退。
+// 不传 -ip，避免抢连 :62078 把已有 Network 行拆掉。
+func wifiRunwdaInvocation(udid string, port int, bundleID string, requireNetwork bool) (string, []string, bool) {
 	wrap := lookTool("wifi-runwda", "wifi-runwda.exe")
 	if wrap == "" {
 		return "", nil, false
@@ -181,8 +307,8 @@ func wifiRunwdaInvocation(udid, wifiIP string, port int, reportedUDID, bundleID 
 		"-ios", iosBin,
 		"-wait-network", defaultWifiNetworkWait.String(),
 	}
-	if wifiIP != "" {
-		args = append(args, "-ip", wifiIP)
+	if requireNetwork {
+		args = append(args, "-require-network")
 	}
 	return wrap, args, true
 }

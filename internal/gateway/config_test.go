@@ -108,7 +108,7 @@ func TestConfigPersistenceRoundtrip(t *testing.T) {
 	c.Cloud.Token = "t0"
 	c.Cloud.GatewayName = "gw-a"
 	c.Devices = []Device{
-		{UDID: "U1", IP: "10.0.0.1", AutoReactivate: true, LastHealth: map[string]any{"ok": true}},
+		{UDID: "U1", IP: "10.0.0.1", AutoReactivate: true, ActivateVia: "network", WifiDebug: true, LastHealth: map[string]any{"ok": true}},
 		{UDID: "U2", IP: "10.0.0.2"},
 	}
 	if err := c.Save(); err != nil {
@@ -131,6 +131,12 @@ func TestConfigPersistenceRoundtrip(t *testing.T) {
 	}
 	if !c2.Devices[0].AutoReactivate {
 		t.Error("auto_reactivate lost")
+	}
+	if c2.Devices[0].ActivateVia != "network" {
+		t.Errorf("activate_via lost: %q", c2.Devices[0].ActivateVia)
+	}
+	if !c2.Devices[0].WifiDebug {
+		t.Error("wifi_debug lost")
 	}
 	if c2.Devices[0].LastHealth["ok"] != true {
 		t.Errorf("last_health lost: %+v", c2.Devices[0].LastHealth)

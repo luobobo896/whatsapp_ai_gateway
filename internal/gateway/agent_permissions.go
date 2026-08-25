@@ -22,7 +22,11 @@ func (g *Gateway) tapAgentPermissions(udid string, port int) {
 	if port == 0 {
 		port = 8100
 	}
-	base := resolveWDABaseURL(udid, ip, port)
+	via := activateViaUSB
+	if dev != nil {
+		via = parseActivateVia(dev.ActivateVia)
+	}
+	base := resolveWDABaseURL(udid, ip, port, via)
 	if base == "" || base == "http://:8100" {
 		return
 	}

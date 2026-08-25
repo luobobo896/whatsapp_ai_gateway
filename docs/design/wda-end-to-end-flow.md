@@ -140,4 +140,5 @@ flowchart TD
 苹果电脑出包（独立章节）：[编出并签好控制器安装包](./mac-wda-ipa-package.md)  
 逐步命令和故障表：[Windows 当晚手册](../deployment/windows-night-runbook.md)  
 激活原理：[Windows 激活说明](./windows-wda-activation.md)  
+USB / Network 互斥与首次授权：[usb-network-activate.md](./usb-network-activate.md)  
 打包 Windows 软件：[gateway.exe 打包](../deployment/windows-exe打包.md)

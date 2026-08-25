@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,20 +131,101 @@ func TestResolvedIPAFallsBackToRepoTools(t *testing.T) {
 	}
 }
 
-func TestEnableWifiLockdownMissingBinaryIsNoop(t *testing.T) {
+func TestEnableWifiLockdownMissingBinaryErrors(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	enableWifiLockdown("00008120-000865D90A10C01E")
+	if err := enableWifiLockdownOn("00008120-000865D90A10C01E", true); err == nil {
+		t.Fatal("missing wifi-lockdown must fail")
+	}
+}
+
+func TestParseWifiLockdownStatus(t *testing.T) {
+	c, d := parseWifiLockdownStatus("" +
+		"5060c403afdee4c15a0edeab69dba0524e2ce592 EnableWifiConnections=true\n" +
+		"5060c403afdee4c15a0edeab69dba0524e2ce592 EnableWifiDebugging=true\n")
+	if !c || !d {
+		t.Fatalf("both true, got %v %v", c, d)
+	}
+	c, d = parseWifiLockdownStatus("EnableWifiConnections=true\nEnableWifiDebugging=false\n")
+	if !c || d {
+		t.Fatalf("debug false, got %v %v", c, d)
+	}
+}
+
+func TestNeedWifiAuth(t *testing.T) {
+	if !needWifiAuth(true, false) {
+		t.Fatal("USB first connect without wifi debug needs auth")
+	}
+	if needWifiAuth(true, true) {
+		t.Fatal("already authorized")
+	}
+	if needWifiAuth(false, false) {
+		t.Fatal("no USB is not first-connect auth")
+	}
+}
+
+func TestWifiDebugReadyOnlyFlag(t *testing.T) {
+	if !wifiDebugReady("no-such-udid", true) {
+		t.Fatal("USB authorize flag is the only ready signal")
+	}
+	if wifiDebugReady("no-such-udid", false) {
+		t.Fatal("Network row or live status must not skip USB authorize")
+	}
+}
+
+func TestEnableWifiLockdownRequiresUSB(t *testing.T) {
+	err := enableWifiLockdownOn("ffffffffffffffffffffffffffffffffffffffff", false)
+	if !errors.Is(err, errWifiAuthNeedUSB) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestIsDevicePasscodeOutput(t *testing.T) {
+	if !isDevicePasscodeOutput("set EnableWifiDebugging: Failed ... PasscodeRequired") {
+		t.Fatal("PasscodeRequired")
+	}
+	if !isDevicePasscodeOutput("NEED_DEVICE_PASSCODE\n请在 iPhone 上输入") {
+		t.Fatal("token")
+	}
+	if isDevicePasscodeOutput("get device: not found") {
+		t.Fatal("other")
+	}
+	if isDevicePasscodeErr(nil) {
+		t.Fatal("nil")
+	}
+	if !isDevicePasscodeErr(errDevicePasscodeNeeded) {
+		t.Fatal("sentinel")
+	}
+	if !isDevicePasscodeErr(errors.Join(errDevicePasscodeNeeded)) {
+		t.Fatal("wrapped sentinel")
+	}
+	if strings.Contains(errDevicePasscodeNeeded.Error(), "0000") || strings.Contains(errNeedWifiAuth.Error(), "0000") || strings.Contains(errWifiAuthNeedUSB.Error(), "0000") {
+		t.Fatal("must not mention a sample passcode")
+	}
+}
+
+func TestEnableWifiLockdownPasscodeError(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'set EnableWifiDebugging: Failed setting with err: PasscodeRequired' >&2\nexit 3\n"
+	if err := os.WriteFile(filepath.Join(dir, "wifi-lockdown"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	err := enableWifiLockdownOn("5060c403afdee4c15a0edeab69dba0524e2ce592", true)
+	if !errors.Is(err, errDevicePasscodeNeeded) {
+		t.Fatalf("got %v", err)
+	}
 }
 
 func TestProtocolCmdMissingBinary(t *testing.T) {
 	m := NewWDAManager("", "", "")
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS, "", "18.6"); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorGoIOS, "18.6", activateViaUSB); err == nil {
 		t.Fatal("expected error when ios binary is missing")
 	}
-	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice, "", "15.8.7"); err == nil {
+	if _, _, err := m.protocolCmd("00008120-000865D90A10C01E", 8100, "", activatorTidevice, "15.8.7", activateViaUSB); err == nil {
 		t.Fatal("expected error when tidevice binary is missing")
 	}
 }
@@ -151,7 +233,7 @@ func TestProtocolCmdMissingBinary(t *testing.T) {
 func TestWifiRunwdaInvocationMissingBinary(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "/nonexistent-resources")
-	if _, _, ok := wifiRunwdaInvocation("00008120-000865D90A10C01E", "127.0.0.1", 8100, "", defaultWDABundleID); ok {
+	if _, _, ok := wifiRunwdaInvocation("00008120-000865D90A10C01E", 8100, defaultWDABundleID, true); ok {
 		t.Fatal("missing wifi-runwda must not be selected")
 	}
 }
@@ -161,49 +243,96 @@ func TestWifiRunwdaInvocationBuildsArgs(t *testing.T) {
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	udid := "4886579a97a96bad83b527862bab409b5a07c741"
-	bin, args, ok := wifiRunwdaInvocation(udid, "192.168.10.237", 8100, "", defaultWDABundleID)
+	bin, args, ok := wifiRunwdaInvocation(udid, 8100, defaultWDABundleID, true)
 	if !ok {
 		t.Fatal("expected wifi-runwda when both binaries resolve")
 	}
 	if bin == "" {
 		t.Fatal("empty wrapper path")
 	}
-	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-ip", "192.168.10.237", "-wait-network", "10s"} {
+	for _, want := range []string{"-udid", udid, "-port", "8100", "-bundle", defaultWDABundleID, "-ios", "-wait-network", "30s", "-require-network"} {
 		if !containsExact(args, want) {
 			t.Fatalf("missing %q in %#v", want, args)
 		}
 	}
+	if containsExact(args, "-ip") {
+		t.Fatalf("Network activate must not probe :62078, got %#v", args)
+	}
 }
 
-func TestProtocolCmdIOS15UsesWifiRunwda(t *testing.T) {
+func TestParseActivateVia(t *testing.T) {
+	if parseActivateVia("") != activateViaUSB || parseActivateVia("USB") != activateViaUSB {
+		t.Fatal("empty/USB must be usb")
+	}
+	if parseActivateVia("network") != activateViaNetwork || parseActivateVia("Network") != activateViaNetwork {
+		t.Fatal("network must be network")
+	}
+}
+
+func TestProtocolCmdIOS15USBUsesGoIOS(t *testing.T) {
 	dir := plantActivateTools(t, true, true)
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "4886579a97a96bad83b527862bab409b5a07c741"
-	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237", "15.8.7")
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "15.8.7", activateViaUSB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) != "ios" {
+		t.Fatalf("USB activate must use ios runwda, bin=%q", bin)
+	}
+	if !containsExact(args, "runwda") {
+		t.Fatalf("args=%#v", args)
+	}
+	if containsExact(args, "-require-network") {
+		t.Fatalf("USB path must not require Network: %#v", args)
+	}
+}
+
+func TestProtocolCmdIOS15NetworkUsesWifiRunwda(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	udid := "4886579a97a96bad83b527862bab409b5a07c741"
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "15.8.7", activateViaNetwork)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if filepath.Base(bin) != "wifi-runwda" {
-		t.Fatalf("bin=%q want wifi-runwda so XCTest can survive USB unplug", bin)
+		t.Fatalf("bin=%q want wifi-runwda", bin)
 	}
-	if !containsExact(args, "-wait-network") || !containsExact(args, "10s") {
-		t.Fatalf("must briefly wait for usbmux Network then USB-fallback: %#v", args)
+	if !containsExact(args, "-require-network") || !containsExact(args, "30s") {
+		t.Fatalf("Network activate must require usbmux Network: %#v", args)
 	}
 }
 
-func TestProtocolCmdIOS15RequiresWifiRunwda(t *testing.T) {
+func TestProtocolCmdIOS15NetworkRequiresWifiRunwda(t *testing.T) {
 	dir := plantActivateTools(t, false, true)
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
-	_, _, err := m.protocolCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", 8100, "", activatorGoIOS, "", "15.8.7")
+	_, _, err := m.protocolCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", 8100, "", activatorGoIOS, "15.8.7", activateViaNetwork)
 	if err == nil {
-		t.Fatal("iOS 15 without wifi-runwda must not silently USB-activate")
+		t.Fatal("iOS 15 Network activate without wifi-runwda must fail")
 	}
 	if !strings.Contains(err.Error(), "wifi-runwda") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestProtocolCmdIOS15USBWorksWithoutWifiRunwda(t *testing.T) {
+	dir := plantActivateTools(t, false, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	bin, args, err := m.protocolCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", 8100, "", activatorGoIOS, "15.8.7", activateViaUSB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(bin) != "ios" || !containsExact(args, "runwda") {
+		t.Fatalf("USB activate should be ios runwda: bin=%q args=%#v", bin, args)
 	}
 }
 
@@ -213,7 +342,7 @@ func TestProtocolCmdGoIOSWithoutWrapper(t *testing.T) {
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "00008120-000865D90A10C01E"
-	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "", "18.6")
+	bin, args, err := m.protocolCmd(udid, 8100, "", activatorGoIOS, "18.6", activateViaUSB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,24 +371,95 @@ func plantActivateTools(t *testing.T, wrap, ios bool) string {
 	return dir
 }
 
-func TestProtocolCmdIOS17SkipsWifiRunwda(t *testing.T) {
+func TestProtocolCmdIOS17NetworkRefusesUSBTunnel(t *testing.T) {
 	dir := plantActivateTools(t, true, true)
 	t.Setenv("PATH", dir)
 	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
 	m := NewWDAManager("", "", "")
 	udid := "00008120-000865D90A10C01E"
-	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "192.168.10.237", "18.6")
+	_, _, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "18.6", activateViaNetwork)
+	if err == nil || !strings.Contains(err.Error(), "不会回退") {
+		t.Fatalf("iOS 17+ Network must not use USB tunnel, err=%v", err)
+	}
+}
+
+func TestProtocolCmdIOS17USBUsesGoIOS(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	m := NewWDAManager("", "", "")
+	udid := "00008120-000865D90A10C01E"
+	bin, args, err := m.protocolCmd(udid, 8100, udid, activatorGoIOS, "18.6", activateViaUSB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if filepath.Base(bin) == "wifi-runwda" {
-		t.Fatal("iOS 17+ must not use wifi-runwda")
+		t.Fatal("USB via must not use wifi-runwda")
 	}
 	if filepath.Base(bin) != "ios" {
 		t.Fatalf("bin=%q want ios", bin)
 	}
 	if !containsExact(args, "runwda") || !containsExact(args, "--tunnel-info-port=28100") {
 		t.Fatalf("runwda tunnel args: %#v", args)
+	}
+}
+
+func TestProtocolCmdTideviceNetworkRefused(t *testing.T) {
+	dir := plantActivateTools(t, true, true)
+	t.Setenv("PATH", dir)
+	t.Setenv("WDA_GATEWAY_RESOURCES", filepath.Join(dir, "no-resources"))
+	if err := os.WriteFile(filepath.Join(dir, "tidevice"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := NewWDAManager("", "", "")
+	_, _, err := m.protocolCmd("5060c403afdee4c15a0edeab69dba0524e2ce592", 8100, "", activatorTidevice, "15.8.7", activateViaNetwork)
+	if err == nil || !strings.Contains(err.Error(), "tidevice") {
+		t.Fatalf("tidevice Network must fail, err=%v", err)
+	}
+}
+
+func TestUserStopped(t *testing.T) {
+	d := &Device{AutoReactivate: false}
+	if !userStopped(d, false) {
+		t.Fatal("manual stop must stick")
+	}
+	if userStopped(d, true) {
+		t.Fatal("running process is not user-stopped")
+	}
+	d.AutoReactivate = true
+	if userStopped(d, false) {
+		t.Fatal("auto-reactivate is not user-stopped")
+	}
+}
+
+func TestConnTypeOfDevice(t *testing.T) {
+	if connTypeOfDevice(&Device{ActivateVia: activateViaNetwork}) != "wifi" {
+		t.Fatal("network via reports wifi")
+	}
+	if connTypeOfDevice(&Device{ActivateVia: activateViaUSB}) != "usb" {
+		t.Fatal("usb via reports usb")
+	}
+	if connTypeOfDevice(nil) != "usb" {
+		t.Fatal("nil device defaults usb")
+	}
+}
+
+func TestWdaProbeViaDoesNotCrossChannel(t *testing.T) {
+	udid := "cafebabecafebabecafebabecafebabecafebabe"
+	usbTunnels.mu.Lock()
+	usbTunnels.procs[udid] = &usbTunnelProc{port: 1, done: make(chan struct{})}
+	usbTunnels.mu.Unlock()
+	t.Cleanup(func() {
+		usbTunnels.mu.Lock()
+		delete(usbTunnels.procs, udid)
+		usbTunnels.mu.Unlock()
+	})
+	h := wdaProbeVia(udid, "192.168.1.8", 8100, activateViaNetwork)
+	if h.OK {
+		t.Fatal("network via must not use USB tunnel")
+	}
+	if !strings.Contains(h.Error, "Network") && h.Error == "" {
+		t.Fatalf("want network-channel error, got %+v", h)
 	}
 }
 

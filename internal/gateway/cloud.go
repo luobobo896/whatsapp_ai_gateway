@@ -351,10 +351,14 @@ func (g *Gateway) deviceListReport() []map[string]any {
 	// 云端 device_list 只上报可用设备（online/busy）。offline 设备不进入列表，
 	// 由云端按「本网关已拥有但本次未出现」标记离线并在宽限期后物理删除，避免幽灵设备。
 	// 单次 offline 仍可通过 device:status 上报一次；不要靠 device_list 反复刷 offline。
-	usb := Discover()
+	found := Discover()
+	presentSet := map[string]bool{}
+	for _, d := range found {
+		presentSet[udidKey(d.UDID)] = true
+	}
 	usbSet := map[string]bool{}
-	for _, d := range usb {
-		usbSet[d.UDID] = true
+	for _, u := range USBUDIDs() {
+		usbSet[udidKey(u)] = true
 	}
 	lanKey := lanFingerprint()
 	out := make([]map[string]any, 0, len(g.Cfg.Devices))
@@ -363,14 +367,10 @@ func (g *Gateway) deviceListReport() []map[string]any {
 		if d.UDID == "" {
 			continue
 		}
-		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
-		status := g.deviceCloudStatus(d, attached)
+		present, _, conn := muxPresence(udidKey(d.UDID), usbSet, presentSet, usbTunnelAlive(d.UDID), TunnelAddr(d.UDID) != "")
+		status := g.deviceCloudStatus(d, present)
 		if status == "offline" {
 			continue
-		}
-		conn := "wifi"
-		if attached {
-			conn = "usb"
 		}
 		row := map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,

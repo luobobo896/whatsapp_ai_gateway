@@ -718,7 +718,12 @@ function deviceCard(d){
   }
   else if (healthy) { healthCls = 'color:var(--green)'; healthTxt = 'WDA 健康'; }
   else if (d.usb) { healthCls = 'color:var(--green)'; healthTxt = 'USB 直连（IP 自动发现中）'; }
-  else if (starting || !healthFresh) { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 启动中…'; }
+  else if (starting || !healthFresh) {
+    healthCls = 'color:var(--orange)';
+    healthTxt = (h.activate_via === 'network' || d.activate_via === 'network')
+      ? 'WDA 启动中…若 iPhone 弹出锁屏密码框，请在手机上输入'
+      : 'WDA 启动中…';
+  }
   else if (h.error) { healthCls = 'color:var(--red)'; healthTxt = 'WDA 异常：' + esc(shortErr(h.error)); }
   else { healthCls = 'color:var(--orange)'; healthTxt = 'WDA 未就绪'; }
   // 按钮：忙碌 -> 忙碌中(禁用)；WDA 健康运行 -> 停止；否则（未激活/启动中/异常）-> 激活
@@ -728,10 +733,28 @@ function deviceCard(d){
   if (d.busy) {
     actions = `<button class="btn sm" disabled style="opacity:.5;cursor:not-allowed">忙碌中</button>`;
   } else if (healthy) {
-    // /status 已通：视为已激活，只展示停止，不再展示激活。
+    // /status 已通：可停，也可换另一条通道（USB / Network 互不挡）。
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
+    if (d.activate_via === 'network') {
+      actions += ` <button class="btn sm" onclick="act('${d.udid}','usb')">改 USB</button>`;
+    } else if (!d.wifi_debug) {
+      if (d.usb || d.need_wifi_auth) {
+        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
+      }
+      actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">改 Network</button>`;
+    } else {
+      actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">改 Network</button>`;
+    }
   } else {
-    actions = `<button class="btn sm" onclick="act('${d.udid}')">激活</button>`;
+    actions = `<button class="btn sm" onclick="act('${d.udid}','usb')">USB 激活</button>`;
+    if (!d.wifi_debug) {
+      if (d.usb || d.need_wifi_auth) {
+        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
+      }
+      actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
+    } else {
+      actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">Network 激活</button>`;
+    }
   }
   actions += ` <button class="btn sm ghost" onclick="showDeviceItems('${d.udid}')">明细</button>`;
   const canDelete = d.deletable != null ? !!d.deletable : (!d.busy && !running);
@@ -752,6 +775,8 @@ function deviceCard(d){
             ${ios ? `<span class="tag">iOS ${ios}</span>` : ''}
             ${d.needs_tunnel ? (d.tunnel_ready ? '<span class="tag tag-green">iOS17+ 隧道</span>' : '<span class="tag tag-orange">需隧道</span>') : ''}
             ${d.conn_type ? (d.usb ? '<span class="tag tag-accent">USB</span>' : '<span class="tag">Wi-Fi</span>') : ''}
+            ${d.activate_via === 'network' ? '<span class="tag tag-green">激活=Network</span>' : (d.activate_via === 'usb' ? '<span class="tag">激活=USB</span>' : '')}
+            ${d.wifi_debug ? '<span class="tag tag-green">无线已授权</span>' : (d.need_wifi_auth ? '<span class="tag tag-orange">需首次授权</span>' : '')}
             ${wdaBadge}
           </div>
           <div class="device-meta">
@@ -759,6 +784,7 @@ function deviceCard(d){
             ${serial ? '' : '<span style="color:var(--orange)">序列号待识别（插 USB 自动获取）</span><span class="sep">·</span>'}
             <span>${addr}</span><span class="sep">·</span>
             <span style="${healthCls}">${healthTxt}</span>
+            ${!d.wifi_debug ? '<span class="sep">·</span><span style="color:var(--orange)">首次授权必须插 USB，并先在手机设置锁屏密码</span>' : ''}
           </div>
         </div>
       </div>
@@ -781,8 +807,10 @@ function renderDevices(list){
   const now = Date.now();
   const view = list.map(d => {
     const t = optimisticAct[d.udid];
-    if (t && (now - t) < 30000 && !d.wda_running) {
-      return { ...d, wda_running: true, last_health: { ok: false, starting: true, checked_at: now/1000 } };
+    const started = t && (typeof t === 'object' ? t.at : t);
+    if (started && (now - started) < 30000 && !d.wda_running) {
+      const via = t && typeof t === 'object' ? t.via : '';
+      return { ...d, wda_running: true, last_health: { ok: false, starting: true, checked_at: now/1000, activate_via: via } };
     }
     return d;
   });
@@ -883,21 +911,27 @@ async function loadLlm(){
     if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置') + ' · 开会话失败/未知页会调用模型判断并写 bug 日志') : '由平台「模型管理」页下发；未配置则发送只走选择器，不会调用模型'; }
   }catch(e){}
 }
-async function act(udid){
+async function act(udid, via){
+  via = via === 'network' ? 'network' : 'usb';
   // 乐观更新：点击立即显示「启动中」，不显示成功；后端等 WDA 真正就绪后才返回 activated
-  optimisticAct[udid] = Date.now();
+  optimisticAct[udid] = { at: Date.now(), via };
   renderDevices(devicesCache);
+  if (via === 'network') {
+    toast('请看 iPhone：若弹出锁屏密码框，在手机上输入以开启无线调试。密码不要发给电脑。');
+  }
   let settled = false;
   try{
-    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/activate', {method:'POST'});
+    const r = await api('/api/devices/' + encodeURIComponent(udid) + '/activate?via=' + encodeURIComponent(via), {method:'POST'});
     let d = {};
     try{ d = await r.json(); }catch(e){}
     if (!r.ok){
       settled = true;
-      toast('激活失败：' + apiErr(d, r.status));
+      const detail = apiErr(d, r.status);
+      if (d.need_wifi_auth) toast(detail);
+      else toast(d.need_passcode ? detail : ('激活失败：' + detail));
     } else if (d.status === 'activated' && d.ready){
       settled = true;
-      toast(d.via === 'usb' ? '激活成功（USB 直连，IP 自动发现中）' : '激活成功，WDA 已就绪');
+      toast(via === 'network' ? 'Network 激活成功（拔 USB 可保活）' : 'USB 激活成功');
     } else if (d.status === 'starting'){
       // 不报成功，保持「启动中」；首次激活含编译，耗时数分钟属正常
       toast(d.message || 'WDA 启动中…（USB 激活通常十几秒内完成）');
@@ -950,6 +984,27 @@ function confirmOk(){
   const cb = _confirmCb;
   hideConfirm();
   if (cb) cb();
+}
+
+function authorizeWifi(udid){
+  showConfirm(
+    '首次授权（无线调试）',
+    '写 EnableWifiConnections / EnableWifiDebugging 必须同时满足：\n1. 现在插着 USB 线\n2. 手机已设置锁屏密码（场内 4 位统一 0000）\n\n点「授权」后手机会再弹密码框，只在手机上输入。不要拔线，不要走 Network 来写这两个开关。',
+    '已插 USB 并设密码，授权',
+    async () => {
+      toast('正在开启无线调试，请看 iPhone 是否弹出密码框…');
+      try{
+        const r = await api('/api/devices/' + encodeURIComponent(udid) + '/authorize-wifi', {method:'POST'});
+        let d = {}; try{ d = await r.json(); }catch(e){}
+        if(!r.ok){
+          toast(d.need_passcode ? (d.error || '请在 iPhone 上输入锁屏密码后重试') : ('授权失败：' + apiErr(d, r.status)));
+          return;
+        }
+        toast('无线调试已开启，可以使用 Network 激活');
+      }catch(e){ toast('授权失败'); }
+      refreshDevices();
+    }
+  );
 }
 
 async function delDevice(udid){

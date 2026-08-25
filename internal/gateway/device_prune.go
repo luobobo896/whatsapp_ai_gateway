@@ -20,8 +20,8 @@ func deviceDeletable(busy, healthy, running bool) bool {
 	return !busy && !deviceActivated(healthy, running)
 }
 
-// deviceAbsent 判定设备已掉线：无 USB/隧道、WDA 不健康、未在执行任务、主机也未托管激活进程。
-// USB 仍在但未激活不算掉线；忙碌或正在拉起时也不删，避免误伤。
+// deviceAbsent 判定设备已掉线：无 USB/Network/隧道、WDA 不健康、未在执行任务、主机也未托管激活进程。
+// USB 或 usbmux Network 仍在但未激活不算掉线；忙碌或正在拉起时也不删，避免误伤。
 func deviceAbsent(attached, healthy, busy, running bool) bool {
 	return !attached && !healthy && !busy && !running
 }

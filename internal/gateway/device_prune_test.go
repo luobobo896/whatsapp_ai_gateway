@@ -148,6 +148,7 @@ func TestPruneOfflineDevicesRemovesOnlyAbsent(t *testing.T) {
 }
 
 func TestDeviceListHidesOfflineConfigured(t *testing.T) {
+	t.Cleanup(stopUSBTunnelsForTest)
 	g, wdaMgr, _ := newStatusTestGateway(t)
 	g.Cfg.Devices = []Device{
 		{UDID: "u-offline-test", LastHealth: map[string]any{"ok": false}},

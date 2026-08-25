@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// USB 隧道：USB 直连时经 iproxy 转发到手机 8100（锁屏 Wi-Fi 休眠时更稳）。
-// 拔线只拆除隧道进程，绝不 Stop 机上 WDA；之后由 wdaBaseURLFor / checkWDA 回退 Wi-Fi。
-// 每个 USB 在线设备监听 127.0.0.1 随机本地端口。
+// USB / Network 隧道：iproxy 转发到手机 8100。
+// 激活通道互斥：USB 激活只建 USB iproxy；Network 激活只建 iproxy -n。
+// 拔线只拆除隧道进程，绝不 Stop 机上 WDA。
 
 // usbTunnelProc 一台设备的 iproxy 进程。
 type usbTunnelProc struct {
@@ -100,11 +100,12 @@ func usbTunnelsToDrop(usb, netSet map[string]bool, procs map[string]*usbTunnelPr
 
 // EnsureUSBTunnels 按当前 USB / usbmux Network 设备与目标端口对账隧道（看护循环每轮调用）。
 // 拔线只停 iproxy，不触碰 WDA 激活进程 / 机上 XCTest。
-//  - USB 直连设备：iproxy 走 USB（默认）；
-//  - 无线设备（usbmux ConnectionType=Network、无 USB）：iproxy -n 走 Network 隧道，
-//    让网关能访问 WDA 的 loopback :8100（Wi-Fi 直连受 iOS 本地网络权限/绑定影响，隧道更稳）。
+//   - USB 直连设备：iproxy 走 USB（默认）；
+//   - 无线设备（usbmux ConnectionType=Network、无 USB）：iproxy -n 走 Network 隧道，
+//     让网关能访问 WDA 的 loopback :8100（Wi-Fi 直连受 iOS 本地网络权限/绑定影响，隧道更稳）。
+//
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
-func EnsureUSBTunnels(rawPorts map[string]int) {
+func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 	udids := USBUDIDs()
 	m := usbTunnels
 	m.mu.Lock()
@@ -115,12 +116,19 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 	for u, p := range rawPorts {
 		ports[normalizeUDID(u)] = p
 	}
+	viaOf := map[string]string{}
+	for u, v := range vias {
+		viaOf[normalizeUDID(u)] = parseActivateVia(v)
+	}
 	usb := map[string]bool{}
 	for _, u := range udids {
 		usb[normalizeUDID(u)] = true
 	}
 	netSet := map[string]bool{}
 	for u := range usbmuxNetworkUDIDs() {
+		netSet[normalizeUDID(u)] = true
+	}
+	for _, u := range NetworkUDIDs() {
 		netSet[normalizeUDID(u)] = true
 	}
 	if len(udids) == 0 && len(m.procs) > 0 {
@@ -139,31 +147,39 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 		return
 	}
 	for udid, devPort := range ports {
-		if _, ok := m.procs[udid]; ok {
-			continue
+		via, configured := viaOf[udid]
+		wantNet := configured && via == activateViaNetwork
+		if p, ok := m.procs[udid]; ok {
+			if configured && p != nil && p.network != wantNet {
+				if p.cmd != nil && p.cmd.Process != nil {
+					_ = p.cmd.Process.Signal(os.Interrupt)
+				}
+				delete(m.procs, udid)
+			} else {
+				continue
+			}
 		}
-		if usb[udid] {
-			// USB 直连隧道
+		useNetwork := wantNet
+		if !configured {
+			useNetwork = !usb[udid] && netSet[udid]
+		}
+		if useNetwork {
+			if !netSet[udid] || runtime.GOOS == "windows" {
+				continue
+			}
 			local, err := freeLocalPort()
 			if err != nil {
 				continue
 			}
-			args := []string{"-u", udid}
-			if runtime.GOOS == "windows" {
-				// Windows 版 libimobiledevice iproxy 只认两个独立参数，
-				// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
-				args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
-			} else {
-				args = append(args, fmt.Sprintf("%d:%d", local, devPort))
-			}
+			args := []string{"-u", udid, "-n", fmt.Sprintf("%d:%d", local, devPort)}
 			cmd := exec.Command(bin, args...)
 			cmd.Env = append(os.Environ(), bundleLibFallback()...)
 			if err := cmd.Start(); err != nil {
 				continue
 			}
-			p := &usbTunnelProc{cmd: cmd, port: local, done: make(chan struct{})}
+			p := &usbTunnelProc{cmd: cmd, port: local, network: true, done: make(chan struct{})}
 			m.procs[udid] = p
-			slog.Info("usb tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
+			slog.Info("network tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
 			go func() {
 				_ = cmd.Wait()
 				close(p.done)
@@ -175,23 +191,29 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 			}()
 			continue
 		}
-		// 无线设备：usbmux Network 隧道（iproxy -n，仅 macOS/Linux；Windows 走 go-ios/tidevice）
-		if !netSet[udid] || runtime.GOOS == "windows" {
+		if !usb[udid] {
 			continue
 		}
 		local, err := freeLocalPort()
 		if err != nil {
 			continue
 		}
-		args := []string{"-u", udid, "-n", fmt.Sprintf("%d:%d", local, devPort)}
+		args := []string{"-u", udid}
+		if runtime.GOOS == "windows" {
+			// Windows 版 libimobiledevice iproxy 只认两个独立参数，
+			// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
+			args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
+		} else {
+			args = append(args, fmt.Sprintf("%d:%d", local, devPort))
+		}
 		cmd := exec.Command(bin, args...)
 		cmd.Env = append(os.Environ(), bundleLibFallback()...)
 		if err := cmd.Start(); err != nil {
 			continue
 		}
-		p := &usbTunnelProc{cmd: cmd, port: local, network: true, done: make(chan struct{})}
+		p := &usbTunnelProc{cmd: cmd, port: local, done: make(chan struct{})}
 		m.procs[udid] = p
-		slog.Info("network tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
+		slog.Info("usb tunnel up", "udid", udid[:8], "listen", fmt.Sprintf("127.0.0.1:%d", local))
 		go func() {
 			_ = cmd.Wait()
 			close(p.done)
@@ -206,50 +228,153 @@ func EnsureUSBTunnels(rawPorts map[string]int) {
 
 // TunnelAddr 返回某 UDID 的本地隧道地址（"127.0.0.1:port"）；无可用隧道返回空串。
 func TunnelAddr(udid string) string {
+	addr, _, ok := tunnelInfo(udid)
+	if !ok {
+		return ""
+	}
+	return addr
+}
+
+// tunnelInfo 返回隧道地址与是否为 Network iproxy。
+func tunnelInfo(udid string) (addr string, network bool, ok bool) {
 	udid = normalizeUDID(udid)
 	m := usbTunnels
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p, ok := m.procs[udid]; ok {
-		select {
-		case <-p.done:
-			return ""
-		default:
-			return fmt.Sprintf("127.0.0.1:%d", p.port)
+	p, exists := m.procs[udid]
+	if !exists || p == nil {
+		return "", false, false
+	}
+	select {
+	case <-p.done:
+		return "", false, false
+	default:
+		return fmt.Sprintf("127.0.0.1:%d", p.port), p.network, true
+	}
+}
+
+func tunnelAddrForVia(udid, via string) string {
+	addr, network, ok := tunnelInfo(udid)
+	if !ok {
+		return ""
+	}
+	if parseActivateVia(via) == activateViaNetwork {
+		if network {
+			return addr
 		}
+		return ""
+	}
+	if !network {
+		return addr
 	}
 	return ""
 }
 
-// wdaBaseURLFor：USB 隧道优先；无隧道（含已拔线）回退 Wi-Fi IP:port。
-func wdaBaseURLFor(udid, ip string, port int) string {
-	if a := TunnelAddr(udid); a != "" {
-		return "http://" + a
+func dropTunnel(udid string) {
+	udid = normalizeUDID(udid)
+	m := usbTunnels
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.procs[udid]; p != nil && p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
 	}
-	return fmt.Sprintf("http://%s:%d", ip, port)
+	delete(m.procs, udid)
+	delete(m.misses, udid)
 }
 
-// resolveWDABaseURL 选一条当前能答 /status 的地址：活着的 USB 隧道优先，否则 Wi-Fi。
-// 拔线后 iproxy 可能短暂仍登记在表里但已不通；不能像 wdaBaseURLFor 那样死磕隧道，
-// 否则群发会在看护回退 Wi-Fi 之前被拒。
-func resolveWDABaseURL(udid, ip string, port int) string {
-	if a := TunnelAddr(udid); a != "" {
+// usbTunnelAlive 仅 USB iproxy 仍在（不含 iproxy -n）。Network 隧道不能当成插着 USB。
+func usbTunnelAlive(udid string) bool {
+	udid = normalizeUDID(udid)
+	m := usbTunnels
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.procs[udid]
+	if !ok || p == nil || p.network {
+		return false
+	}
+	select {
+	case <-p.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// addUsbmuxTunnelPorts 给 USB 与 Network 在线设备补默认 8100 隧道端口。
+func addUsbmuxTunnelPorts(ports map[string]int) {
+	if ports == nil {
+		return
+	}
+	for _, u := range USBUDIDs() {
+		if _, ok := ports[u]; !ok {
+			ports[u] = 8100
+		}
+	}
+	for _, u := range NetworkUDIDs() {
+		if _, ok := ports[u]; !ok {
+			ports[u] = 8100
+		}
+	}
+}
+
+// wdaProbeVia 只探指定通道：USB 只用 USB 隧道；Network 只用 Network 隧道或 Wi-Fi IP。
+func wdaProbeVia(udid, ip string, port int, via string) WDAHealth {
+	via = parseActivateVia(via)
+	if port == 0 {
+		port = 8100
+	}
+	if via == activateViaNetwork {
+		if a := tunnelAddrForVia(udid, activateViaNetwork); a != "" {
+			host, portStr, err := net.SplitHostPort(a)
+			if err == nil {
+				p, _ := strconv.Atoi(portStr)
+				if p == 0 {
+					p = 8100
+				}
+				h := CheckWDA(host, p, 3*time.Second)
+				if h.OK {
+					return h
+				}
+			}
+		}
+		if ip == "" {
+			return WDAHealth{OK: false, Error: "Network 通道需要 Wi-Fi IP 或 Network 隧道"}
+		}
+		return CheckWDA(ip, port, 3*time.Second)
+	}
+	if a := tunnelAddrForVia(udid, activateViaUSB); a != "" {
 		host, portStr, err := net.SplitHostPort(a)
 		if err == nil {
 			p, _ := strconv.Atoi(portStr)
 			if p == 0 {
 				p = 8100
 			}
-			if CheckWDA(host, p, 2*time.Second).OK {
-				return "http://" + a
-			}
+			return CheckWDA(host, p, 3*time.Second)
 		}
 	}
-	if ip == "" {
-		return ""
-	}
+	return WDAHealth{OK: false, Error: "USB 通道无 USB 隧道"}
+}
+
+// wdaBaseURLFor 按通道选地址，不跨通道兜底。
+func wdaBaseURLFor(udid, ip string, port int, via string) string {
+	via = parseActivateVia(via)
 	if port == 0 {
 		port = 8100
 	}
-	return fmt.Sprintf("http://%s:%d", ip, port)
+	if a := tunnelAddrForVia(udid, via); a != "" {
+		return "http://" + a
+	}
+	if via == activateViaNetwork && ip != "" {
+		return fmt.Sprintf("http://%s:%d", ip, port)
+	}
+	return ""
+}
+
+// resolveWDABaseURL 只返回当前通道上能答 /status 的地址。
+func resolveWDABaseURL(udid, ip string, port int, via string) string {
+	h := wdaProbeVia(udid, ip, port, via)
+	if !h.OK {
+		return ""
+	}
+	return wdaBaseURLFor(udid, ip, port, via)
 }
