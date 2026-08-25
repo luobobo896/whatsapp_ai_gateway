@@ -170,39 +170,36 @@ idevice_id -l -n | grep '(Network)'
 
 ## 11. Windows 支持
 
-功能在 Windows 同样生效（后台检测、开关、手动修复、状态展示一致），但“修复动作”按平台不同：
+检测、开关、状态展示与 macOS 共用。**修复动作不能照搬 `killall usbmuxd`。**
+
+实机记录见 [docs/testing/2026-08-25-windows-connection-type-network.md](../testing/2026-08-25-windows-connection-type-network.md)。
 
 ### 11.1 前置条件（Windows）
 
-- 已安装 **Apple Devices** 或 **iTunes**（提供 Windows 侧 usbmux / Apple 服务）。
-- 已装 `ios.exe` / `tidevice` / `iproxy`（libimobiledevice），位于 `PATH` 或 `WDA_GATEWAY_RESOURCES\bin`。
-- **以管理员身份运行网关**（否则重启 Apple 服务会因权限失败）；Windows 无 `setup-usbmux-sudo.sh`，也不适用。
-- 手机侧与 macOS 相同：已配对、解锁、与 Mac 同 Wi-Fi、`EnableWifiConnections` + `EnableWifiDebugging` 均为 true、`手机IP:62078` 单播通。
+- **只要桌面版 iTunes**（`C:\Program Files\iTunes\iTunes.exe`）+ **Apple Mobile Device Support**（服务 `Apple Mobile Device Service`，`:27015`）。
+- **不要**同时装 Microsoft Store 版 iTunes：会与 Win32 AMDS 冲突，启动时要求卸载另一套，并可能占住 `:27015`。
+- `ios.exe` / `tidevice` / `idevice_id` 读的是 AMDS，不是商店版进程。
+- 手机：USB 配对、解锁、与 **这台 Windows** 同一 Wi-Fi；`wifi-lockdown` 写入 `EnableWifiConnections` + `EnableWifiDebugging`。
 
 ### 11.2 修复动作差异
 
-- macOS/Linux：`restartUsbmuxd()` 重启系统 `usbmuxd`。
-- Windows：`restartUsbmuxd()` 重启提供 usbmux 的 **Apple Mobile Device Service**（`sc stop` + `sc start`）。候选服务名：
-  `Apple Mobile Device Service`、`Apple Mobile Device`、`Apple Devices Service`、`Apple Devices`。
+- macOS/Linux：`restartUsbmuxd()` 重启系统 `usbmuxd`（可让 Network 出现）。
+- Windows：`restartUsbmuxd()` **拒绝**重启 AMDS。本机实测 `sc stop/start` 不会挂上 Network，反而让 USB 从 usbmux 消失、设备列表被清空。
 
 ### 11.3 手动验证（Windows）
 
 ```bat
-REM 1. 查当前连接类型
 ios list --details
-idevice_id -l -n
-REM 2. 手动重启 Apple 服务（需管理员）
-net stop "Apple Mobile Device Service" & net start "Apple Mobile Device Service"
-REM 3. 再查 Network
-ios list --details
+idevice_id -l
+idevice_id -n
+wifi-lockdown <udid>
 ```
 
-### 11.4 已知不确定点
+不要用 `net stop/start "Apple Mobile Device Service"` 当修复手段。
 
-> ⚠️ Windows 上的“服务名取值”与“重启后是否立即出现 Network 条目”**需在 Windows 实机验证一次**
-> （不同 Apple 版本服务名可能不同）。检测/开关/手动修复/状态展示逻辑与 macOS 共用、已在 macOS 完整验证；
-> Windows 分支按上述服务名实现，若实际服务名不同，按 11.3 手动命令查询后把正确服务名加入
-> `usbmux_net_repair_windows.go` 的候选即可。
+### 11.4 实机结论（2026-08-25）
+
+在桌面 iTunes 勾选「通过 Wi-Fi 同步」并应用后：插着 USB 只有 USB 行；拔线后 `-n` 仍空。`WirelessBuddyID` 仍指向 Mac。Windows 上不能把「修复」宣传成可拔线。
 
 ## 12. 回滚
 

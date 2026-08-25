@@ -9,8 +9,9 @@ import (
 
 const (
 	domain = "com.apple.mobile.wireless_lockdown"
-	key    = "EnableWifiConnections"
 )
+
+var wifiKeys = []string{"EnableWifiConnections", "EnableWifiDebugging"}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -29,14 +30,19 @@ func main() {
 		os.Exit(1)
 	}
 	defer ld.Close()
-	if err := ld.SetValueForDomain(key, domain, true); err != nil {
-		fmt.Fprintf(os.Stderr, "set %s: %v\n", key, err)
-		os.Exit(1)
+	for _, key := range wifiKeys {
+		if err := ld.SetValueForDomain(key, domain, true); err != nil {
+			fmt.Fprintf(os.Stderr, "set %s: %v\n", key, err)
+			os.Exit(1)
+		}
+		after, err := ld.GetValueForDomain(key, domain)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "get %s: %v\n", key, err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s %s=%v\n", udid, key, after)
 	}
-	after, err := ld.GetValueForDomain(key, domain)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "get: %v\n", err)
-		os.Exit(1)
+	if buddy, err := ld.GetValueForDomain("WirelessBuddyID", domain); err == nil {
+		fmt.Printf("%s WirelessBuddyID=%v\n", udid, buddy)
 	}
-	fmt.Printf("%s %s=%v\n", udid, key, after)
 }
