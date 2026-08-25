@@ -43,14 +43,14 @@ CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w -X 
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" -o "$OUT/wda-probe.exe" ./cmd/wda-probe
 cp "$ROOT/static/index.html" "$OUT/static/index.html"
 
-echo "▶ [2.5/4] 激活辅助二进制（wifi-runwda 源构建，避免跑到旧包）"
-# Windows 激活走 usbmux Network / USB 回退，必须用仓库当前源码编出的 wifi-runwda.exe，
-# 否则即便 gateway.exe 是新版，Helper 仍会用旧逻辑。
+echo "▶ [2.5/4] 激活辅助二进制（与 Mac 同一套业务逻辑，必须从当前源码编）"
 mkdir -p "$OUT/bin"
 CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
   -o "$OUT/bin/wifi-runwda.exe" ./cmd/wifi-runwda
-# wifi-lockdown 是独立模块（源码未改，沿用仓库 tools/ 的 Windows 版）；go-ios 用仓库工具。
-cp "$ROOT/tools/wifi-lockdown.exe" "$OUT/bin/wifi-lockdown.exe" 2>/dev/null || true
+( cd "$ROOT/cmd/wifi-lockdown" && CGO_ENABLED=0 GOOS=windows GOARCH="$ARCH" go build -trimpath -ldflags "-s -w" \
+  -o "$OUT/bin/wifi-lockdown.exe" . )
+cp "$OUT/bin/wifi-runwda.exe" "$ROOT/tools/wifi-runwda.exe"
+cp "$OUT/bin/wifi-lockdown.exe" "$ROOT/tools/wifi-lockdown.exe"
 for b in ios.exe idevice_id.exe ideviceinfo.exe iproxy.exe; do
   [ -x "$ROOT/tools/$b" ] && cp "$ROOT/tools/$b" "$OUT/bin/" 2>/dev/null || true
 done

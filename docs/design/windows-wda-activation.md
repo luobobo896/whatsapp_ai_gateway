@@ -49,7 +49,8 @@
 - Mac 上 `scripts/package-wda-ipa.sh` 打出已签名 `wda.ipa`
 - Windows / Mac 网关：手机还没装 Runner 就 `ios install --path=` / `tidevice install`，再 `ios runwda` 或 `tidevice xctest`
 - `signing.activator=auto`：有 `ios` 用 goios，否则有 `tidevice` 用 tidevice；都没有时 Windows 仍报 goios，Mac 才回退 `xcodebuild`
-- USB 发现走 `idevice_id -l`（跨平台），`ioreg` / `devicectl` 只是 Darwin 回退
+- USB / Network 发现走 `idevice_id -l -n`（跨平台），`ioreg` / `devicectl` 只是 Darwin 回退
+- 首次授权、USB/Network 互斥激活与 Mac **同一套业务规则**，见 [usb-network-activate.md](./usb-network-activate.md)
 - DDI 补齐只在 Darwin 读 Xcode `DeviceSupport`；Windows 直接跳过
 
 所以「Windows 不能激活」不是 usbmux 做不到，是 **必须先有一份签好名的 IPA**。装好之后，Windows 只负责右边。

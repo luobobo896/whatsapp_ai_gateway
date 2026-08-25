@@ -30,13 +30,15 @@ func main() {
 	port := flag.Int("port", 8100, "USE_PORT")
 	iosBin := flag.String("ios", "ios", "go-ios binary")
 	serveOnly := flag.Bool("serve", false, "only run usbmux proxy")
-	waitNet := flag.Duration("wait-network", 10*time.Second, "wait up to this long for usbmux ConnectionType=Network DeviceID; fall back to USB if still missing (USB unplug would stop Automation Running)")
+	waitNet := flag.Duration("wait-network", 10*time.Second, "wait up to this long for usbmux ConnectionType=Network DeviceID; fall back to USB if still missing unless -require-network")
+	requireNet := flag.Bool("require-network", false, "fail if usbmux has no ConnectionType=Network (no USB fallback)")
 	flag.Parse()
 	if *udid == "" {
-		fmt.Fprintln(os.Stderr, "usage: wifi-runwda -udid <udid> [-ip wifi-ip] [-bundle id] [-port 8100] [-ios ios]")
+		fmt.Fprintln(os.Stderr, "usage: wifi-runwda -udid <udid> [-ip wifi-ip] [-bundle id] [-port 8100] [-ios ios] [-require-network]")
 		os.Exit(2)
 	}
-	if *ip != "" {
+	// Network 激活禁止抢连 :62078；USB 回退路径才可能用 -ip。
+	if *ip != "" && !*requireNet {
 		_ = waitTCP(*ip, 62078, 3*time.Second)
 	}
 
@@ -51,9 +53,10 @@ func main() {
 	}
 	if route.Via != "usbmux-network" {
 		if err := requireMuxNetwork(*udid, route.Target, true); err != nil {
-			// 拿不到 usbmux Network（无线调试配对未建立）。回退 USB 激活，
-			// 让设备能先跑起来（Automation Running / 可发消息）；系统按
-			// usbmuxNetworkUDIDs() 判 `unplugSafeFor=false`，UI 会标记为非拔线保活。
+			if *requireNet {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				os.Exit(1)
+			}
 			log.Printf("WARN %s; 无线调试 Network 条目缺失，回退 USB 激活（拔 USB 会拆掉 Automation Running）", err)
 		}
 	}

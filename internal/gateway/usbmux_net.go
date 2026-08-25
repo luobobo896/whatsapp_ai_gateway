@@ -15,10 +15,10 @@ import (
 
 // 自动修复相关节奏常量。
 const (
-	usbmuxNetCheckInterval      = 30 * time.Second       // 后台检测周期
-	usbmuxNetAutoMinInterval    = 2 * time.Minute        // 两次自动修复最小间隔（防抖）
-	usbmuxNetVerifyTimeout      = 20 * time.Second       // 修复后等待 Network 条目出现的总时长
-	usbmuxNetVerifyPollInterval = 2 * time.Second        // 修复后轮询间隔
+	usbmuxNetCheckInterval      = 30 * time.Second // 后台检测周期
+	usbmuxNetAutoMinInterval    = 2 * time.Minute  // 两次自动修复最小间隔（防抖）
+	usbmuxNetVerifyTimeout      = 20 * time.Second // 修复后等待 Network 条目出现的总时长
+	usbmuxNetVerifyPollInterval = 2 * time.Second  // 修复后轮询间隔
 )
 
 // usbmuxConnSets 是 usbmux 当前连接类型的快照。
@@ -92,15 +92,15 @@ type usbmuxNetDeviceStatus struct {
 
 // usbmuxNetStatus 是 /api/usbmux-net 返回的整体状态。
 type usbmuxNetStatus struct {
-	AutoRepair  bool                     `json:"auto_repair"`
-	Total       int                      `json:"total"`
-	Network     int                      `json:"network"`
-	UsbOnly     int                      `json:"usb_only"`
-	Absent      int                      `json:"absent"`
-	UnplugSafe  int                      `json:"unplug_safe"`
-	NeedsRepair bool                     `json:"needs_repair"`
-	LastRestart string                   `json:"last_restart,omitempty"`
-	LastResult  string                   `json:"last_result,omitempty"`
+	AutoRepair  bool                    `json:"auto_repair"`
+	Total       int                     `json:"total"`
+	Network     int                     `json:"network"`
+	UsbOnly     int                     `json:"usb_only"`
+	Absent      int                     `json:"absent"`
+	UnplugSafe  int                     `json:"unplug_safe"`
+	NeedsRepair bool                    `json:"needs_repair"`
+	LastRestart string                  `json:"last_restart,omitempty"`
+	LastResult  string                  `json:"last_result,omitempty"`
 	Devices     []usbmuxNetDeviceStatus `json:"devices"`
 }
 
@@ -111,10 +111,16 @@ func (g *Gateway) usbmuxNetStatus() usbmuxNetStatus {
 	conns := usbmuxConnSetsRead()
 	st := buildUsbmuxNetStatus(g.Cfg.Devices, conns, g.Cfg.UsbmuxNet.AutoRepair)
 	g.usbmuxMu.Lock()
-	if !g.lastUsbmuxRepair.IsZero() {
+	// 与设备列表一致：usbmux 上已无设备时清掉「仍有 N 台缺 Network」残留。
+	if st.Total == 0 {
+		g.lastUsbmuxResult = ""
+	}
+	if !g.lastUsbmuxRepair.IsZero() && st.Total > 0 {
 		st.LastRestart = g.lastUsbmuxRepair.Format(time.RFC3339)
 	}
-	st.LastResult = g.lastUsbmuxResult
+	if st.Total > 0 {
+		st.LastResult = g.lastUsbmuxResult
+	}
 	g.usbmuxMu.Unlock()
 	return st
 }
@@ -135,7 +141,8 @@ func buildUsbmuxNetStatus(devices []Device, conns usbmuxConnSets, autoRepair boo
 		case conns.usbSet[u]:
 			sd.Connection = "UsbOnly"
 		default:
-			sd.Connection = "Absent"
+			// 拔线后 usbmux 上看不到：与设备列表一样不计入，避免 0/1 残留。
+			continue
 		}
 		switch sd.Connection {
 		case "Network":

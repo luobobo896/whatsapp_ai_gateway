@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func stopUSBTunnelsForTest() {
+	usbTunnels.mu.Lock()
+	defer usbTunnels.mu.Unlock()
+	for udid, p := range usbTunnels.procs {
+		if p != nil && p.cmd != nil && p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		delete(usbTunnels.procs, udid)
+	}
+	usbTunnels.misses = map[string]int{}
+}
+
+func TestIproxyForwardArgsSameChannelOnBothOS(t *testing.T) {
+	usb := iproxyForwardArgs("u1", 8101, 8100, false)
+	net := iproxyForwardArgs("u1", 8101, 8100, true)
+	if !containsExact(usb, "-u") || !containsExact(usb, "u1") {
+		t.Fatalf("usb args=%v", usb)
+	}
+	if containsExact(usb, "-n") {
+		t.Fatalf("USB tunnel must not pass -n: %v", usb)
+	}
+	if !containsExact(net, "-n") {
+		t.Fatalf("Network tunnel must pass -n on this OS too: %v", net)
+	}
+}
+
 func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
 	misses := map[string]int{}
 	procs := map[string]*usbTunnelProc{
@@ -87,8 +113,11 @@ func TestTransientWDAError(t *testing.T) {
 
 // TestWdaBaseURLForFallback 无隧道时回退 Wi-Fi 地址。
 func TestWdaBaseURLForFallback(t *testing.T) {
-	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100); got != "http://192.168.1.11:8100" {
-		t.Fatalf("fallback wrong: %s", got)
+	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100, activateViaNetwork); got != "http://192.168.1.11:8100" {
+		t.Fatalf("network via uses wifi IP, got %s", got)
+	}
+	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100, activateViaUSB); got != "" {
+		t.Fatalf("usb via must not use wifi IP, got %s", got)
 	}
 }
 
@@ -102,8 +131,11 @@ func TestWdaBaseURLForPrefersUSBTunnel(t *testing.T) {
 		delete(usbTunnels.procs, udid)
 		usbTunnels.mu.Unlock()
 	})
-	if got := wdaBaseURLFor(udid, "192.168.10.237", 8100); got != "http://127.0.0.1:63344" {
-		t.Fatalf("tunnel first, got %s", got)
+	if got := wdaBaseURLFor(udid, "192.168.10.237", 8100, activateViaUSB); got != "http://127.0.0.1:63344" {
+		t.Fatalf("usb via uses usb tunnel, got %s", got)
+	}
+	if got := wdaBaseURLFor(udid, "192.168.10.237", 8100, activateViaNetwork); got != "http://192.168.10.237:8100" {
+		t.Fatalf("network via must ignore usb tunnel, got %s", got)
 	}
 }
 
@@ -118,13 +150,14 @@ func TestResolveWDABaseURLFallsBackWhenTunnelDead(t *testing.T) {
 		delete(usbTunnels.procs, udid)
 		usbTunnels.mu.Unlock()
 	})
-	// 死隧道不得挡住 Wi-Fi 地址选择（探活由调用方再做；这里只验证回退选址）。
-	got := resolveWDABaseURL(udid, "192.168.10.236", 8100)
-	if got != "http://192.168.10.236:8100" {
-		t.Fatalf("want wifi fallback, got %s", got)
+	if got := resolveWDABaseURL(udid, "192.168.10.236", 8100, activateViaUSB); got != "" {
+		t.Fatalf("dead USB tunnel must not resolve, got %s", got)
 	}
-	if got := wdaBaseURLFor(udid, "192.168.10.236", 8100); got != "http://127.0.0.1:1" {
-		t.Fatalf("wdaBaseURLFor still prefers listed tunnel, got %s", got)
+	if got := wdaBaseURLFor(udid, "192.168.10.236", 8100, activateViaUSB); got != "http://127.0.0.1:1" {
+		t.Fatalf("usb via still addresses listed USB tunnel, got %s", got)
+	}
+	if got := wdaBaseURLFor(udid, "192.168.10.236", 8100, activateViaNetwork); got != "http://192.168.10.236:8100" {
+		t.Fatalf("network via ignores USB tunnel, got %s", got)
 	}
 }
 

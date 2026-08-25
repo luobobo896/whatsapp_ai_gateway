@@ -13,7 +13,7 @@ func TestBuildUsbmuxNetStatusStates(t *testing.T) {
 		usbSet: map[string]bool{"A": true, "B": true},
 	}
 	st := buildUsbmuxNetStatus(devices, conns, true)
-	if st.Total != 3 || st.Network != 1 || st.UsbOnly != 1 || st.Absent != 1 || st.UnplugSafe != 1 {
+	if st.Total != 2 || st.Network != 1 || st.UsbOnly != 1 || st.Absent != 0 || st.UnplugSafe != 1 {
 		t.Fatalf("counts wrong: total=%d net=%d usb=%d absent=%d unplug=%d",
 			st.Total, st.Network, st.UsbOnly, st.Absent, st.UnplugSafe)
 	}
@@ -23,12 +23,19 @@ func TestBuildUsbmuxNetStatusStates(t *testing.T) {
 	if !st.AutoRepair {
 		t.Fatal("AutoRepair should pass through")
 	}
-	// 排序：Network 在 UsbOnly 前，UsbOnly 在 Absent 前
-	if st.Devices[0].Connection != "Network" || st.Devices[1].Connection != "UsbOnly" || st.Devices[2].Connection != "Absent" {
-		t.Fatalf("sort order wrong: %v %v %v", st.Devices[0].Connection, st.Devices[1].Connection, st.Devices[2].Connection)
+	if st.Devices[0].Connection != "Network" || st.Devices[1].Connection != "UsbOnly" {
+		t.Fatalf("sort order wrong: %v %v", st.Devices[0].Connection, st.Devices[1].Connection)
 	}
 	if st.Devices[0].UnplugSafe != true || st.Devices[1].UnplugSafe != false {
 		t.Fatalf("unplug_safe flags wrong: %v", st.Devices)
+	}
+}
+
+func TestBuildUsbmuxNetStatusUnpluggedNotCounted(t *testing.T) {
+	devices := []Device{{UDID: "a", Name: "Gone"}}
+	st := buildUsbmuxNetStatus(devices, usbmuxConnSets{netSet: map[string]bool{}, usbSet: map[string]bool{}}, true)
+	if st.Total != 0 || len(st.Devices) != 0 || st.Network != 0 {
+		t.Fatalf("unplugged devices must not remain in 0/1: %+v", st)
 	}
 }
 

@@ -30,6 +30,19 @@ func usbConnected(udid string) bool {
 	return false
 }
 
+// usbCableConnected 仅 USB 线或 USB iproxy。usbmux Network 不算插线，避免云端 conn_type 误报 usb。
+func usbCableConnected(udid string) bool {
+	if usbTunnelAlive(udid) {
+		return true
+	}
+	for _, u := range USBUDIDs() {
+		if strings.EqualFold(u, udid) {
+			return true
+		}
+	}
+	return false
+}
+
 // wifiReachable 判断设备 WiFi IP 是否可达（设备在线但 WDA 可能未跑）。
 // 用于：USB 未连接时，只要设备在网（IP 能 ping 通）就允许重激活 WDA，
 // 而不是一律按"未接 USB"跳过——否则拔 USB 后 WiFi 下 WDA 异常且永不恢复。
@@ -93,13 +106,9 @@ func (g *Gateway) watchOnce() {
 		}
 		tunnelPorts[d.UDID] = p
 	}
-	// USB plugged but not yet in devices.json still needs a tunnel to probe /status.
-	for _, u := range USBUDIDs() {
-		if _, ok := tunnelPorts[u]; !ok {
-			tunnelPorts[u] = 8100
-		}
-	}
-	EnsureUSBTunnels(tunnelPorts)
+	// USB / Network 已在 usbmux 但尚未写入 devices.json 的设备也要起隧道探 /status。
+	addUsbmuxTunnelPorts(tunnelPorts)
+	EnsureUSBTunnels(tunnelPorts, tunnelVias(cfg.Devices))
 	// easytier 看护自愈：用户未主动停止时，进程崩溃自动拉回（限速）。
 	if g.EasyTier != nil {
 		g.EasyTier.Supervise()
@@ -117,6 +126,9 @@ func (g *Gateway) watchOnce() {
 		if g.Exec.IsBusy(dev.UDID) {
 			g.Exec.status(DeviceStatus{UDID: dev.UDID, WDAStatus: "busy", Error: ""})
 			g.rememberCloudStatus(dev.UDID, "busy")
+			continue
+		}
+		if userStopped(dev, g.WDA.Running(dev.UDID)) {
 			continue
 		}
 		h := g.checkWDA(dev)
@@ -163,13 +175,19 @@ func (g *Gateway) watchOnce() {
 			}
 		}
 		// 非忙碌：云状态（含 WDA 进程退出/拉起）变化才上报，避免无意义刷屏。
-		g.reportCloudStatusIfChanged(dev, usbConnected(dev.UDID) || TunnelAddr(dev.UDID) != "", errText(h.Error))
+		g.reportCloudStatusIfChanged(dev, usbCableConnected(dev.UDID), errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
-			// 拔 USB 只拆 iproxy 隧道，不主动 Stop WDA。存活看机上 /status；
-			// 重拉起时 USB / Wi-Fi 任一可达即可（含 40 位 UDID 老机型）。
-			usbOK := usbConnected(dev.UDID)
+			via := parseActivateVia(dev.ActivateVia)
+			if via == activateViaNetwork && !dev.WifiDebug {
+				if prevOK {
+					slog.Warn("skip Network reactivate: first-connect wifi auth missing", "udid", shortOf(dev.UDID))
+				}
+				continue
+			}
+			usbOK := usbCableConnected(dev.UDID)
+			netOK := hasMuxNetwork(dev.UDID)
 			wifiOK := wifiReachable(dev)
-			if !reactivateDecision(false, true, false, usbOK || wifiOK) {
+			if !reactivateDecision(false, true, false, channelReachableForVia(via, usbOK, netOK, wifiOK)) {
 				if prevOK {
 					slog.Warn("device offline and not reachable, skip reactivation",
 						"udid", shortOf(dev.UDID), "ip", dev.IP)
@@ -188,7 +206,7 @@ func (g *Gateway) watchOnce() {
 				continue
 			}
 			slog.Info("WDA down, reactivating", "udid", dev.UDID[:8], "ip", dev.IP)
-			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID, dev.IP); err != nil {
+			if err := g.WDA.Activate(dev.UDID, dev.Port, dev.UDID, parseActivateVia(dev.ActivateVia)); err != nil {
 				slog.Error("reactivate failed", "udid", dev.UDID[:8], "error", err)
 			}
 		}
@@ -203,33 +221,20 @@ func (g *Gateway) watchOnce() {
 	_ = cfg.Save() // 每轮探活后持久化 last_health，网关重启后不再用过期状态上报
 }
 
-// channelReachableForRelaunch：USB 或 Wi-Fi 任一可达即可尝试重拉起（新旧机型同一规则）。
-// WDA 是否存活不看 USB，只看机上 HTTP /status（见 checkWDA / wdaAppearsRunning）。
-func channelReachableForRelaunch(usbAttached, wifiOK bool) bool {
-	return usbAttached || wifiOK
+// channelReachableForVia：只看本通道。USB 不因 Wi-Fi 可达而重拉；Network 不因 USB 线而重拉。
+func channelReachableForVia(via string, usbOK, netOK, wifiOK bool) bool {
+	if parseActivateVia(via) == activateViaNetwork {
+		return netOK || wifiOK
+	}
+	return usbOK
 }
 
-// checkWDA 探测设备 WDA 健康：有 USB 隧道时先走隧道，失败或无隧道则走 Wi-Fi IP。
-// 拔线拆除隧道后必须仍能靠 Wi-Fi 判活，不得把 USB 当作存活前提。
+// checkWDA 只探 ActivateVia 对应通道，不跨 USB / Network 兜底。
 func (g *Gateway) checkWDA(dev *Device) WDAHealth {
 	if dev == nil {
 		return WDAHealth{OK: false, Error: "nil device"}
 	}
-	if a := TunnelAddr(dev.UDID); a != "" {
-		host, portStr, err := net.SplitHostPort(a)
-		if err == nil {
-			p, _ := strconv.Atoi(portStr)
-			h := CheckWDA(host, p, 3*time.Second)
-			if h.OK {
-				return h
-			}
-			slog.Warn("usb tunnel health failed, fallback to wifi", "udid", shortOf(dev.UDID), "error", h.Error)
-		}
-	}
-	if dev.IP == "" {
-		return WDAHealth{OK: false, Error: "no wifi ip"}
-	}
-	return CheckWDA(dev.IP, dev.Port, 3*time.Second)
+	return wdaProbeVia(dev.UDID, dev.IP, dev.Port, dev.ActivateVia)
 }
 
 // deviceIdentity 读取 WDA identifierForVendor(uuid) 与设备名（健康探活通过后调用）。

@@ -26,43 +26,133 @@ var (
 	udidHyphenRe = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}$`)
 )
 
-// USBUDIDs 返回 USB 直连真机的 UDID（usbmux 原文格式）。
-// 主源 idevice_id -l：iPhone XS 及以后机型的 UDID 是 8-16 hex 带连字符
+// USBUDIDs 返回 USB 直连真机的 UDID（usbmux 原文格式），不含 Network。
+// 主源 idevice_id -l -n 的 (USB) 行；iPhone XS 及以后机型的 UDID 是 8-16 hex 带连字符
 // （如 00008120-000865D90A10C01E），老机型是 40 位 hex；iproxy/ideviceinfo
 // 只认该原文（无连字符的 24 位 hex 实测 not found），xcodebuild destination id=
 // 同格式，devices.json 与隧道对账键因此全程不做格式变换。
 // iOS 17+ 新机型在 ioreg 已不暴露 UsbAppleDeviceUDID（只剩无连字符 USB serial），
 // ioreg 仅作无 libimobiledevice 环境下老机型的回退。
 func USBUDIDs() []string {
-	if udids := usbmuxListUDIDs(); len(udids) > 0 {
-		return udids
+	usb, network := usbmuxListTyped()
+	if len(usb) > 0 || len(network) > 0 {
+		return usb
 	}
 	return usbUDIDsViaIOReg()
 }
 
-// usbmuxListUDIDs 经 idevice_id -l 列出 usbmux 在线设备（原文 UDID，每行一个）。
-func usbmuxListUDIDs() []string {
+// NetworkUDIDs 返回 usbmux ConnectionType=Network 的 UDID（idevice_id 原文大小写）。
+func NetworkUDIDs() []string {
+	_, net := usbmuxListTyped()
+	return net
+}
+
+var usbmuxTypedCache struct {
+	mu       sync.Mutex
+	at       time.Time
+	usb, net []string
+}
+
+// usbmuxListTyped 一次列出 USB 与 Network。优先 idevice_id -l -n（行尾 (USB)/(Network)）；
+// 旧二进制若不带类型后缀，再补一次 -n。结果缓存 1s，避免列表/看护同一轮连打。
+func usbmuxListTyped() (usb, network []string) {
+	usbmuxTypedCache.mu.Lock()
+	defer usbmuxTypedCache.mu.Unlock()
+	if !usbmuxTypedCache.at.IsZero() && time.Since(usbmuxTypedCache.at) < time.Second {
+		return usbmuxTypedCache.usb, usbmuxTypedCache.net
+	}
+	usb, network = usbmuxListTypedUncached()
+	usbmuxTypedCache.usb, usbmuxTypedCache.net, usbmuxTypedCache.at = usb, network, time.Now()
+	return usb, network
+}
+
+func usbmuxListTypedUncached() (usb, network []string) {
 	bin := libiDeviceBin("idevice_id")
 	if bin == "" {
-		return nil
+		return nil, nil
 	}
+	if out, ok := runIdeviceID(bin, "-l", "-n"); ok && strings.TrimSpace(out) != "" {
+		if ideviceIDOutputTyped(out) {
+			return parseIdeviceIDLines(out, "usb")
+		}
+		usb, _ = parseIdeviceIDLines(out, "usb")
+	} else if out, ok := runIdeviceID(bin, "-l"); ok {
+		usb, _ = parseIdeviceIDLines(out, "usb")
+	}
+	if out, ok := runIdeviceID(bin, "-n"); ok {
+		_, network = parseIdeviceIDLines(out, "network")
+	}
+	return usb, network
+}
+
+func runIdeviceID(bin string, args ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "-l")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(), bundleLibFallback()...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		return "", false
 	}
-	var res []string
-	for _, line := range strings.Split(string(out), "\n") {
-		// 保留 idevice_id 上报的原始大小写：iOS 16+ 新格式 UDID 在 iproxy/xcodebuild
-		// 里大小写敏感，转小写会导致激活匹配失败/隧道连不上（实测）。
-		if u := strings.TrimSpace(line); looksLikeUDID(u) {
-			res = append(res, u)
+	return string(out), true
+}
+
+func ideviceIDOutputTyped(raw string) bool {
+	return strings.Contains(raw, "(USB)") || strings.Contains(raw, "(Network)") ||
+		strings.Contains(raw, "(usb)") || strings.Contains(raw, "(network)")
+}
+
+// parseIdeviceIDLines 解析 idevice_id 输出。
+// -l -n：`UDID (USB)` / `UDID (Network)`；-l / -n 单独调用时是裸 UDID，用 untypedKind。
+func parseIdeviceIDLines(raw, untypedKind string) (usb, network []string) {
+	if untypedKind == "" {
+		untypedKind = "usb"
+	}
+	seenU, seenN := map[string]bool{}, map[string]bool{}
+	add := func(dst *[]string, seen map[string]bool, u string) {
+		k := udidKey(u)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		*dst = append(*dst, u)
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		u, kind := splitIdeviceIDLine(line, untypedKind)
+		if !looksLikeUDID(u) {
+			continue
+		}
+		if kind == "network" {
+			add(&network, seenN, u)
+			continue
+		}
+		add(&usb, seenU, u)
+	}
+	return usb, network
+}
+
+func splitIdeviceIDLine(line, untypedKind string) (udid, kind string) {
+	if i := strings.LastIndex(line, " ("); i > 0 && strings.HasSuffix(line, ")") {
+		cand := strings.TrimSpace(line[:i])
+		typ := strings.TrimSpace(strings.TrimSuffix(line[i+2:], ")"))
+		if looksLikeUDID(cand) {
+			if strings.EqualFold(typ, "Network") {
+				return cand, "network"
+			}
+			if strings.EqualFold(typ, "USB") {
+				return cand, "usb"
+			}
 		}
 	}
-	return res
+	return line, untypedKind
+}
+
+func udidKey(u string) string {
+	return strings.ToUpper(strings.TrimSpace(u))
 }
 
 // usbUDIDsViaIOReg 从 ioreg 提取 UsbAppleDeviceUDID（仅老机型暴露该属性）。
@@ -155,27 +245,70 @@ func ideviceSerial(udid string) string {
 	return s
 }
 
-// DiscoveredDevice 是发现到的设备（USB/CoreDevice）。
+// DiscoveredDevice 是发现到的设备（USB / usbmux Network / CoreDevice）。
 type DiscoveredDevice struct {
 	UDID  string
 	Name  string
 	Model string
+	Conn  string // usb | wifi；devicectl 单独命中时可能为空
 }
 
-// Discover 合并 devicectl + ioreg，返回发现到的设备。
+// Discover 合并 devicectl、USB 与 usbmux Network。
 func Discover() []DiscoveredDevice {
-	seen := map[string]bool{}
+	usb, network := usbmuxListTyped()
+	if len(usb) == 0 && len(network) == 0 {
+		usb = usbUDIDsViaIOReg()
+	}
+	return mergeDiscovered(devicectlDevices(), usb, network)
+}
+
+func mergeDiscovered(core []DiscoveredDevice, usb, network []string) []DiscoveredDevice {
+	seen := map[string]int{}
 	var res []DiscoveredDevice
-	for _, d := range devicectlDevices() {
-		seen[d.UDID] = true
+	add := func(d DiscoveredDevice) {
+		if d.UDID == "" {
+			return
+		}
+		k := udidKey(d.UDID)
+		if i, ok := seen[k]; ok {
+			if res[i].Name == "" && d.Name != "" {
+				res[i].Name = d.Name
+			}
+			if res[i].Model == "" && d.Model != "" {
+				res[i].Model = d.Model
+			}
+			if d.Conn == "usb" || res[i].Conn == "" {
+				if d.Conn != "" {
+					res[i].Conn = d.Conn
+				}
+			}
+			return
+		}
+		seen[k] = len(res)
 		res = append(res, d)
 	}
-	for _, u := range USBUDIDs() {
-		if !seen[u] {
-			res = append(res, DiscoveredDevice{UDID: u})
-		}
+	for _, d := range core {
+		add(d)
+	}
+	for _, u := range usb {
+		add(DiscoveredDevice{UDID: u, Conn: "usb"})
+	}
+	for _, u := range network {
+		add(DiscoveredDevice{UDID: u, Conn: "wifi"})
 	}
 	return res
+}
+
+// muxPresence 判断设备是否在线、是否 USB 线、以及列表/云端 conn_type。
+// presentSet 含 USB+Network；usbSet 只有 USB。Network 隧道算在线，不算 USB。
+func muxPresence(udid string, usbSet, presentSet map[string]bool, usbTunnel, anyTunnel bool) (present, usb bool, conn string) {
+	usb = attachedUSB(udid, usbSet, usbTunnel)
+	present = usb || presentSet[udid] || anyTunnel
+	conn = "wifi"
+	if usb {
+		conn = "usb"
+	}
+	return present, usb, conn
 }
 
 func devicectlDevices() []DiscoveredDevice {

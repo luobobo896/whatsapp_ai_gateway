@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsPrivateIPv4(t *testing.T) {
@@ -37,17 +38,130 @@ func TestIOSMajor(t *testing.T) {
 
 func TestValidSerial(t *testing.T) {
 	cases := map[string]bool{
-		"C38SG3S0HG00": true,                        // 经典 12 位
-		"QP7X22L3JH":   true,                        // 旧款 11 位
-		"000081100001A1B2C3D4E5F6": true,            // 新式 24 位
-		"short1": false,                             // 过短
-		"": false,
-		"ERROR: Unable to connect": false,           // ideviceinfo 错误文本
-		"含中文AAA111": false, // 非字母数字
+		"C38SG3S0HG00":             true,  // 经典 12 位
+		"QP7X22L3JH":               true,  // 旧款 11 位
+		"000081100001A1B2C3D4E5F6": true,  // 新式 24 位
+		"short1":                   false, // 过短
+		"":                         false,
+		"ERROR: Unable to connect": false, // ideviceinfo 错误文本
+		"含中文AAA111":                false, // 非字母数字
 	}
 	for s, want := range cases {
 		if got := validSerial(s); got != want {
 			t.Errorf("validSerial(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+func TestParseIdeviceIDLines(t *testing.T) {
+	usb, net := parseIdeviceIDLines(""+
+		"5952499671171c733d6ef1345d4548a782686804 (Network)\n"+
+		"5060c403afdee4c15a0edeab69dba0524e2ce592 (Network)\n", "usb")
+	if len(usb) != 0 {
+		t.Fatalf("Network-only listing usb=%v, want empty", usb)
+	}
+	if len(net) != 2 || net[0] != "5952499671171c733d6ef1345d4548a782686804" || net[1] != "5060c403afdee4c15a0edeab69dba0524e2ce592" {
+		t.Fatalf("Network listing = %v", net)
+	}
+
+	usb, net = parseIdeviceIDLines(""+
+		"00008120-000865D90A10C01E (USB)\n"+
+		"4886579a97a96bad83b527862bab409b5a07c741 (Network)\n"+
+		"00008120-000865D90A10C01E (Network)\n", "usb")
+	if len(usb) != 1 || usb[0] != "00008120-000865D90A10C01E" {
+		t.Fatalf("mixed usb=%v", usb)
+	}
+	if len(net) != 2 {
+		t.Fatalf("mixed network=%v", net)
+	}
+
+	usb, net = parseIdeviceIDLines("4886579a97a96bad83b527862bab409b5a07c741\n", "usb")
+	if len(usb) != 1 || usb[0] != "4886579a97a96bad83b527862bab409b5a07c741" || len(net) != 0 {
+		t.Fatalf("bare -l usb=%v net=%v", usb, net)
+	}
+
+	usb, net = parseIdeviceIDLines("4886579a97a96bad83b527862bab409b5a07c741\n", "network")
+	if len(usb) != 0 || len(net) != 1 || net[0] != "4886579a97a96bad83b527862bab409b5a07c741" {
+		t.Fatalf("bare -n usb=%v net=%v", usb, net)
+	}
+}
+
+func TestMergeDiscoveredIncludesNetworkOnly(t *testing.T) {
+	got := mergeDiscovered(nil, nil, []string{"5060c403afdee4c15a0edeab69dba0524e2ce592"})
+	if len(got) != 1 || got[0].UDID != "5060c403afdee4c15a0edeab69dba0524e2ce592" || got[0].Conn != "wifi" {
+		t.Fatalf("network-only discover = %+v", got)
+	}
+}
+
+func TestMergeDiscoveredUSBWinsOverNetwork(t *testing.T) {
+	u := "5060c403afdee4c15a0edeab69dba0524e2ce592"
+	got := mergeDiscovered(
+		[]DiscoveredDevice{{UDID: u, Name: "Phone"}},
+		[]string{u},
+		[]string{u},
+	)
+	if len(got) != 1 || got[0].Conn != "usb" || got[0].Name != "Phone" {
+		t.Fatalf("usb+network merge = %+v", got)
+	}
+}
+
+func TestMuxPresenceNetworkOnlyIsWifi(t *testing.T) {
+	u := "5060c403afdee4c15a0edeab69dba0524e2ce592"
+	present, usb, conn := muxPresence(u, nil, map[string]bool{u: true}, false, false)
+	if !present || usb || conn != "wifi" {
+		t.Fatalf("present=%v usb=%v conn=%q", present, usb, conn)
+	}
+	present, usb, conn = muxPresence(u, map[string]bool{u: true}, map[string]bool{u: true}, false, true)
+	if !present || !usb || conn != "usb" {
+		t.Fatalf("usb cable present=%v usb=%v conn=%q", present, usb, conn)
+	}
+	present, usb, conn = muxPresence(u, nil, nil, false, true)
+	if !present || usb || conn != "wifi" {
+		t.Fatalf("network tunnel present=%v usb=%v conn=%q", present, usb, conn)
+	}
+}
+
+func TestDiscoverIncludesLiveNetworkUDIDs(t *testing.T) {
+	bin := libiDeviceBin("idevice_id")
+	if bin == "" {
+		t.Skip("no idevice_id")
+	}
+	out, ok := runIdeviceID(bin, "-n")
+	if !ok {
+		t.Skip("idevice_id -n failed")
+	}
+	_, want := parseIdeviceIDLines(out, "network")
+	if len(want) == 0 {
+		t.Skip("no Network devices")
+	}
+	usbmuxTypedCache.mu.Lock()
+	usbmuxTypedCache.at = time.Time{}
+	usbmuxTypedCache.mu.Unlock()
+	got := Discover()
+	have := map[string]bool{}
+	for _, d := range got {
+		have[udidKey(d.UDID)] = true
+	}
+	for _, u := range want {
+		if !have[udidKey(u)] {
+			t.Fatalf("Discover missing Network %s: %+v", u, got)
+		}
+	}
+	usbLive := map[string]bool{}
+	if outL, okL := runIdeviceID(bin, "-l"); okL {
+		listed, _ := parseIdeviceIDLines(outL, "usb")
+		for _, u := range listed {
+			usbLive[udidKey(u)] = true
+		}
+	}
+	for _, n := range want {
+		if usbLive[udidKey(n)] {
+			continue
+		}
+		for _, u := range USBUDIDs() {
+			if udidKey(u) == udidKey(n) {
+				t.Fatalf("USBUDIDs must not include Network-only %s", u)
+			}
 		}
 	}
 }

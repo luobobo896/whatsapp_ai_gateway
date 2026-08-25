@@ -1,14 +1,24 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/danielpaulus/go-ios/ios"
 	"howett.net/plist"
 )
+
+const (
+	domain            = "com.apple.mobile.wireless_lockdown"
+	needPasscodeToken = "NEED_DEVICE_PASSCODE"
+	passcodeRetry     = 2 * time.Second
+)
+
+var wifiKeys = []string{"EnableWifiConnections", "EnableWifiDebugging"}
 
 func itunesWirelessBuddyID() string {
 	appdata := os.Getenv("APPDATA")
@@ -30,8 +40,6 @@ func itunesWirelessBuddyID() string {
 	return ""
 }
 
-const domain = "com.apple.mobile.wireless_lockdown"
-
 func needsWirelessRebind(buddy, hostID string) bool {
 	h := strings.TrimSpace(strings.ToUpper(hostID))
 	if h == "" {
@@ -48,14 +56,17 @@ func buddyString(v any) string {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: wifi-lockdown <udid>")
+	wait := flag.Duration("wait", 60*time.Second, "wait for the iPhone lock-screen passcode prompt")
+	statusOnly := flag.Bool("status", false, "print EnableWifiConnections/EnableWifiDebugging without writing")
+	flag.Parse()
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: wifi-lockdown [-wait 60s] [-status] <udid> [WirelessBuddyID]")
 		os.Exit(2)
 	}
-	udid := os.Args[1]
+	udid := flag.Arg(0)
 	forcedBuddy := ""
-	if len(os.Args) >= 3 {
-		forcedBuddy = strings.TrimSpace(os.Args[2])
+	if flag.NArg() >= 2 {
+		forcedBuddy = strings.TrimSpace(flag.Arg(1))
 	}
 	dev, err := ios.GetDevice(udid)
 	if err != nil {
@@ -68,6 +79,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer ld.Close()
+	if *statusOnly {
+		for _, key := range wifiKeys {
+			v, err := ld.GetValueForDomain(key, domain)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "get %s: %v\n", key, err)
+				os.Exit(1)
+			}
+			fmt.Printf("%s %s=%v\n", udid, key, v)
+		}
+		return
+	}
 
 	hostID := forcedBuddy
 	if hostID == "" {
@@ -101,9 +123,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "bounce EnableWifiConnections: %v\n", err)
 		os.Exit(1)
 	}
+
+	prompted := false
+	onPasscode := func() {
+		if prompted {
+			return
+		}
+		prompted = true
+		fmt.Fprintln(os.Stderr, needPasscodeToken)
+		fmt.Fprintln(os.Stderr, "请在 iPhone 上输入锁屏密码以开启无线调试（密码只在手机上输入）")
+	}
+
 	for _, key := range []string{"EnableWifiDebugging", "EnableWifiConnections"} {
-		if err := ld.SetValueForDomain(key, domain, true); err != nil {
+		if err := ensureWifiKey(ld, key, *wait, onPasscode); err != nil {
 			fmt.Fprintf(os.Stderr, "set %s: %v\n", key, err)
+			if isPasscodeRequiredErr(err) || strings.Contains(err.Error(), needPasscodeToken) {
+				os.Exit(3)
+			}
 			os.Exit(1)
 		}
 	}
@@ -115,4 +151,56 @@ func main() {
 		}
 		fmt.Printf("%s %s=%v\n", udid, key, after)
 	}
+}
+
+func ensureWifiKey(ld *ios.LockDownConnection, key string, wait time.Duration, onPasscode func()) error {
+	if v, err := ld.GetValueForDomain(key, domain); err == nil && boolTrue(v) {
+		return nil
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := ld.SetValueForDomain(key, domain, true)
+		if err == nil {
+			return nil
+		}
+		if !isPasscodeRequiredErr(err) {
+			return err
+		}
+		if onPasscode != nil {
+			onPasscode()
+		}
+		if !time.Now().Before(deadline) {
+			return passcodeTimeoutErr()
+		}
+		time.Sleep(passcodeRetry)
+	}
+}
+
+func isPasscodeRequiredErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "PasscodeRequired") ||
+		strings.Contains(s, "PasswordProtected") ||
+		strings.Contains(s, "0xe80000ee") ||
+		strings.Contains(s, "e80000ee")
+}
+
+func boolTrue(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return strings.EqualFold(x, "true") || x == "1"
+	default:
+		return false
+	}
+}
+
+func passcodeTimeoutErr() error {
+	return fmt.Errorf("%s: 请在 iPhone 上输入锁屏密码以开启无线调试。若尚未设置锁屏密码，先到「设置 → 面容 ID 与密码 / 触控 ID 与密码」设置。密码只在手机上输入，不要发给电脑", needPasscodeToken)
 }

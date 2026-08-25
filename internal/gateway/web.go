@@ -295,46 +295,95 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			if port == 0 {
 				port = 8100
 			}
+			var body struct {
+				Via string `json:"via"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			via := parseActivateVia(r.URL.Query().Get("via"))
+			if strings.TrimSpace(body.Via) != "" {
+				via = parseActivateVia(body.Via)
+			}
 			dev := g.Cfg.Device(udid)
+			prevVia := activateViaUSB
+			if dev != nil {
+				prevVia = parseActivateVia(dev.ActivateVia)
+			}
 			if dev == nil {
-				dev = &Device{UDID: udid, Port: port, AutoReactivate: true}
+				dev = &Device{UDID: udid, Port: port, AutoReactivate: true, ActivateVia: via}
 				g.Cfg.Devices = append(g.Cfg.Devices, *dev)
+				dev = g.Cfg.Device(udid)
 				_ = g.Cfg.Save()
 			} else {
 				dev.AutoReactivate = true
+				dev.ActivateVia = via
 				_ = g.Cfg.Save()
 			}
-			// WDA 已健康（外部工具/手工启动的场景）：直接按已激活返回，
-			// 不再重复拉起 xcodebuild 与现有 WDA 抢 8100 端口。
-			// /status reachable via Wi-Fi IP or USB tunnel => already activated (no re-launch).
-			if dev.IP != "" || TunnelAddr(udid) != "" {
+			// 同一通道且 /status 已通：不必重拉。换通道必须先停再启，USB 会话会拆掉 Network。
+			sameVia := prevVia == via
+			if sameVia && (dev.IP != "" || TunnelAddr(udid) != "") {
 				if h := g.checkWDA(dev); h.OK {
 					applyHealth(dev, h)
 					if h.IP != "" {
 						_ = syncStoredWifiIP(dev, h.IP)
 					}
 					_ = g.Cfg.Save()
-					writeJSON(w, map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "already-running"})
+					writeJSON(w, map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via, "activate_via": via})
 					return
 				}
 			}
-			// 手动激活允许清除崩溃冷却（人工处理签名/信任问题后立即重试）。
-			g.WDA.ResetCrashCooldown(udid)
-			wifiIP := ""
-			if dev != nil {
-				wifiIP = dev.IP
+			if g.WDA.Running(udid) {
+				g.WDA.Stop(udid)
 			}
-			if err := g.WDA.Activate(udid, port, udid, wifiIP); err != nil {
-				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "激活失败：" + err.Error()})
+			if via == activateViaNetwork && !dev.WifiDebug {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]any{
+					"error": errNeedWifiAuth.Error(), "need_wifi_auth": true,
+				})
 				return
 			}
-			// wifi-runwda 先等 Network 再可能 USB 回退；成功标准是 /status，不是主机进程还在。
-			res := g.waitWDAReady(udid, port, 70*time.Second)
-			if ready, _ := res["ready"].(bool); ready {
+			dropTunnel(udid)
+			EnsureUSBTunnels(map[string]int{udid: port}, map[string]string{normalizeUDID(udid): via})
+			// 手动激活允许清除崩溃冷却（人工处理签名/信任问题后立即重试）。
+			g.WDA.ResetCrashCooldown(udid)
+			if err := g.WDA.Activate(udid, port, udid, via); err != nil {
+				body := map[string]any{"error": "激活失败：" + err.Error()}
+				if isDevicePasscodeErr(err) {
+					body["need_passcode"] = true
+				}
+				writeJSONStatus(w, http.StatusBadRequest, body)
+				return
+			}
+			res := g.waitWDAReady(udid, port, 70*time.Second, via)
+			ready, _ := res["ready"].(bool)
+			if ready {
 				g.tapAgentPermissions(udid, port)
 			}
 			g.KickWatchdog()
 			writeJSON(w, res)
+		case "authorize-wifi":
+			if r.Method != http.MethodPost {
+				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+				return
+			}
+			if !usbPresent(udid) {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errWifiAuthNeedUSB.Error()})
+				return
+			}
+			dev := g.Cfg.Device(udid)
+			if dev == nil {
+				g.Cfg.Devices = append(g.Cfg.Devices, Device{UDID: udid, Port: 8100})
+				dev = g.Cfg.Device(udid)
+			}
+			if err := enableWifiLockdown(udid); err != nil {
+				body := map[string]any{"error": err.Error()}
+				if isDevicePasscodeErr(err) {
+					body["need_passcode"] = true
+				}
+				writeJSONStatus(w, http.StatusBadRequest, body)
+				return
+			}
+			dev.WifiDebug = true
+			_ = g.Cfg.Save()
+			writeJSON(w, map[string]any{"udid": udid, "wifi_debug": true, "need_wifi_auth": false})
 		case "stop":
 			dev := g.Cfg.Device(udid)
 			if dev != nil {
@@ -344,6 +393,7 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				_ = g.Cfg.Save()
 			}
 			stopped := g.WDA.Stop(udid)
+			dropTunnel(udid)
 			writeJSON(w, map[string]any{"udid": udid, "status": "stopped", "auto_reactivate": false, "stopped": stopped})
 		case "delete":
 			// 仅未激活设备可物理删除；已激活必须先停止。USB 仍连接时下一轮发现会重新出现。
@@ -436,66 +486,77 @@ func csrfOrSameOrigin(auth *WebAuth, r *http.Request) bool {
 	return false
 }
 
-func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration) map[string]any {
+func (g *Gateway) waitWDAReady(udid string, port int, timeout time.Duration, via string) map[string]any {
+	via = parseActivateVia(via)
 	deadline := time.Now().Add(timeout)
+	probeOK := func(dev *Device) (WDAHealth, bool) {
+		if dev == nil {
+			return WDAHealth{}, false
+		}
+		if via == activateViaUSB && tunnelAddrForVia(udid, activateViaUSB) == "" {
+			return WDAHealth{}, false
+		}
+		if via == activateViaNetwork && tunnelAddrForVia(udid, activateViaNetwork) == "" && dev.IP == "" {
+			return WDAHealth{}, false
+		}
+		h := g.checkWDA(dev)
+		return h, h.OK
+	}
 	for time.Now().Before(deadline) {
 		dev := g.Cfg.Device(udid)
-		// Source of truth: /status reachable (USB tunnel or Wi-Fi IP). Host process may exit while XCTest stays up.
-		if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
-			h := g.checkWDA(dev)
-			if h.OK {
-				applyHealth(dev, h)
-				if h.IP != "" {
-					_ = syncStoredWifiIP(dev, h.IP)
-					_ = g.Cfg.Save()
-				}
-				via := "http"
-				if TunnelAddr(udid) != "" {
-					via = "usb"
-				}
-				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via}
-			}
-		}
-		// 主机进程在只表示还在等 Network / 正在拉起，不能当激活成功。
-		if !g.WDA.Running(udid) {
-			// Final HTTP check before declaring failure (process gone but phone WDA may still answer).
-			if dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
-				h := g.checkWDA(dev)
-				if h.OK {
-					applyHealth(dev, h)
-					if h.IP != "" {
-						_ = syncStoredWifiIP(dev, h.IP)
-						_ = g.Cfg.Save()
-					}
-					return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "http-orphan"}
-				}
-			}
-			return map[string]any{
-				"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true,
-				"message": "WDA 未能保持运行（进程已退出且 /status 不通）。请确认 USB 已插并信任此电脑；有 usbmux Network 时拔线后仍可走 Wi-Fi",
-			}
-		}
-		time.Sleep(400 * time.Millisecond)
-	}
-	// Timeout: one last health probe — if /status works, treat as success.
-	if dev := g.Cfg.Device(udid); dev != nil && (dev.IP != "" || TunnelAddr(udid) != "") {
-		h := g.checkWDA(dev)
-		if h.OK {
+		if h, ok := probeOK(dev); ok {
 			applyHealth(dev, h)
 			if h.IP != "" {
 				_ = syncStoredWifiIP(dev, h.IP)
 				_ = g.Cfg.Save()
 			}
-			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": "http"}
+			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via, "activate_via": via}
 		}
+		if !g.WDA.Running(udid) {
+			if h, ok := probeOK(dev); ok {
+				applyHealth(dev, h)
+				if h.IP != "" {
+					_ = syncStoredWifiIP(dev, h.IP)
+					_ = g.Cfg.Save()
+				}
+				return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via, "activate_via": via}
+			}
+			msg := "WDA 未能保持运行（进程已退出且本通道 /status 不通）"
+			if via == activateViaUSB {
+				msg += "。USB 激活需要 USB 连接，不会改走 Network"
+			} else {
+				msg += "。Network 激活需要 usbmux Network 或已记录的 Wi-Fi IP，不会回退 USB"
+			}
+			return map[string]any{
+				"udid": udid, "status": "failed", "ready": false, "auto_reactivate": true,
+				"message": msg,
+			}
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	if dev := g.Cfg.Device(udid); dev != nil {
+		if h, ok := probeOK(dev); ok {
+			applyHealth(dev, h)
+			if h.IP != "" {
+				_ = syncStoredWifiIP(dev, h.IP)
+				_ = g.Cfg.Save()
+			}
+			return map[string]any{"udid": udid, "status": "activated", "ready": true, "auto_reactivate": true, "via": via, "activate_via": via}
+		}
+	}
+	msg := "WDA 仍在启动，请稍候刷新"
+	if via == activateViaUSB {
+		msg = "USB 激活仍在启动；不会改走 Network"
+	} else {
+		msg = "Network 激活仍在启动（可能在等 usbmux Network 或手机锁屏密码）；不会回退 USB"
 	}
 	return map[string]any{
 		"udid": udid, "status": "starting", "ready": false, "auto_reactivate": true,
-		"message": "WDA 仍在启动（可能在等 usbmux Network），请稍候刷新；若一直未就绪，检查「在无线局域网上显示此 iPhone」与 Automation Running",
+		"message": msg, "via": via, "activate_via": via,
 	}
 }
 
-// ensureUSBTunnelsForList builds iproxy for configured + currently attached USB devices.
+// ensureUSBTunnelsForList builds iproxy for configured + currently attached USB/Network devices.
 
 // healthCheckStale reports whether last_health is missing or older than maxAgeSec (failed checks are retried).
 func healthCheckStale(h map[string]any, maxAgeSec float64) bool {
@@ -521,12 +582,8 @@ func (g *Gateway) ensureUSBTunnelsForList() {
 		}
 		ports[d.UDID] = p
 	}
-	for _, u := range USBUDIDs() {
-		if _, ok := ports[u]; !ok {
-			ports[u] = 8100
-		}
-	}
-	EnsureUSBTunnels(ports)
+	addUsbmuxTunnelPorts(ports)
+	EnsureUSBTunnels(ports, tunnelVias(g.Cfg.Devices))
 }
 
 // recognizeLiveWDA probes /status; when OK, marks device activated and stores Wi-Fi IP from ios.ip.
@@ -545,13 +602,17 @@ func (g *Gateway) recognizeLiveWDA(dev *Device) WDAHealth {
 }
 
 func (g *Gateway) deviceList() []map[string]any {
-	// USB 直连与 Wi-Fi（WDA 健康）实时同步；掉线设备不出现在列表。
-	usb := Discover()
-	usbSet := map[string]bool{}
+	// USB 直连与 usbmux Network / Wi-Fi（WDA 健康）实时同步；掉线设备不出现在列表。
+	found := Discover()
+	presentSet := map[string]bool{}
 	usbInfo := map[string]DiscoveredDevice{}
-	for _, d := range usb {
-		usbSet[d.UDID] = true
-		usbInfo[d.UDID] = d
+	for _, d := range found {
+		presentSet[udidKey(d.UDID)] = true
+		usbInfo[udidKey(d.UDID)] = d
+	}
+	usbSet := map[string]bool{}
+	for _, u := range USBUDIDs() {
+		usbSet[udidKey(u)] = true
 	}
 	g.ensureUSBTunnelsForList()
 	tunnelSet := liveGoIOSTunnelSet()
@@ -565,7 +626,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			continue
 		}
 		name, model := d.Name, d.Model
-		if info, ok := usbInfo[d.UDID]; ok {
+		if info, ok := usbInfo[udidKey(d.UDID)]; ok {
 			if name == "" {
 				name = info.Name
 			}
@@ -573,18 +634,15 @@ func (g *Gateway) deviceList() []map[string]any {
 				model = info.Model
 			}
 		}
-		attached := attachedUSB(d.UDID, usbSet, TunnelAddr(d.UDID) != "")
-		conn := "wifi"
-		if attached {
-			conn = "usb"
-		}
+		present, attached, conn := muxPresence(udidKey(d.UDID), usbSet, presentSet, usbTunnelAlive(d.UDID), TunnelAddr(d.UDID) != "")
 		// USB/tunnel/IP available but not yet healthy: probe /status (throttled) and adopt as activated when ready.
-		if (attached || TunnelAddr(d.UDID) != "" || d.IP != "") && !healthOK(d.LastHealth) && !g.Exec.IsBusy(d.UDID) && healthCheckStale(d.LastHealth, 8) {
+		// 用户点停止后不再用残留 /status 把设备救活。
+		if !userStopped(d, g.WDA.Running(d.UDID)) && (present || d.IP != "") && !healthOK(d.LastHealth) && !g.Exec.IsBusy(d.UDID) && healthCheckStale(d.LastHealth, 8) {
 			g.recognizeLiveWDA(d)
 		}
 		busy := g.Exec.IsBusy(d.UDID)
 		running := g.WDA.Running(d.UDID)
-		if deviceAbsent(attached, healthOK(d.LastHealth), busy, running) {
+		if deviceAbsent(present, healthOK(d.LastHealth), busy, running) {
 			continue
 		}
 		iosVer := d.IOSVersion
@@ -595,23 +653,35 @@ func (g *Gateway) deviceList() []map[string]any {
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": name, "model": model,
 			"ip": d.IP, "port": d.Port, "auto_reactivate": d.AutoReactivate,
-			"last_health": d.LastHealth, "ios_version": iosVer,
+			"activate_via": parseActivateVia(d.ActivateVia),
+			"last_health":  d.LastHealth, "ios_version": iosVer,
 			"configured": true, "usb": attached, "conn_type": conn,
 			"wda_running": wdaAppearsRunning(running, d.LastHealth),
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-			"deletable":    deviceDeletable(busy, healthOK(d.LastHealth), running),
-			"needs_tunnel": needTun,
-			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
-			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+			"deletable":      deviceDeletable(busy, healthOK(d.LastHealth), running),
+			"needs_tunnel":   needTun,
+			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
+			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+			"wifi_debug":     d.WifiDebug,
+			"need_wifi_auth": needWifiAuth(attached, d.WifiDebug),
 		})
-		emitted[d.UDID] = true
+		emitted[udidKey(d.UDID)] = true
 	}
-	for _, d := range usb {
-		if emitted[d.UDID] {
+	for _, d := range found {
+		if emitted[udidKey(d.UDID)] {
 			continue
 		}
-		// Unconfigured USB device: if phone WDA /status is already up, adopt it (IP + activated) instead of showing "activate".
-		dev := &Device{UDID: d.UDID, Port: 8100, Name: d.Name, Model: d.Model, AutoReactivate: true}
+		usb := d.Conn == "usb" || usbSet[udidKey(d.UDID)]
+		conn := "wifi"
+		if usb {
+			conn = "usb"
+		}
+		// Unconfigured device: if phone WDA /status is already up, adopt it (IP + activated) instead of showing "activate".
+		via := activateViaUSB
+		if !usb {
+			via = activateViaNetwork
+		}
+		dev := &Device{UDID: d.UDID, Port: 8100, Name: d.Name, Model: d.Model, AutoReactivate: true, ActivateVia: via}
 		h := g.recognizeLiveWDA(dev)
 		if h.OK {
 			if existing := g.Cfg.Device(d.UDID); existing == nil {
@@ -639,14 +709,17 @@ func (g *Gateway) deviceList() []map[string]any {
 			out = append(out, map[string]any{
 				"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": dev.Name, "model": dev.Model,
 				"ip": dev.IP, "port": dev.Port, "auto_reactivate": true, "configured": true,
-				"last_health": dev.LastHealth, "ios_version": iosVer,
-				"usb": true, "conn_type": "usb",
+				"activate_via": parseActivateVia(dev.ActivateVia),
+				"last_health":  dev.LastHealth, "ios_version": iosVer,
+				"usb": usb, "conn_type": conn,
 				"wda_running": true,
 				"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-				"deletable":    deviceDeletable(busy, true, true),
-				"needs_tunnel": needTun,
-				"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
-			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+				"deletable":      deviceDeletable(busy, true, true),
+				"needs_tunnel":   needTun,
+				"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
+				"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+				"wifi_debug":     dev.WifiDebug,
+				"need_wifi_auth": needWifiAuth(usb, dev.WifiDebug),
 			})
 			continue
 		}
@@ -657,14 +730,17 @@ func (g *Gateway) deviceList() []map[string]any {
 		out = append(out, map[string]any{
 			"udid": d.UDID, "serial": g.SerialOf(d.UDID), "name": d.Name, "model": d.Model,
 			"ip": "", "port": 8100, "auto_reactivate": false, "configured": false,
-			"usb": true, "conn_type": "usb", "wda_running": running,
+			"activate_via": parseActivateVia(dev.ActivateVia),
+			"usb":          usb, "conn_type": conn, "wda_running": running,
 			"last_health": dev.LastHealth,
 			"ios_version": iosVer,
 			"metrics":     g.Exec.Metrics(d.UDID), "busy": busy,
-			"deletable":    deviceDeletable(busy, healthOK(dev.LastHealth), running),
-			"needs_tunnel": needTun,
-			"tunnel_ready": needTun && tunnelSet[strings.ToUpper(d.UDID)],
-			"unplug_safe": unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+			"deletable":      deviceDeletable(busy, healthOK(dev.LastHealth), running),
+			"needs_tunnel":   needTun,
+			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
+			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
+			"wifi_debug":     false,
+			"need_wifi_auth": needWifiAuth(usb, false),
 		})
 	}
 	return out

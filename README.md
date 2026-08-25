@@ -23,10 +23,13 @@ Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、
 - iOS 16+ 必须打开开发者模式。未开时激活会直接报错，不会假装成功。
 - 老机型（40 位 UDID）激活用 `id=<udid>`；带连字符的新 UDID 用 `platform=iOS,id=` 且大写。
 - 版本分流（点激活自动做，不要人手跑文章里的命令）：
-  - **iOS 15–16 激活优先 usbmux Network**：`wifi-lockdown` + `wifi-runwda` 先等 Network 再 `ios runwda`，没有则 USB 回退（插着能激活，拔线会拆 XCTest）。有 Network 时 Automation Running 后可拔 USB，改走手机 Wi-Fi `:8100`。WDA 起来后只点「允许 / 本地网络」等权限键，并尝试自动信任开发者。
+  - **USB 与 Network 互斥**：点哪条通道就只走哪条，失败不回退。USB 走 `ios runwda` / xcodebuild / tidevice；Network（iOS 15–16）走 `wifi-runwda -require-network`。iOS 17+ 的 Network 激活会拒绝（不能改走 go-ios USB 隧道）。
+  - **首次授权只走 USB**：插着 USB、手机已设锁屏密码后，点「首次授权」才写 `EnableWifiConnections` / `EnableWifiDebugging`。Network 激活不写这两个开关。未授权则 Network 不可用。
+  - **发现**：`Discover()` 同时读 `idevice_id -l -n` 的 USB 与 Network，拔线后无线设备仍进列表。
   - **iOS 15–16**：Mac 补 Xcode 开发者镜像；Windows 仅在需要新装 IPA 时才 `ios image auto`。
-  - **iOS 17+**：先拉起 `ios tunnel start --userspace` 再 `runwda`。iOS 17.0–17.3 请升到 17.4+。
-- 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点激活。未装 Runner 会 `install`，再按上面分流拉起（不要 `wdaproxy`）。
+  - **iOS 17+ USB**：先拉起 `ios tunnel start --userspace` 再 `runwda`。iOS 17.0–17.3 请升到 17.4+。
+- 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点 USB 或 Network 激活。未装 Runner 会 `install`，再按所选通道拉起（不要 `wdaproxy`）。
+- **Mac 与 Windows 业务规则相同**（首次授权、USB/Network 互斥、发现、停止）。当前约定见 [docs/design/usb-network-activate.md](docs/design/usb-network-activate.md)。
 - 只有 Mac 上没有 `ios`/`tidevice` 时才回退 `xcodebuild`。不要在缺 iOS Platform 时反复 `build-for-testing`（会报 exit 70）。
 
 ## 快速开始（按系统分开）

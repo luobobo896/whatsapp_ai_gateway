@@ -171,17 +171,19 @@ func destinationForUDID(udid string) string {
 	return "id=" + udid
 }
 
-// Activate 激活单台 WDA。日常路径是 IPA：缺 Runner 就 install，再 tidevice/go-ios 拉起。
+// Activate 激活单台 WDA。via 为 usb 或 network，决定 XCTest 走哪条 usbmux 通道。
+// 日常路径是 IPA：缺 Runner 就 install，再 tidevice/go-ios 拉起。
 // 只有 auto 找不到协议工具时，Mac 才回退 xcodebuild。
-func (m *WDAManager) Activate(udid string, port int, reportedUDID, wifiIP string) error {
+func (m *WDAManager) Activate(udid string, port int, reportedUDID, via string) error {
 	if port == 0 {
 		port = 8100
 	}
 	if reportedUDID == "" {
 		reportedUDID = udid
 	}
+	via = parseActivateVia(via)
 	if m.Running(udid) {
-		return nil // 已在运行
+		return nil // 已在运行；换通道由调用方先 Stop
 	}
 	m.mu.Lock()
 	cool := m.crashUntil[udid]
@@ -191,8 +193,11 @@ func (m *WDAManager) Activate(udid string, port int, reportedUDID, wifiIP string
 	}
 
 	kind := resolveActivator(m.activator)
+	if via == activateViaNetwork && kind == activatorXcodebuild {
+		return fmt.Errorf("Network 激活不能走 xcodebuild（xcodebuild 走 USB，不会回退）")
+	}
 	if kind == activatorGoIOS || kind == activatorTidevice {
-		return m.activateProtocol(udid, port, reportedUDID, kind, wifiIP)
+		return m.activateProtocol(udid, port, reportedUDID, kind, via)
 	}
 	return m.activateXcodebuild(udid, port, reportedUDID)
 }

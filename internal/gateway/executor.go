@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -545,7 +544,7 @@ func (e *Executor) runUDID(udid string) {
 func (e *Executor) processTask(udid string, t TaskDispatch) {
 	start := e.now()
 	dev := e.cfg.Device(udid)
-	env := taskEnv{Udid: udid, ConnType: connTypeOf(udid)}
+	env := taskEnv{Udid: udid, ConnType: connTypeOfDevice(dev)}
 	if dev != nil {
 		env.Serial, env.DeviceName = dev.Serial, dev.Name
 	}
@@ -617,7 +616,11 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	if maxFails <= 0 {
 		maxFails = 5
 	}
-	client := wda.NewClient(resolveWDABaseURL(udid, ip, port), 40*time.Second)
+	via := activateViaUSB
+	if d := e.cfg.Device(udid); d != nil {
+		via = parseActivateVia(d.ActivateVia)
+	}
+	client := wda.NewClient(resolveWDABaseURL(udid, ip, port, via), 40*time.Second)
 	consecFails := 0
 	// 整单共用一条 WDA 会话：CreateSession 冷启动 WhatsApp 要十数秒，
 	// 每条都建/拆就会把竞品 1s 级连发打成 20s+。聊天列表路径已经复用会话。
@@ -867,25 +870,13 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 	}
 }
 
-// deviceReachable 任务开始前快速探活：活隧道优先，不通则回退 Wi-Fi（与 checkWDA 一致）。
-// 禁止只信 wdaBaseURLFor：拔线后死隧道短暂残留时会把本可走 Wi-Fi 的群发拒掉。
+// deviceReachable 任务开始前只探本通道，不跨 USB / Network 兜底。
 func (e *Executor) deviceReachable(udid, ip string, port int) bool {
-	if a := TunnelAddr(udid); a != "" {
-		host, portStr, err := net.SplitHostPort(a)
-		if err == nil {
-			p, _ := strconv.Atoi(portStr)
-			if CheckWDA(host, p, 4*time.Second).OK {
-				return true
-			}
-		}
+	via := activateViaUSB
+	if d := e.cfg.Device(udid); d != nil {
+		via = parseActivateVia(d.ActivateVia)
 	}
-	if ip == "" {
-		return false
-	}
-	if port == 0 {
-		port = 8100
-	}
-	return CheckWDA(ip, port, 4*time.Second).OK
+	return wdaProbeVia(udid, ip, port, via).OK
 }
 
 func (e *Executor) sendChatList(client *wda.Client, content string, assist wda.SendAssist) (int, []string, error) {
@@ -948,14 +939,12 @@ func (e *Executor) cancelRemainingReason(env taskEnv, t TaskDispatch, rest []Tas
 	}
 }
 
-// connTypeOf 返回设备当前连接方式：USB 直连为 "usb"，否则视为 Wi-Fi 通道 "wifi"。
-func connTypeOf(udid string) string {
-	for _, u := range USBUDIDs() {
-		if u == udid {
-			return "usb"
-		}
+// connTypeOfDevice 按激活通道上报：Network → wifi，USB → usb。不按当前是否插线混报。
+func connTypeOfDevice(d *Device) string {
+	if d != nil && parseActivateVia(d.ActivateVia) == activateViaNetwork {
+		return "wifi"
 	}
-	return "wifi"
+	return "usb"
 }
 
 // interrupted 等待 d 时长，若期间被取消返回 true。
