@@ -3,7 +3,8 @@
 日期：2026-08-25  
 最后验证：2026-08-25，`go test ./internal/gateway` 通过。
 
-USB 与 Network 是两条独立通道：互斥、不混用、不自动兜底。
+USB 与 Network 是两条独立通道：互斥、不混用、不自动兜底。  
+**Mac 与 Windows 业务规则相同**（首次授权、通道互斥、发现、停止）。平台只差实现：usbmux 套接字 / `:27015`、iproxy 端口参数写法、Mac 可 `killall usbmuxd` 而 Windows 不能照搬重启 AMDS。
 
 ## 首次授权（写无线开关）
 

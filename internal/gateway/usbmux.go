@@ -64,6 +64,19 @@ func bundleLibFallback() []string {
 	return nil
 }
 
+// iproxyForwardArgs Mac/Windows 同一套通道选择；仅端口参数格式不同。
+// Network 通道带 -n，不因 Windows 就改走 USB 隧道。
+func iproxyForwardArgs(udid string, local, device int, network bool) []string {
+	args := []string{"-u", udid}
+	if network {
+		args = append(args, "-n")
+	}
+	if runtime.GOOS == "windows" {
+		return append(args, strconv.Itoa(local), strconv.Itoa(device))
+	}
+	return append(args, fmt.Sprintf("%d:%d", local, device))
+}
+
 func freeLocalPort() (int, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -164,14 +177,14 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 			useNetwork = !usb[udid] && netSet[udid]
 		}
 		if useNetwork {
-			if !netSet[udid] || runtime.GOOS == "windows" {
+			if !netSet[udid] {
 				continue
 			}
 			local, err := freeLocalPort()
 			if err != nil {
 				continue
 			}
-			args := []string{"-u", udid, "-n", fmt.Sprintf("%d:%d", local, devPort)}
+			args := iproxyForwardArgs(udid, local, devPort, true)
 			cmd := exec.Command(bin, args...)
 			cmd.Env = append(os.Environ(), bundleLibFallback()...)
 			if err := cmd.Start(); err != nil {
@@ -198,14 +211,7 @@ func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {
 		if err != nil {
 			continue
 		}
-		args := []string{"-u", udid}
-		if runtime.GOOS == "windows" {
-			// Windows 版 libimobiledevice iproxy 只认两个独立参数，
-			// "LOCAL:DEVICE" 单参数会打印 usage 后立即退出（macOS 版兼容两种）。
-			args = append(args, strconv.Itoa(local), strconv.Itoa(devPort))
-		} else {
-			args = append(args, fmt.Sprintf("%d:%d", local, devPort))
-		}
+		args := iproxyForwardArgs(udid, local, devPort, false)
 		cmd := exec.Command(bin, args...)
 		cmd.Env = append(os.Environ(), bundleLibFallback()...)
 		if err := cmd.Start(); err != nil {

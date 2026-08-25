@@ -17,6 +17,20 @@ func stopUSBTunnelsForTest() {
 	usbTunnels.misses = map[string]int{}
 }
 
+func TestIproxyForwardArgsSameChannelOnBothOS(t *testing.T) {
+	usb := iproxyForwardArgs("u1", 8101, 8100, false)
+	net := iproxyForwardArgs("u1", 8101, 8100, true)
+	if !containsExact(usb, "-u") || !containsExact(usb, "u1") {
+		t.Fatalf("usb args=%v", usb)
+	}
+	if containsExact(usb, "-n") {
+		t.Fatalf("USB tunnel must not pass -n: %v", usb)
+	}
+	if !containsExact(net, "-n") {
+		t.Fatalf("Network tunnel must pass -n on this OS too: %v", net)
+	}
+}
+
 func TestUSBTunnelsToDropAfterEmptyDiscover(t *testing.T) {
 	misses := map[string]int{}
 	procs := map[string]*usbTunnelProc{
