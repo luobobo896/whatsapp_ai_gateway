@@ -128,7 +128,7 @@ wifi-lockdown <udid>
 软禁用 Apple USB PnP 设备：**不能**让 usbmux 丢掉 USB 行，不能代替拔线。
 
 Buddy 改成 iTunes ID **之前**拔过一次：`-n` 仍空。  
-Buddy 对齐 **之后**的拔线观察：文档写入时尚未做（软件拔线失败）。
+Buddy 对齐之后：`Ctrl+E` 没弹出；COM `EjectIPod()` 让 iPhone 从 iTunes 源列表消失 40s，**没有**从 Wi-Fi 回来；usbmux 全程仍是 USB，`-n` 空（线还插着）。软弹出 ≠ Network。物理拔线观察仍待做。
 
 ---
 
@@ -145,6 +145,7 @@ Buddy 对齐 **之后**的拔线观察：文档写入时尚未做（软件拔线
 | 商店版 iTunes | 与 AMDS 冲突 |
 | 桌面 iTunes 勾 Wi-Fi 同步并应用 | UI 已勾；插线 30–40s 仍 USB；对齐前拔线 `-n` 空 |
 | 软 Disable-PnpDevice | usbmux 仍报 USB |
+| iTunes COM `EjectIPod()` | iTunes 里设备消失 40s 未从 Wi-Fi 回来；usbmux 仍 USB，`-n` 空 |
 
 Windows 网关「立即修复」：**拒绝重启 AMDS**，返回明确错误。
 
