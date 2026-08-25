@@ -11,13 +11,21 @@ USB 与 Network 是两条独立通道：互斥、不混用、不自动兜底。
 写 `EnableWifiConnections` / `EnableWifiDebugging` **只允许 USB**：
 
 1. 必须插着 USB。
-2. 手机已设置锁屏密码。
-3. 管理页点「首次授权」：`POST /api/devices/{udid}/authorize-wifi`。
-4. 手机会再弹密码框，只在手机上输入。请求体不接受锁屏密码，配置和日志也不存。
+2. 手机已设置锁屏密码，场内统一为 `0000`（四个零）。
+3. 管理页点「首次授权」：弹框说明要求并输入 `0000` 确认，
+   再 `POST /api/devices/{udid}/authorize-wifi`（请求体 `{"passcode":"0000"}`，后端校验）。
+4. 后端先 `wifi-lockdown -status` 读 `EnableWifiConnections` / `EnableWifiDebugging`：
+   - 两开关均 `true` → 跳过写入，直接标记已授权（幂等，不重复弹手机密码框）；
+   - 否则 `wifi-lockdown` 写开关，手机会弹密码框，在手机上输入 `0000` 完成。
 
 没有 USB，授权接口失败。Network 激活不写这两个开关。未授权则 Network 按钮不可用。
 
 ## 激活 / 停止 / 探活
+
+Network 激活前，管理页弹出密码输入框，输入 `0000` 确认后调用
+`POST /api/devices/{udid}/activate?via=network`（请求体 `{"via":"network","passcode":"0000"}`），
+后端对 `via=network` 校验 `passcode` 必须为 `0000`，通过后才拉起 WDA。
+USB 激活不要求该密码框。停止操作关闭主机 WDA 进程并拆除本通道隧道。
 
 | 动作 | USB | Network |
 |---|---|---|

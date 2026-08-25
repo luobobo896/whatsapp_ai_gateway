@@ -296,12 +296,20 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				port = 8100
 			}
 			var body struct {
-				Via string `json:"via"`
+				Via      string `json:"via"`
+				Passcode string `json:"passcode"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			via := parseActivateVia(r.URL.Query().Get("via"))
 			if strings.TrimSpace(body.Via) != "" {
 				via = parseActivateVia(body.Via)
+			}
+			// Network 激活前必须在页面输入统一锁屏密码 0000（业务规则校验）。
+			if via == activateViaNetwork {
+				if err := requirePasscode0000(body.Passcode); err != nil {
+					writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
 			}
 			dev := g.Cfg.Device(udid)
 			prevVia := activateViaUSB
@@ -364,6 +372,14 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 				writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 				return
 			}
+			var body struct {
+				Passcode string `json:"passcode"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if err := requirePasscode0000(body.Passcode); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
 			if !usbPresent(udid) {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errWifiAuthNeedUSB.Error()})
 				return
@@ -372,6 +388,14 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			if dev == nil {
 				g.Cfg.Devices = append(g.Cfg.Devices, Device{UDID: udid, Port: 8100})
 				dev = g.Cfg.Device(udid)
+			}
+			// 手机端两开关均已开启：跳过写入，避免重复弹密码框。
+			if conn, dbg, ok := wifiLockdownStatus(udid); alreadyWifiAuthorized(conn, dbg, ok) {
+				dev.WifiDebug = true
+				_ = g.Cfg.Save()
+				slog.Info("wifi already authorized, skipped write", "udid", shortOf(udid))
+				writeJSON(w, map[string]any{"udid": udid, "wifi_debug": true, "already_authorized": true, "need_wifi_auth": false})
+				return
 			}
 			if err := enableWifiLockdown(udid); err != nil {
 				body := map[string]any{"error": err.Error()}
@@ -383,7 +407,7 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			}
 			dev.WifiDebug = true
 			_ = g.Cfg.Save()
-			writeJSON(w, map[string]any{"udid": udid, "wifi_debug": true, "need_wifi_auth": false})
+			writeJSON(w, map[string]any{"udid": udid, "wifi_debug": true, "already_authorized": false, "need_wifi_auth": false})
 		case "stop":
 			dev := g.Cfg.Device(udid)
 			if dev != nil {

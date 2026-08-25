@@ -32,7 +32,27 @@ const (
 
 	// wifiLockdownTimeout 覆盖 wifi-lockdown 默认 60s 等手机输锁屏密码。
 	wifiLockdownTimeout = 75 * time.Second
+	// wifiLockdownStatusTimeout 只读查询两开关用短超时（USB 在线时秒回）。
+	wifiLockdownStatusTimeout = 15 * time.Second
 )
+
+// passcode0000 场内统一 iPhone 锁屏密码：首次授权与 Network 激活都必须确认该密码。
+// 密码本身在手机上设置/解锁，页面输入只是业务规则校验，不读取手机真实密码。
+const passcode0000 = "0000"
+
+// requirePasscode0000 校验页面输入的锁屏密码是否为统一值 0000。
+func requirePasscode0000(passcode string) error {
+	if passcode != passcode0000 {
+		return fmt.Errorf("请输入手机锁屏密码 %s（四个零）", passcode0000)
+	}
+	return nil
+}
+
+// alreadyWifiAuthorized 手机端 EnableWifiConnections/EnableWifiDebugging 均开启
+// 且状态查询成功时视为已授权，跳过写流程（首次授权幂等）。
+func alreadyWifiAuthorized(connections, debugging, statusOK bool) bool {
+	return statusOK && connections && debugging
+}
 
 // errDevicePasscodeNeeded 写 EnableWifiDebugging 时 iPhone 弹出锁屏密码框，用户尚未在手机上输入。
 var errDevicePasscodeNeeded = errors.New("请看 iPhone：若弹出锁屏密码框，请在手机上输入以开启无线调试。若尚未设置锁屏密码，先到「设置 → 面容 ID 与密码 / 触控 ID 与密码」设置 4 位数字密码。密码只在手机上输入，不要发给电脑")
@@ -87,6 +107,21 @@ func autoActivatorFor(hasGoIOS, hasTidevice bool, goos string) string {
 // 必须已插 USB，且手机已设锁屏密码；写 Debugging 时手机再弹密码框。密码不进本机。
 func enableWifiLockdown(udid string) error {
 	return enableWifiLockdownOn(udid, usbPresent(udid))
+}
+
+// wifiLockdownStatus 只读查询手机当前 EnableWifiConnections/EnableWifiDebugging
+// （需 USB；查询失败返回 ok=false，调用方回退到写流程）。
+func wifiLockdownStatus(udid string) (connections, debugging bool, ok bool) {
+	bin := lookTool("wifi-lockdown", "wifi-lockdown.exe")
+	if bin == "" {
+		return false, false, false
+	}
+	out, err := runTool(bin, []string{"-status", udid}, wifiLockdownStatusTimeout)
+	if err != nil {
+		return false, false, false
+	}
+	connections, debugging = parseWifiLockdownStatus(out)
+	return connections, debugging, true
 }
 
 func enableWifiLockdownOn(udid string, usb bool) error {

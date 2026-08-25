@@ -152,6 +152,32 @@ func TestParseWifiLockdownStatus(t *testing.T) {
 	}
 }
 
+func TestRequirePasscode0000(t *testing.T) {
+	if err := requirePasscode0000("0000"); err != nil {
+		t.Fatalf("0000 must pass, got %v", err)
+	}
+	for _, bad := range []string{"", "1234", "000", "00000", "abcd"} {
+		if err := requirePasscode0000(bad); err == nil {
+			t.Fatalf("must reject passcode %q", bad)
+		}
+	}
+}
+
+func TestAlreadyWifiAuthorized(t *testing.T) {
+	if !alreadyWifiAuthorized(true, true, true) {
+		t.Fatal("both flags true with ok status must be authorized")
+	}
+	if alreadyWifiAuthorized(true, false, true) {
+		t.Fatal("debugging false must not skip")
+	}
+	if alreadyWifiAuthorized(false, true, true) {
+		t.Fatal("connections false must not skip")
+	}
+	if alreadyWifiAuthorized(true, true, false) {
+		t.Fatal("status read failure must not skip (fall back to write)")
+	}
+}
+
 func TestNeedWifiAuth(t *testing.T) {
 	if !needWifiAuth(true, false) {
 		t.Fatal("USB first connect without wifi debug needs auth")

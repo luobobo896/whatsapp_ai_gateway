@@ -7,7 +7,7 @@
 | `ios` | go-ios 1.3.2，`runwda` / `tunnel start` / `install` | macOS universal (arm64 + x86_64) |
 | `ios.exe` | 同上 | Windows amd64 |
 | `wifi-runwda` / `wifi-runwda.exe` | 必须走 usbmux Network 拉起 WDA（iOS 15–16）；网关带 `-require-network`，没有 Network 则失败、不回退 USB。Mac/Windows 同一套规则 | Mac arm64 / Windows amd64 |
-| `wifi-lockdown` / `wifi-lockdown.exe` | 仅 USB 下写 `EnableWifiConnections` / `EnableWifiDebugging`（`-status` 只读）。Mac/Windows 同一套授权规则；Windows 额外按 iTunes Buddy 重绑。密码不进电脑 | Mac arm64 / Windows amd64 |
+| `wifi-lockdown` / `wifi-lockdown.exe` | 仅 USB 下写 `EnableWifiConnections` / `EnableWifiDebugging`（`-status` 只读）。Mac/Windows 同一套授权规则；Windows 额外按 iTunes Buddy 重绑。场内统一锁屏密码 `0000`，页面输入仅做业务规则确认，实际解锁仍在手机上进行 | Mac arm64 / Windows amd64 |
 | `netmuxd.exe` + `netmuxd-LICENSE.txt` | Windows 专用：Apple usbmuxd 重实现（LGPL-2.1）。mDNS 发现无线设备 + heartbeat 保活，shim 模式把 USB 转发给 AMDS，让无线 WDA 拔掉 USB 后不断开 | Windows amd64 |
 | `wda.ipa` | 已签名的 WebDriverAgent Runner，激活时自动安装 | 所有主机。个人包描述文件须含该机 UDID；企业 In-House 包不绑设备 |
 | `easytier/easytier-core`、`easytier-cli` | 可选组网；打 Mac DMG 需要 | macOS arm64 |
