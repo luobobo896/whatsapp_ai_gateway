@@ -96,6 +96,10 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	} else if err := ld.SetValueForDomain("EnableWifiConnections", domain, false); err != nil {
+		// Buddy 已对齐时也要 bounce 一次，否则 _apple-mobdev2 可能仍宣告已关闭的旧端口。
+		fmt.Fprintf(os.Stderr, "bounce EnableWifiConnections: %v\n", err)
+		os.Exit(1)
 	}
 	for _, key := range []string{"EnableWifiDebugging", "EnableWifiConnections"} {
 		if err := ld.SetValueForDomain(key, domain, true); err != nil {

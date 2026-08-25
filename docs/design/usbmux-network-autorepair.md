@@ -179,7 +179,7 @@ idevice_id -l -n | grep '(Network)'
 - **只要桌面版 iTunes**（`C:\Program Files\iTunes\iTunes.exe`）+ **Apple Mobile Device Support**（服务 `Apple Mobile Device Service`，`:27015`）。
 - **不要**同时装 Microsoft Store 版 iTunes：会与 Win32 AMDS 冲突，启动时要求卸载另一套，并可能占住 `:27015`。
 - `ios.exe` / `tidevice` / `idevice_id` 读的是 AMDS，不是商店版进程。
-- 手机：USB 配对、解锁、与 **这台 Windows** 同一 Wi-Fi；`wifi-lockdown` 写入 `EnableWifiConnections` + `EnableWifiDebugging`。
+- 手机：USB 配对、解锁、与 **这台 Windows** 同一 Wi-Fi；`wifi-lockdown` 写入 `EnableWifiConnections` + `EnableWifiDebugging`，并把 `WirelessBuddyID` 写成 **iTunes** 的 Buddy（不是 pair `HostID`）。
 
 ### 11.2 修复动作差异
 
@@ -199,7 +199,7 @@ wifi-lockdown <udid>
 
 ### 11.4 实机结论（2026-08-25）
 
-在桌面 iTunes 勾选「通过 Wi-Fi 同步」并应用后：插着 USB 只有 USB 行；拔线后 `-n` 仍空。`WirelessBuddyID` 仍指向 Mac。Windows 上不能把「修复」宣传成可拔线。
+桌面 iTunes 已勾「通过 Wi-Fi 同步」、Buddy 已改成这台 Windows 的 iTunes `WirelessBuddyID`、`_apple-mobdev2` 能从 Windows 组播看到、`:62078` 通：插着 USB 仍只有 USB 行。iTunes 勾选 ≠ usbmux `ConnectionType=Network`。Windows 上不能把「修复」宣传成可拔线。细节按系统写在 [docs/testing/2026-08-25-windows-connection-type-network.md](../testing/2026-08-25-windows-connection-type-network.md)。
 
 ## 12. 回滚
 
