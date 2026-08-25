@@ -738,7 +738,10 @@ function deviceCard(d){
     // /status 已通：可停，也可换另一条通道（USB / Network 互不挡）。
     actions = `<button class="btn sm ghost danger" onclick="stop('${d.udid}')">停止</button>`;
     if (d.activate_via === 'network') {
-      actions += ` <button class="btn sm" onclick="act('${d.udid}','usb')">改 USB</button>`;
+      // Wi-Fi/Network 类型：只有在 USB 实际在线时才提供「改 USB」，否则点击会因无 USB 报错
+      if (d.usb) {
+        actions += ` <button class="btn sm" onclick="act('${d.udid}','usb')">改 USB</button>`;
+      }
     } else if (!d.wifi_debug) {
       if (d.usb || d.need_wifi_auth) {
         actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
@@ -748,14 +751,29 @@ function deviceCard(d){
       actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">改 Network</button>`;
     }
   } else {
-    actions = `<button class="btn sm" onclick="act('${d.udid}','usb')">USB 激活</button>`;
-    if (!d.wifi_debug) {
-      if (d.usb || d.need_wifi_auth) {
-        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
+    // Wi-Fi/Network 类型（activate_via=network，或当前未接 USB）：不显示「USB 激活」，
+    // 避免点了因无 USB 连接而报错；主按钮改为 Network 激活。
+    const netVia = d.activate_via === 'network' || !d.usb;
+    if (netVia) {
+      actions = '';
+      if (!d.wifi_debug) {
+        if (d.usb || d.need_wifi_auth) {
+          actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
+        }
+        actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
+      } else {
+        actions += `<button class="btn sm" onclick="act('${d.udid}','network')">Network 激活</button>`;
       }
-      actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
     } else {
-      actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">Network 激活</button>`;
+      actions = `<button class="btn sm" onclick="act('${d.udid}','usb')">USB 激活</button>`;
+      if (!d.wifi_debug) {
+        if (d.usb || d.need_wifi_auth) {
+          actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
+        }
+        actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
+      } else {
+        actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">Network 激活</button>`;
+      }
     }
   }
   actions += ` <button class="btn sm ghost" onclick="showDeviceItems('${d.udid}')">明细</button>`;
