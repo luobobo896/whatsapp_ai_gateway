@@ -342,7 +342,7 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			if g.WDA.Running(udid) {
 				g.WDA.Stop(udid)
 			}
-			if via == activateViaNetwork && !dev.WifiDebug {
+			if via == activateViaNetwork && !wifiAuthorized(udid, dev.WifiDebug) {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]any{
 					"error": errNeedWifiAuth.Error(), "need_wifi_auth": true,
 				})
@@ -712,7 +712,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 			"wifi_debug":     d.WifiDebug,
-			"need_wifi_auth": needWifiAuth(attached, d.WifiDebug),
+			"need_wifi_auth": needWifiAuth(attached, wifiAuthorized(d.UDID, d.WifiDebug)),
 		})
 		emitted[udidKey(d.UDID)] = true
 	}
@@ -768,7 +768,7 @@ func (g *Gateway) deviceList() []map[string]any {
 				"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 				"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 				"wifi_debug":     dev.WifiDebug,
-				"need_wifi_auth": needWifiAuth(usb, dev.WifiDebug),
+				"need_wifi_auth": needWifiAuth(usb, wifiAuthorized(d.UDID, dev.WifiDebug)),
 			})
 			continue
 		}
@@ -789,7 +789,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 			"wifi_debug":     false,
-			"need_wifi_auth": needWifiAuth(usb, false),
+			"need_wifi_auth": needWifiAuth(usb, wifiAuthorized(d.UDID, false)),
 		})
 	}
 	return out

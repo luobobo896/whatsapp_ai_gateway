@@ -182,6 +182,14 @@ func hasMuxNetwork(udid string) bool {
 	return false
 }
 
+// wifiAuthorized 判断无线调试是否已授权、可直接 Network 激活/自愈：
+// USB 首次授权留下的 WifiDebug 标记，或 usbmux 已有 ConnectionType=Network 条目
+// ——本机能以 Network 发现设备，说明配对记录仍在、此前已授权过，无需再插 USB
+// 重复授权。
+func wifiAuthorized(udid string, flagged bool) bool {
+	return flagged || hasMuxNetwork(udid)
+}
+
 func parseWifiLockdownStatus(raw string) (connections, debugging bool) {
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)

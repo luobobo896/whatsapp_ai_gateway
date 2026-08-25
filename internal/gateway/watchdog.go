@@ -181,7 +181,7 @@ func (g *Gateway) watchOnce() {
 		g.reportCloudStatusIfChanged(dev, usbCableConnected(dev.UDID), errText(h.Error))
 		if !h.OK && dev.AutoReactivate && !g.WDA.Running(dev.UDID) {
 			via := parseActivateVia(dev.ActivateVia)
-			if via == activateViaNetwork && !dev.WifiDebug {
+			if via == activateViaNetwork && !wifiAuthorized(dev.UDID, dev.WifiDebug) {
 				if prevOK {
 					slog.Warn("skip Network reactivate: first-connect wifi auth missing", "udid", shortOf(dev.UDID))
 				}

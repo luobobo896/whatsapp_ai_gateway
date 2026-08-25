@@ -46,6 +46,33 @@ func TestParseUsbmuxConnectionTypesMalformed(t *testing.T) {
 	}
 }
 
+func TestParseUsbmuxNetworkUDIDsKeepsOriginalCase(t *testing.T) {
+	raw := `{"deviceList":[{"Udid":"5060c403afdee4c15a0edeab69dba0524e2ce592","ConnectionType":"USB"},{"Udid":"5060c403afdee4c15a0edeab69dba0524e2ce592","ConnectionType":"Network"},{"Udid":"4886579a97a96bad83b527862bab409b5a07c741","ConnectionType":"Network"},{"Udid":"00008120-000865D90A10C01E","ConnectionType":"Network"}]}`
+	got := parseUsbmuxNetworkUDIDs(raw)
+	if got == nil {
+		t.Fatal("parse returned nil")
+	}
+	// iOS <16 的 40-hex UDID 必须保持小写原文。
+	if len(got) != 3 ||
+		got[0] != "5060c403afdee4c15a0edeab69dba0524e2ce592" ||
+		got[1] != "4886579a97a96bad83b527862bab409b5a07c741" ||
+		got[2] != "00008120-000865D90A10C01E" {
+		t.Fatalf("network udids = %v", got)
+	}
+	for _, u := range got {
+		// iOS <16 的 40-hex 必须保持小写原文；带连字符的 iOS 16+ 格式保持上报原样。
+		if !strings.Contains(u, "-") && u != strings.ToLower(u) {
+			t.Fatalf("iOS<16 UDID must stay lowercase: %q", u)
+		}
+	}
+}
+
+func TestParseUsbmuxNetworkUDIDsMalformed(t *testing.T) {
+	if got := parseUsbmuxNetworkUDIDs("not json at all"); got != nil {
+		t.Fatalf("malformed should return nil, got %v", got)
+	}
+}
+
 func TestUnplugSafeFor(t *testing.T) {
 	udid := "5952499671171C733D6EF1345D4548A782686804"
 	tunnelSet := map[string]bool{"00008120-000865D90A10C01E": true}

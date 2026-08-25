@@ -199,6 +199,13 @@ func TestWifiDebugReadyOnlyFlag(t *testing.T) {
 	}
 }
 
+func TestWifiAuthorizedFlagBypassesLiveProbe(t *testing.T) {
+	// USB 首次授权标记本身就足够，不触发 hasMuxNetwork 的实时探测。
+	if !wifiAuthorized("no-such-udid", true) {
+		t.Fatal("wifiAuthorized must accept USB 授权标记")
+	}
+}
+
 func TestEnableWifiLockdownRequiresUSB(t *testing.T) {
 	err := enableWifiLockdownOn("ffffffffffffffffffffffffffffffffffffffff", false)
 	if !errors.Is(err, errWifiAuthNeedUSB) {
@@ -348,7 +355,7 @@ func TestProtocolCmdWindowsNetmuxdNetworkUsesGoIOS(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows netmuxd 路径")
 	}
-	t.Setenv("USBMUXD_SOCKET_ADDRESS", "tcp://127.0.0.1:27016")
+	t.Setenv("USBMUXD_SOCKET_ADDRESS", "127.0.0.1:27016")
 	t.Setenv("WDA_GATEWAY_RESOURCES", "")
 	m := NewWDAManager("", "", "")
 	udid := "4886579a97a96bad83b527862bab409b5a07c741"

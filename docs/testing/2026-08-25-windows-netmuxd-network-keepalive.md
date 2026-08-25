@@ -29,10 +29,15 @@ lockdown 会话的保活机制：
 
 ```bat
 netmuxd.exe --port 27016 --upstream-usbmuxd 127.0.0.1:27015
-set USBMUXD_SOCKET_ADDRESS=tcp://127.0.0.1:27016
+set USBMUXD_SOCKET_ADDRESS=127.0.0.1:27016
 ```
 
 不杀 AMDS、不重启 Apple 服务（USB 设备不会从列表消失）。
+
+`USBMUXD_SOCKET_ADDRESS` 必须是裸 `host:port`，不能带 `tcp://` 前缀：
+libimobiledevice（`idevice_id` / `ideviceinfo` / `iproxy`）会把 scheme 当主机名导致
+`socket_connect: getaddrinfo` 失败、USB/Network 全部消失；go-ios 两种格式都接受。
+该变量同时喂给 libimobiledevice 与 go-ios，让两者都看到 netmuxd 的 USB + Network 条目。
 
 ## 网关集成
 
@@ -45,7 +50,8 @@ set USBMUXD_SOCKET_ADDRESS=tcp://127.0.0.1:27016
   （无线 testmanagerd），不再套 wifi-runwda 双层代理。
 - `web.go` / `watchdog.go`：netmuxd mDNS 发现的 Network 设备视为在线（列表可见、防误删）；
   看护的在线集合合并 go-ios 的 `ios list --details`（`usbmuxNetworkUDIDs`，1s 缓存），
-  `hasMuxNetwork` 在 Windows 上同样改走该来源（idevice_id 读不到 netmuxd）。
+  `hasMuxNetwork` 在 Windows 上同样改走该来源（go-ios 兜底，idevice_id 主路径读
+  `USBMUXD_SOCKET_ADDRESS` 已能看到 netmuxd 的 Network 条目）。
 - `device_prune.go`：`wifi_debug=true` 的无线设备掉线只隐藏、不物理删除，
   避免 iOS 空闲关闭会话后配置丢失、手机醒来自动重激活时还要重新 USB 授权。
 - `watchdog.go`：Windows + netmuxd 下，Network 重激活必须存在 usbmux Network 条目
@@ -56,7 +62,7 @@ set USBMUXD_SOCKET_ADDRESS=tcp://127.0.0.1:27016
 ## 实测边界（USB 全程拔除，纯 Wi-Fi）
 
 ```text
-USBMUXD_SOCKET_ADDRESS=tcp://127.0.0.1:27016 ios list --details
+USBMUXD_SOCKET_ADDRESS=127.0.0.1:27016 ios list --details
   → {"deviceList":[{"Udid":"4886…","ConnectionType":"Network",...}]}
 ios runwda --udid=4886… --bundleid=com.wda.WebRunner.xctrunner
       --testrunnerbundleid=com.wda.WebRunner.xctrunner
@@ -109,5 +115,10 @@ curl http://127.0.0.1:8100/status → {"ready":true,"message":"WebDriverAgent is
 - 手机需与本机同一 Wi-Fi，且已开启无线调试
   （`EnableWifiConnections` / `EnableWifiDebugging`，由 `wifi-lockdown` 在 USB 下写入）。
 - 无线通道依赖 iOS「本地网络」权限与 mDNS 可达性；Windows 的 `idevice_id`
-  （libimobiledevice）不读 `USBMUXD_SOCKET_ADDRESS`，Network 相关能力走 go-ios/netmuxd。
+  （libimobiledevice）读 `USBMUXD_SOCKET_ADDRESS`（裸 `host:port`），Network 条目
+  与 USB 条目都由 netmuxd 提供；go-ios 作为独立兜底来源。
+- 配对目录残留 `*.plist.tmp` 会毒化 netmuxd 的 MAC→UDID 缓存：它对 `xxx.plist.tmp`
+  取 `file_stem` 得到 `xxx.plist`，再按 `xxx.plist.plist` 找配对记录必然失败，
+  该设备 Network 永远不上线（现象：`Found UDID: "xxx.plist"` + `No pairing record found`）。
+  本次 `5060c403…` 即因此只显示 USB；清理残留 tmp 文件后 Network 立即出现。
 - 手机锁屏/熄屏后 iOS 会关闭无线调试会话（约 8 分钟周期），必须保持亮屏才能长期在线。

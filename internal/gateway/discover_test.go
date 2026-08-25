@@ -93,6 +93,31 @@ func TestMergeDiscoveredIncludesNetworkOnly(t *testing.T) {
 	}
 }
 
+func TestNetmuxdNetworkUDIDListFromSorted(t *testing.T) {
+	if got := netmuxdNetworkUDIDListFrom(nil); len(got) != 0 {
+		t.Fatalf("empty list = %v, want nil", got)
+	}
+	list := []string{
+		"5060c403afdee4c15a0edeab69dba0524e2ce592",
+		"4886579a97a96bad83b527862bab409b5a07c741",
+		"5060c403afdee4c15a0edeab69dba0524e2ce592", // 重复按大小写无关去重
+	}
+	got := netmuxdNetworkUDIDListFrom(list)
+	if len(got) != 2 ||
+		got[0] != "4886579a97a96bad83b527862bab409b5a07c741" ||
+		got[1] != "5060c403afdee4c15a0edeab69dba0524e2ce592" {
+		t.Fatalf("sorted list = %v", got)
+	}
+	// iOS <16 必须保持小写原文，不能转大写。
+	if got[1] != strings.ToLower(got[1]) {
+		t.Fatalf("40-hex UDID must stay lowercase: %v", got)
+	}
+	merged := mergeDiscovered(nil, nil, got)
+	if len(merged) != 2 || merged[0].Conn != "wifi" || merged[1].Conn != "wifi" {
+		t.Fatalf("merge netmuxd network = %+v", merged)
+	}
+}
+
 func TestMergeDiscoveredUSBWinsOverNetwork(t *testing.T) {
 	u := "5060c403afdee4c15a0edeab69dba0524e2ce592"
 	got := mergeDiscovered(

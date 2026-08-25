@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -253,13 +254,43 @@ type DiscoveredDevice struct {
 	Conn  string // usb | wifi；devicectl 单独命中时可能为空
 }
 
-// Discover 合并 devicectl、USB 与 usbmux Network。
+// Discover 合并 devicectl、USB 与 usbmux Network（Windows 上含 netmuxd 的
+// mDNS Network 设备——idevice_id 连 AMDS 看不到，必须用 go-ios 补回）。
 func Discover() []DiscoveredDevice {
 	usb, network := usbmuxListTyped()
 	if len(usb) == 0 && len(network) == 0 {
 		usb = usbUDIDsViaIOReg()
 	}
-	return mergeDiscovered(devicectlDevices(), usb, network)
+	return mergeDiscovered(devicectlDevices(), usb, append(network, netmuxdNetworkUDIDList()...))
+}
+
+// netmuxdNetworkUDIDList 在 Windows 上补充 netmuxd 经 mDNS 发现的 Network 设备：
+// 正常情况 idevice_id 读 USBMUXD_SOCKET_ADDRESS 已能看到 netmuxd 的 USB+Network
+// 条目；此处用 go-ios `ios list --details` 再兜底一次，避免 libimobiledevice
+// 路径异常（如环境变量格式问题）时无线设备从列表消失。Mac 的 usbmuxd 已由
+// idevice_id 覆盖，无需补。
+func netmuxdNetworkUDIDList() []string {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return netmuxdNetworkUDIDListFrom(usbmuxNetworkUDIDList())
+}
+
+// netmuxdNetworkUDIDListFrom 去重并排序 Network UDID 列表，保持原文大小写
+// （iOS <16 为小写 40-hex，不允许转大写）。
+func netmuxdNetworkUDIDListFrom(list []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, u := range list {
+		u = strings.TrimSpace(u)
+		if u == "" || seen[udidKey(u)] {
+			continue
+		}
+		seen[udidKey(u)] = true
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func mergeDiscovered(core []DiscoveredDevice, usb, network []string) []DiscoveredDevice {

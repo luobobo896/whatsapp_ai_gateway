@@ -12,9 +12,10 @@ import (
 )
 
 var netmuxdNetCache struct {
-	mu  sync.Mutex
-	at  time.Time
-	set map[string]bool
+	mu   sync.Mutex
+	at   time.Time
+	set  map[string]bool
+	list []string // Network UDID 原文（iOS <16 为小写 40-hex；iOS 16+ 为带连字符大写）
 }
 
 // usbmuxNetworkUDIDs 返回 usbmux 里带有 Network（无线调试）条目的设备 UDID 集合（大写）。
@@ -27,16 +28,30 @@ func usbmuxNetworkUDIDs() map[string]bool {
 	if !netmuxdNetCache.at.IsZero() && time.Since(netmuxdNetCache.at) < time.Second {
 		return netmuxdNetCache.set
 	}
-	set := usbmuxNetworkUDIDsUncached()
-	netmuxdNetCache.set, netmuxdNetCache.at = set, time.Now()
+	set, list := usbmuxNetworkUDIDsUncached()
+	netmuxdNetCache.set, netmuxdNetCache.list, netmuxdNetCache.at = set, list, time.Now()
 	return set
 }
 
-func usbmuxNetworkUDIDsUncached() map[string]bool {
+// usbmuxNetworkUDIDList 返回 Network 设备的 UDID 原文列表，供 Discover 合并。
+// 保持 netmuxd 上报的原始大小写：iOS <16 是 40 位小写 hex，转大写会与配对记录、
+// 激活工具（wifi-lockdown / ios runwda）对不上。与 usbmuxNetworkUDIDs 共享缓存。
+func usbmuxNetworkUDIDList() []string {
+	netmuxdNetCache.mu.Lock()
+	defer netmuxdNetCache.mu.Unlock()
+	if !netmuxdNetCache.at.IsZero() && time.Since(netmuxdNetCache.at) < time.Second {
+		return append([]string(nil), netmuxdNetCache.list...)
+	}
+	set, list := usbmuxNetworkUDIDsUncached()
+	netmuxdNetCache.set, netmuxdNetCache.list, netmuxdNetCache.at = set, list, time.Now()
+	return append([]string(nil), list...)
+}
+
+func usbmuxNetworkUDIDsUncached() (map[string]bool, []string) {
 	out := map[string]bool{}
 	bin := lookTool("ios", "ios.exe")
 	if bin == "" {
-		return out
+		return out, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -44,21 +59,49 @@ func usbmuxNetworkUDIDsUncached() map[string]bool {
 	cmd.Env = append(os.Environ(), bundleLibFallback()...)
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
-		return out
+		return out, nil
 	}
-	types := parseUsbmuxConnectionTypes(string(raw))
-	if types == nil {
+	list := parseUsbmuxNetworkUDIDs(string(raw))
+	if list == nil {
 		text := string(raw)
 		if len(text) > 300 {
 			text = text[:300] + "…"
 		}
 		slog.Warn("parse ios list --details failed", "raw", text)
-		return out
+		return out, nil
 	}
-	for udid, ct := range types {
-		if strings.EqualFold(ct, "Network") {
-			out[strings.ToUpper(udid)] = true
+	for _, u := range list {
+		out[strings.ToUpper(u)] = true
+	}
+	return out, list
+}
+
+// parseUsbmuxNetworkUDIDs 解析 `ios list --details`，返回 ConnectionType=Network 的
+// UDID 原文（按上报大小写原样保留，去重）。解析失败返回 nil。
+func parseUsbmuxNetworkUDIDs(raw string) []string {
+	arr := extractJSONArray(raw)
+	if arr == "" {
+		return nil
+	}
+	var list []struct {
+		Udid           string `json:"Udid"`
+		ConnectionType string `json:"ConnectionType"`
+	}
+	if json.Unmarshal([]byte(arr), &list) != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range list {
+		if d.Udid == "" || !strings.EqualFold(d.ConnectionType, "Network") {
+			continue
 		}
+		key := strings.ToUpper(d.Udid)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, d.Udid)
 	}
 	return out
 }

@@ -33,6 +33,7 @@ var trayIcon []byte
 const (
 	appName      = "WDA Farm Gateway"
 	mutexName    = "Local\\WDAFarmGatewaySingleInstance"
+	showEventName = "Local\\WDAFarmGatewayShowWindow"
 	defaultPort  = 8300
 	readyTimeout = 60 * time.Second
 )
@@ -129,6 +130,30 @@ func (a *desktopApp) onTrayReady() {
 	mState.Click(func() { _ = exec.Command("explorer", a.state).Start() })
 	mLogs.Click(func() { _ = exec.Command("explorer", filepath.Join(a.state, "logs")).Start() })
 	mQuit.Click(func() { systray.Quit() })
+
+	// 第二个实例双击时通过命名事件通知本实例弹出管理窗口，
+	// 而不是让第二个实例静默退出（用户会以为“打不开”）。
+	go func() {
+		evName, err := windows.UTF16PtrFromString(showEventName)
+		if err != nil {
+			return
+		}
+		ev, err := windows.CreateEvent(nil, 0, 0, evName)
+		if ev == 0 || (err != nil && err != windows.ERROR_ALREADY_EXISTS) {
+			return
+		}
+		defer windows.CloseHandle(ev)
+		for {
+			state, err := windows.WaitForSingleObject(ev, 1000)
+			if err != nil {
+				return
+			}
+			if state == windows.WAIT_OBJECT_0 {
+				shellLog("single-instance: reopen window")
+				a.openWindow()
+			}
+		}
+	}()
 
 	go func() {
 		if err := a.waitReady(readyTimeout); err != nil {
@@ -630,6 +655,13 @@ func ensureSingleInstance() (func(), bool) {
 	if err == windows.ERROR_ALREADY_EXISTS {
 		if h != 0 {
 			_ = windows.CloseHandle(h)
+		}
+		// 通知已运行的实例弹出管理窗口后退出，避免双击无响应。
+		if evName, e2 := windows.UTF16PtrFromString(showEventName); e2 == nil {
+			if ev, e3 := windows.CreateEvent(nil, 0, 0, evName); ev != 0 && (e3 == nil || e3 == windows.ERROR_ALREADY_EXISTS) {
+				_ = windows.SetEvent(ev)
+				_ = windows.CloseHandle(ev)
+			}
 		}
 		return func() {}, false
 	}

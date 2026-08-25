@@ -9,7 +9,8 @@ package gateway
 //     C:/ProgramData/Apple/Lockdown，并用 com.apple.mobile.heartbeat 会话保活，
 //     拔掉 USB 后无线 WDA 不再因 iOS 网络 lockdown 会话过期而断开。
 // 随后把 USBMUXD_SOCKET_ADDRESS 注入环境变量，使 go-ios 子进程（ios / wifi-runwda）
-// 在无线激活时看到并走 Network 通道，与 Mac 上 usbmuxd 的行为一致。
+// 与 libimobiledevice 子进程（idevice_id / ideviceinfo / iproxy）都看到 netmuxd
+// 的 USB+Network 条目，与 Mac 上 usbmuxd 的行为一致。
 
 import (
 	"log/slog"
@@ -91,7 +92,9 @@ func (g *Gateway) syncNetmuxd() {
 	done := make(chan struct{})
 	g.netmuxdCmd = cmd
 	g.netmuxdDone = done
-	_ = os.Setenv(netmuxdEnvName, "tcp://"+netmuxdListenAddr)
+	// 只能是裸 host:port，不能带 tcp:// 前缀：libimobiledevice 会把 scheme 当主机名
+	// （socket_connect: getaddrinfo 失败），而 go-ios 两种格式都接受。
+	_ = os.Setenv(netmuxdEnvName, netmuxdListenAddr)
 	slog.Info("netmuxd started", "listen", netmuxdListenAddr, "upstream", netmuxdUpstream)
 	go func() {
 		_ = cmd.Wait()

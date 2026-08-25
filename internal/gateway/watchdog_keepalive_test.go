@@ -21,7 +21,7 @@ func TestChannelReachableForVia(t *testing.T) {
 		t.Fatal("Network via must not relaunch on USB cable alone")
 	}
 	if runtime.GOOS == "windows" {
-		t.Setenv(netmuxdEnvName, "tcp://127.0.0.1:27016")
+		t.Setenv(netmuxdEnvName, "127.0.0.1:27016")
 		if channelReachableForVia(activateViaNetwork, false, false, true) {
 			t.Fatal("Windows netmuxd must not reactivate on Wi-Fi IP alone (needs Network entry)")
 		}

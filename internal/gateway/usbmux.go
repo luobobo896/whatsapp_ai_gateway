@@ -116,8 +116,8 @@ func usbTunnelsToDrop(usb, netSet map[string]bool, procs map[string]*usbTunnelPr
 //   - USB 直连设备：iproxy 走 USB（默认）；
 //   - 无线设备（usbmux ConnectionType=Network、无 USB）：ios forward 走 Network 隧道
 //     （经 netmuxd 转发到手机 Wi-Fi），让网关能访问 WDA 的 loopback :8100。
-//     Windows 上不用 iproxy -n：libimobiledevice 不读 USBMUXD_SOCKET_ADDRESS，
-//     连 AMDS 看不到 Network 条目，隧道建不起来；go-ios forward 读该环境变量。
+//     Windows 上 go-ios forward 走 Network 隧道（读 USBMUXD_SOCKET_ADDRESS=netmuxd，
+//     libimobiledevice 的 iproxy 虽也读该变量，但 go-ios forward 已实测稳定，沿用）。
 //
 // ports 为需要隧道的 udid -> 设备 WDA 端口（来自 devices.json）。
 func EnsureUSBTunnels(rawPorts map[string]int, vias map[string]string) {

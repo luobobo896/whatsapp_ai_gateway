@@ -742,10 +742,8 @@ function deviceCard(d){
       if (d.usb) {
         actions += ` <button class="btn sm" onclick="act('${d.udid}','usb')">改 USB</button>`;
       }
-    } else if (!d.wifi_debug) {
-      if (d.usb || d.need_wifi_auth) {
-        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
-      }
+    } else if (d.need_wifi_auth) {
+      actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
       actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">改 Network</button>`;
     } else {
       actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">改 Network</button>`;
@@ -756,20 +754,16 @@ function deviceCard(d){
     const netVia = d.activate_via === 'network' || !d.usb;
     if (netVia) {
       actions = '';
-      if (!d.wifi_debug) {
-        if (d.usb || d.need_wifi_auth) {
-          actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
-        }
+      if (d.need_wifi_auth) {
+        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
         actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
       } else {
         actions += `<button class="btn sm" onclick="act('${d.udid}','network')">Network 激活</button>`;
       }
     } else {
       actions = `<button class="btn sm" onclick="act('${d.udid}','usb')">USB 激活</button>`;
-      if (!d.wifi_debug) {
-        if (d.usb || d.need_wifi_auth) {
-          actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
-        }
+      if (d.need_wifi_auth) {
+        actions += ` <button class="btn sm" onclick="authorizeWifi('${d.udid}')">首次授权</button>`;
         actions += ` <button class="btn sm ghost" disabled style="opacity:.5;cursor:not-allowed" title="必须先插 USB 完成首次授权">Network 激活</button>`;
       } else {
         actions += ` <button class="btn sm ghost" onclick="act('${d.udid}','network')">Network 激活</button>`;
@@ -796,7 +790,7 @@ function deviceCard(d){
             ${d.needs_tunnel ? (d.tunnel_ready ? '<span class="tag tag-green">iOS17+ 隧道</span>' : '<span class="tag tag-orange">需隧道</span>') : ''}
             ${d.conn_type ? (d.usb ? '<span class="tag tag-accent">USB</span>' : '<span class="tag">Wi-Fi</span>') : ''}
             ${d.activate_via === 'network' ? '<span class="tag tag-green">激活=Network</span>' : (d.activate_via === 'usb' ? '<span class="tag">激活=USB</span>' : '')}
-            ${d.wifi_debug ? '<span class="tag tag-green">无线已授权</span>' : (d.need_wifi_auth ? '<span class="tag tag-orange">需首次授权</span>' : '')}
+            ${(d.wifi_debug || !d.need_wifi_auth) ? '<span class="tag tag-green">无线已授权</span>' : (d.need_wifi_auth ? '<span class="tag tag-orange">需首次授权</span>' : '')}
             ${wdaBadge}
           </div>
           <div class="device-meta">
@@ -804,7 +798,7 @@ function deviceCard(d){
             ${serial ? '' : '<span style="color:var(--orange)">序列号待识别（插 USB 自动获取）</span><span class="sep">·</span>'}
             <span>${addr}</span><span class="sep">·</span>
             <span style="${healthCls}">${healthTxt}</span>
-            ${!d.wifi_debug ? '<span class="sep">·</span><span style="color:var(--orange)">首次授权必须插 USB，并先在手机设置锁屏密码 0000</span>' : ''}
+            ${d.need_wifi_auth ? '<span class="sep">·</span><span style="color:var(--orange)">首次授权必须插 USB，并先在手机设置锁屏密码 0000</span>' : ''}
           </div>
         </div>
       </div>
