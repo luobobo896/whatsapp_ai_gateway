@@ -131,7 +131,7 @@ WDA_UPLOAD_URL="${WDA_UPLOAD_URL:-https://hk.hsddns.com/api/wda/package}"
 echo "▶ 上传到平台 $WDA_UPLOAD_URL"
 curl -fsS -X POST \
   -H "Authorization: Bearer $WDA_API_TOKEN" \
-  -F "file=@$OUT" -F "sign_mode=$MODE" \
+  -F "file=@$OUT" -F "sign_mode=$MODE" -F "authorized_udids=$UDIDS" \
   "$WDA_UPLOAD_URL" || die "上传失败（平台需可达且 token 有效）"
 
 echo "✅ 完成：账号类型=$MODE；网关收到 wda:config 后自动替换 state/wda.ipa，下次激活用新包，不影响运行。"
