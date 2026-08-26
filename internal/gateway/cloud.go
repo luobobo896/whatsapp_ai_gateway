@@ -326,6 +326,15 @@ readLoop:
 			} else {
 				slog.Info("model:config applied", "model", cfg.Model, "enabled", cfg.BaseURL != "" && cfg.Model != "")
 			}
+		case "wda:config":
+			var pkg gatewayWdaPackage
+			if err := json.Unmarshal(msg.Payload, &pkg); err != nil {
+				slog.Warn("wda:config parse failed", "error", err)
+			} else if err := g.ApplyWdaPackage(ctx, pkg); err != nil {
+				slog.Warn("wda:config apply failed", "error", err)
+			} else {
+				slog.Info("wda:config applied", "version", pkg.Version, "sign_mode", pkg.SignMode)
+			}
 		}
 	}
 

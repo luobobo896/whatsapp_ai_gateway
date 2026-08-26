@@ -1,0 +1,56 @@
+opt_out_usage
+desc "验证：用已登记 UDID 生成 adhoc profile（个人开发者自动签名前置）"
+lane :sign do
+  api_key = {
+    key_id: ENV.fetch("FASTLANE_KEY_ID"),
+    issuer_id: ENV.fetch("FASTLANE_ISSUER_ID"),
+    key: File.read(ENV.fetch("FASTLANE_API_KEY_PATH")),
+    duration: 1200,
+    in_house: false   # 个人开发者（非企业 In-House）
+  }
+  # 1) 确保「A3JP3VUZ78 团队」的 Apple Development 证书在本机（证书 Team 与 profile 对齐）
+  cert(
+    development: true,
+    api_key: api_key,
+    team_id: "A3JP3VUZ78"
+  )
+  # 2) 生成含账号已登记设备的 Development provisioning profile
+  sigh(
+    app_identifier: "com.wda.WebRunner",   # WDA 工程实际 PRODUCT_BUNDLE_IDENTIFIER
+    development: true,   # XCTest runner 用 Development profile + Apple Development 证书
+    api_key: api_key,   # App Store Connect API key（无需账号密码）
+    output_path: "/tmp/wda-test.mobileprovision",
+    skip_certificate_verification: true
+  )
+end
+
+desc "个人账号：注册新 UDID 到团队 → 生成 Development profile（自动签名核心）"
+lane :register_and_sign do |options|
+  udid = options[:udid]
+  name = options[:name] || "user-iphone"
+  api_key = {
+    key_id: "Q9NWKB6BCF",
+    issuer_id: "d48c0262-bf20-4f97-ae87-38339ca12ba3",
+    key: File.read("/Users/hanson/Downloads/AuthKey_Q9NWKB6BCF.p8"),
+    duration: 1200,
+    in_house: false
+  }
+  # 1) 注册/确保该 UDID 在团队设备列表（已存在则幂等）
+  register_device(
+    udid: udid,
+    name: name,
+    api_key: api_key,
+    team_id: "A3JP3VUZ78"
+  )
+  # 2) 确保团队开发证书
+  cert(development: true, api_key: api_key, team_id: "A3JP3VUZ78")
+  # 3) 生成含所有已登记设备的 Development profile
+  sigh(
+    development: true,
+    app_identifier: "com.wda.WebRunner",
+    api_key: api_key,
+    output_path: "/tmp/wda-auto.mobileprovision",
+    skip_certificate_verification: true
+  )
+  puts "✅ 已注册 #{udid} 并生成 profile：/tmp/wda-auto.mobileprovision"
+end

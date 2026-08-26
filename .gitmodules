@@ -1,0 +1,3 @@
+[submodule "third_party/WhatsAppDeviceAgent"]
+	path = third_party/WhatsAppDeviceAgent
+	url = https://github.com/luobobo896/whatsapp_ai_ios.git
