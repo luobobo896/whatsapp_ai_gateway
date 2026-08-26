@@ -14,6 +14,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 读 gitignored signing.env（WDA_PUBLISHER_TOKEN 等），不存在则跳过。
+SIGNING_ENV="${SIGNING_ENV:-$ROOT/scripts/signing.env}"
+if [ -f "$SIGNING_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$SIGNING_ENV"
+  set +a
+fi
+
 APP_NAME="WDAFarmGateway"
 APPDisplayName="WDA Farm Gateway"
 VERSION="$(git describe --tags --always 2>/dev/null | sed 's/^v//' || echo dev)"
@@ -241,3 +250,8 @@ print("  › 记录最新产物: dist/latest.json")
 PY
 
 echo "✅ 完成：$ROOT/$DMG_NAME"
+
+# 自动上传到云平台（同平台覆盖，只留最新）；未配置 WDA_PUBLISHER_TOKEN 则跳过。
+if [ -n "${WDA_PUBLISHER_TOKEN:-}" ]; then
+  sh scripts/upload-release.sh "$ROOT/$DMG_NAME" darwin arm64 "$VERSION" || true
+fi

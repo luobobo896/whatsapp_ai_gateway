@@ -15,6 +15,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 读 gitignored signing.env（WDA_PUBLISHER_TOKEN 等），不存在则跳过。
+SIGNING_ENV="${SIGNING_ENV:-$ROOT/scripts/signing.env}"
+if [ -f "$SIGNING_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$SIGNING_ENV"
+  set +a
+fi
+
 ARCH="${GOARCH:-amd64}"
 case "$ARCH" in
   amd64|386|arm64) ;;
@@ -132,3 +141,10 @@ fi
 ls -lh "$EXE" "$OUT/wda-probe.exe" 2>/dev/null || true
 [ -f "$DESKTOP_EXE" ] && ls -lh "$DESKTOP_EXE"
 echo "✅ $OUT"
+
+# 打包成 zip 并自动上传云平台（同平台覆盖，只留最新）；未配置 WDA_PUBLISHER_TOKEN 则跳过。
+if [ -n "${WDA_PUBLISHER_TOKEN:-}" ]; then
+  ZIP="${TMPDIR:-/tmp}/wda-gateway-windows-${ARCH}.zip"
+  (cd "$OUT" && zip -qr "$ZIP" .)
+  sh scripts/upload-release.sh "$ZIP" windows "$ARCH" "$VERSION" || true
+fi
