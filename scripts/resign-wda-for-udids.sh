@@ -17,6 +17,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 读 gitignored 的 signing.env（WDA_API_TOKEN / FASTLANE_* 等），不存在则跳过。
+SIGNING_ENV="${SIGNING_ENV:-$ROOT/scripts/signing.env}"
+if [ -f "$SIGNING_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$SIGNING_ENV"
+  set +a
+fi
+
 MODE="personal"
 UDIDS_ARG=""
 UDIDS_FILE=""
