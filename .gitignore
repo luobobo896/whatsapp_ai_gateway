@@ -22,3 +22,6 @@ tools/webview2/
 *.cer
 *.p8
 *.mobileprovision
+# fastlane 运行时生成物
+/fastlane/report.xml
+/fastlane/README.md
