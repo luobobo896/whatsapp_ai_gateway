@@ -219,6 +219,7 @@
         <span class="slider"></span>
       </label>
       <button class="pill" id="bellBtn" onclick="toggleBell()" title="任务通知：收到任务/进行中/结束都会提醒">🔔<span id="bellBadge" style="display:none;margin-left:4px;background:var(--red);color:#fff;border-radius:999px;padding:0 6px;font-size:11px">0</span></button>
+      <button class="pill" onclick="openCloudConfig()" title="云平台地址 / 云通道设置">设置</button>
       <button class="btn sm ghost" id="themeBtn" onclick="toggleTheme()" title="切换深浅色">🌙</button>
       <button class="btn sm ghost" id="refreshBtn" onclick="refreshAll()">刷新</button>
       <button class="btn sm ghost" id="logoutBtn" style="display:none" onclick="logout()">登出</button>
@@ -265,23 +266,6 @@
     <div class="panel" id="taskActivityPanel" style="margin-bottom:16px">
       <div class="panel-head"><span style="font-size:13px;font-weight:600">任务实况</span><span style="font-size:11px;color:var(--text-3)">收到任务 / 执行中 / 结束 一目了然</span><span id="taskActivityCount" style="font-size:12px;color:var(--text-2)"></span></div>
       <div class="panel-body" id="taskActivityList"><span class="empty-sm">暂无进行中任务</span></div>
-    </div>
-
-    <!-- 云通道设置：全新安装时在此填写平台地址；保存后立即生效（连接重建/登录遮罩出现） -->
-    <div class="panel" id="cloudCfgPanel" style="margin-bottom:16px">
-      <div class="panel-head"><span style="font-size:13px;font-weight:600">云通道设置</span><span style="font-size:11px;color:var(--text-3)">通常无需修改；网关凭证登录后自动获取</span></div>
-      <div class="panel-body" style="display:grid;grid-template-columns:2fr 1fr auto auto;gap:10px;align-items:end">
-        <div>
-          <div style="font-size:11px;color:var(--text-2);margin-bottom:4px">平台域名 <span id="cloudTokenFlag" style="color:var(--text-3)"></span></div>
-          <input id="cloudWsUrl" placeholder="us.hsddns.com" style="width:100%;box-sizing:border-box">
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--text-2);margin-bottom:4px">网关名称</div>
-          <input id="cloudGwName" placeholder="如 macmini-01" style="width:100%;box-sizing:border-box">
-        </div>
-        <button class="btn sm" onclick="saveCloudCfg()">保存并连接</button>
-        <button class="btn sm ghost" onclick="disableCloudCfg()">停用</button>
-      </div>
     </div>
 
     <!-- 无线保活（usbmux ConnectionType=Network 自动修复） -->
@@ -436,11 +420,29 @@
       <button class="btn ghost" onclick="hideLogin()">取消</button>
       <button class="btn" id="loginBtn" onclick="login()">登录</button>
     </div>
+    <div style="margin-top:10px;font-size:12px;color:var(--text-2)">还没有平台地址？<a href="#" onclick="showCloudConfig()">先去配置云平台地址</a></div>
     <div id="loginErr" style="font-size:12px;color:var(--red);margin-top:8px;display:none"></div>
     <!-- 多租户账号：登录成功后平台要求选择网关所属租户 -->
     <div id="tenantPicker" style="display:none">
       <p style="font-size:12px;color:var(--text-2);margin:10px 0 8px">该账号属于多个租户，请选择网关所属租户（选择后自动完成凭证签发）：</p>
       <div id="tenantList" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 云通道设置弹窗：独立配置平台地址，保存后关闭，不影响当前页 -->
+<div class="modal-mask" id="cloudCfgModal" onclick="if(event.target===this)hideCloudConfig()">
+  <div class="modal" style="width:min(460px, calc(100vw - 40px))">
+    <h3 style="margin:0 0 4px">云通道设置</h3>
+    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">通常无需修改，保存后连接平台；网关凭证登录后由平台自动签发 <span id="cloudTokenFlag" style="color:var(--text-3)"></span></p>
+    <label>平台域名</label>
+    <input id="cloudWsUrl" placeholder="us.hsddns.com" style="width:100%;box-sizing:border-box;margin-bottom:12px">
+    <label>网关名称</label>
+    <input id="cloudGwName" placeholder="如 macmini-01" style="width:100%;box-sizing:border-box">
+    <div class="modal-actions">
+      <button class="btn sm ghost danger" onclick="disableCloudCfg()">停用</button>
+      <button class="btn sm ghost" onclick="hideCloudConfig()">关闭</button>
+      <button class="btn sm" onclick="saveCloudCfg()">保存并连接</button>
     </div>
   </div>
 </div>
@@ -539,6 +541,20 @@ function hideLogin(){
   $('loginMask').classList.remove('open');
   $('loginPassword').value = '';
   $('loginErr').style.display = 'none';
+}
+function showCloudConfig(){
+  hideLogin();
+  openCloudConfig();
+  toast('请填写平台地址并保存，再用该平台账号登录');
+}
+async function openCloudConfig(){
+  await loadCloudCfg(true); // 打开前回填当前配置，避免展示旧值
+  $('cloudCfgModal').classList.add('open');
+  const i = $('cloudWsUrl');
+  if (i) { i.focus(); i.select(); }
+}
+function hideCloudConfig(){
+  $('cloudCfgModal').classList.remove('open');
 }
 async function login(){
   const btn = $('loginBtn');
@@ -710,6 +726,7 @@ async function disableCloudCfg(){
     try{
       await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled:false})});
       toast('云通道已停用');
+      hideCloudConfig();
       await loadCloud();
       await loadCloudCfg(true);
       checkSession();
@@ -725,6 +742,7 @@ async function saveCloudCfg(){
   try{
     const r = await api('/api/cloud/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     toast(r.ok ? '已保存，正在连接平台' + (r.normalized ? '（地址已自动补全）' : '') + (r.token_configured === false ? '；登录后自动获取凭证' : '') : '保存失败');
+    if (r.ok) hideCloudConfig();
     await loadCloud();
     await loadCloudCfg(true);
     if (r.enabled) checkSession(); // 启用后登录遮罩可能出现，立即刷新会话态
