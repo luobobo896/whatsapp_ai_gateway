@@ -142,7 +142,16 @@ if [ -z "$SIGN_IDENTITY" ]; then
   SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/' || true)"
 fi
 if [ -n "$SIGN_IDENTITY" ]; then
-  codesign --deep --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+  ENT=""
+  if [ -f "$ROOT/scripts/notarization-entitlements.plist" ]; then ENT="--entitlements $ROOT/scripts/notarization-entitlements.plist"; fi
+  # 公证要求包内每个可执行/dylib 都用同一身份签名；codesign --deep 不会签 Resources 里散落的裸 Mach-O，
+  # 对 bin/tools/lib 下的每个 Mach-O 逐个体补签（含 hardened runtime + 时间戳 + entitlement）。
+  find "$RES" -type f 2>/dev/null | while read -r f; do
+    file "$f" 2>/dev/null | grep -q "Mach-O" || continue
+    codesign --force --options runtime --timestamp $ENT --sign "$SIGN_IDENTITY" "$f" >/dev/null 2>&1 \
+      || echo "  ⚠ 补签失败: $f"
+  done
+  codesign --deep --force --options runtime --timestamp $ENT --sign "$SIGN_IDENTITY" "$APP"
   echo "  ✓ Developer ID 签名：$SIGN_IDENTITY"
   SIGNED="developer-id"
 else
