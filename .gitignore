@@ -22,6 +22,10 @@ tools/webview2/
 *.cer
 *.p8
 *.mobileprovision
+*.p12
+*.certSigningRequest
 # fastlane 运行时生成物
 /fastlane/report.xml
 /fastlane/README.md
+# xcodebuild 构建产物
+/derived/
