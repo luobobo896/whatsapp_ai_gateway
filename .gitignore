@@ -18,3 +18,7 @@ dist/
 !tools/wda.ipa
 
 tools/webview2/
+# 签名产物（开发者证书 / App Store Connect API key / provisioning profile，严禁提交）
+*.cer
+*.p8
+*.mobileprovision

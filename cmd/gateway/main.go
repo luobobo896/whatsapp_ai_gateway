@@ -48,7 +48,7 @@ func main() {
 	}
 	defer cfg.Close()
 	if *projectRoot == "" {
-		guess := filepath.Join(state, "..", "whatsapp_ai_ios", "WhatsAppDeviceAgent")
+		guess := filepath.Join(state, "third_party", "WhatsAppDeviceAgent")
 		if _, err := os.Stat(filepath.Join(guess, "WebDriverAgent.xcodeproj")); err == nil {
 			*projectRoot = guess
 		}

@@ -36,7 +36,7 @@ if [ -f "$SIGNING_ENV" ]; then
 fi
 
 OUT="${OUT:-$ROOT/dist/wda.ipa}"
-PROJECT="${PROJECT:-$ROOT/../whatsapp_ai_ios/WhatsAppDeviceAgent}"
+PROJECT="${PROJECT:-$ROOT/third_party/WhatsAppDeviceAgent}"
 APP_NAME="WebDriverAgentRunner-Runner.app"
 SIGN_MODE="${SIGN_MODE:-auto}"
 IDENTITY="${IDENTITY:-}"

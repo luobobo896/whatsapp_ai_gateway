@@ -22,7 +22,7 @@ BUILD="$ROOT/build"
 APP="$BUILD/$APP_NAME.app"
 RES="$APP/Contents/Resources"
 
-WDA_PROJECT_DIR="${WDA_PROJECT_DIR:-$(cd "$ROOT/.." && pwd)/whatsapp_ai_ios/WhatsAppDeviceAgent}"
+WDA_PROJECT_DIR="${WDA_PROJECT_DIR:-$ROOT/third_party/WhatsAppDeviceAgent}"
 
 echo "▶ [1/7] Go 测试与构建"
 if [ "${SKIP_TESTS:-0}" != "1" ]; then

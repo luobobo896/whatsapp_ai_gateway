@@ -175,3 +175,7 @@ go run ./cmd/wda-probe -wda http://127.0.0.1:18100 \
 | [docs/deployment/macos-dmg打包操作手册.md](docs/deployment/macos-dmg打包操作手册.md) | Mac 桌面端打包 |
 | [docs/deployment/macos-dmg替换操作手册.md](docs/deployment/macos-dmg替换操作手册.md) | Mac 用新包替换 `/Applications` 已装应用（停→建→换→启，含备份/回滚） |
 | [docs/deployment/production-release.md](docs/deployment/production-release.md) | 生产发布：交付物清单/校验、用户安装门槛（UDID 限制）、分发方式、验收清单 |
+| [docs/design/ipad-udid-自动签名分发.md](docs/design/ipad-udid-自动签名分发.md) | 个人开发者：新设备 UDID 上报→自动重签 wda.ipa→上传→用户更新；企业账号免此流程 |
+
+> **WDA 控制器工程**（`third_party/WhatsAppDeviceAgent`，即 `wda.ipa` 的 iOS 源码）由 **git submodule** 引入
+> （仓库 `luobobo896/whatsapp_ai_ios`）。打包/出 `wda.ipa` 前先 `git submodule update --init`。
