@@ -428,7 +428,7 @@
 <div class="modal-mask" id="loginMask">
   <div class="modal" style="width:min(380px, calc(100vw - 40px))">
     <h3 style="margin:0 0 4px">网关管理登录</h3>
-    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px">使用 HK 平台账号登录（同一账号体系）</p>
+    <p style="font-size:12px;color:var(--text-2);margin:0 0 14px"><span id="loginHostHint">使用 平台账号登录（同一账号体系）</span></p>
     <div id="loginHint" style="font-size:12px;color:var(--accent);margin:-8px 0 12px;display:none"></div>
     <input type="email" id="loginEmail" autocomplete="username" placeholder="邮箱" style="width:100%;box-sizing:border-box;margin-bottom:10px" onkeydown="if(event.key==='Enter')login()">
     <input type="password" id="loginPassword" autocomplete="current-password" placeholder="密码" style="width:100%;box-sizing:border-box" onkeydown="if(event.key==='Enter')login()">
@@ -516,6 +516,21 @@ function showLogin(hint){
   const e = $('loginEmail');
   const target = (!e.value) ? e : $('loginPassword');
   setTimeout(() => target.focus(), 50);
+}
+async function refreshLoginHost(){
+  try{
+    const c = await (await fetch('/api/cloud/config')).json();
+    let host = '平台';
+    const u = c.ws_url || '';
+    if (u){
+      try{
+        const abs = u.startsWith('wss://') ? ('https://' + u.slice(5)) : u;
+        host = new URL(abs).host;
+      }catch(e){}
+    }
+    const el = $('loginHostHint');
+    if (el) el.textContent = '使用 ' + host + ' 平台账号登录（同一账号体系）';
+  }catch(e){}
 }
 function hideLogin(){
   $('tenantPicker').style.display = 'none';
@@ -1455,6 +1470,7 @@ async function etAction(action){
 setTheme(localStorage.getItem('gw-theme') || 'auto');
 checkSession();
 connectTaskWS(); // 先连实时任务通知，未登录会 401 关闭，登录后 3s 重连
+refreshLoginHost(); // 登录提示显示当前云平台主机（不再写死 HK）
 setInterval(() => { if($('loginMask').style.display !== 'flex') refreshAll(); }, 5000);
 
 </script>
