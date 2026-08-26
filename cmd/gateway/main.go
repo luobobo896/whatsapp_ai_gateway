@@ -96,6 +96,7 @@ func main() {
 	}
 	go gw.WatchdogLoop(ctx)
 	go gw.UsbmuxNetLoop(ctx)
+	gw.Autonomy.Start(ctx) // 自主群发 Agent（内部按 Autonomy.Enabled 静默开/关）
 	gw.SetAppContext(ctx)
 	gw.EnsureCloudLoop() // 云通道已启用则启动；未启用时由「云通道设置」保存后热拉起
 

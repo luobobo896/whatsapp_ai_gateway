@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // Handler 返回网关 HTTP 路由（REST + 静态页）。会话库打不开时返回错误。
@@ -143,6 +145,80 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 			"enabled":  c.BaseURL != "" && c.Model != "",
 			"base_url": c.BaseURL, "model": c.Model, "has_api_key": c.APIKey != "",
 		})
+	})
+
+	// /api/autonomy 自主群发配置：GET 脱敏读取（无密钥），PUT 更新并持久化（热生效）。
+	mux.HandleFunc("/api/autonomy", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			c := g.Cfg.Autonomy
+			writeJSON(w, map[string]any{
+				"enabled": c.Enabled, "content": c.Content, "max_friends": c.MaxFriends,
+				"window_start": c.WindowStart, "window_end": c.WindowEnd,
+				"interval_sec": c.IntervalSec, "burst_count": c.BurstCount, "burst_pause_sec": c.BurstPauseSec,
+				"daily_cap": c.DailyCap, "max_new_session_ratio": c.MaxNewSessionRatio, "tick_interval": c.TickInterval,
+				"chat_list_repeat_days": g.Cfg.Web.ChatListRepeatDays,
+			})
+		case http.MethodPut:
+			var body struct {
+				AutonomyConfig
+				ChatListRepeatDays int `json:"chat_list_repeat_days"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "请求体格式错误"})
+				return
+			}
+			if body.Enabled && strings.TrimSpace(body.Content) == "" {
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "启用前必须填写群发话术 content"})
+				return
+			}
+			if err := g.Cfg.SetAutonomy(body.AutonomyConfig); err != nil {
+				writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			if body.ChatListRepeatDays > 0 {
+				if err := g.Cfg.SetChatListRepeatDays(body.ChatListRepeatDays); err != nil {
+					writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			slog.Info("autonomy config updated", "enabled", body.Enabled, "content_len", len(body.Content))
+			writeJSON(w, map[string]any{"ok": true, "enabled": g.Cfg.Autonomy.Enabled})
+		default:
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	// /api/autonomy/status 自主群发状态与“为何未发”诊断。
+	mux.HandleFunc("/api/autonomy/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, g.Autonomy.Status())
+	})
+
+	// /api/ws 管理页实时任务事件通道（复用现有 coder/websocket；受同一会话鉴权保护）。
+	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
+		if g.Hub == nil {
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "event hub unavailable"})
+			return
+		}
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		g.Hub.register(c)
+		defer func() {
+			g.Hub.unregister(c)
+			_ = c.Close(websocket.StatusNormalClosure, "")
+		}()
+		// 读循环只为感知断开（管理页不在该连接上发业务消息）。
+		for {
+			if _, _, err := c.Read(r.Context()); err != nil {
+				return
+			}
+		}
 	})
 
 	// /api/metrics 网关级发送统计聚合（今日汇总 + 分设备 + 历史按天，落盘持久化）。

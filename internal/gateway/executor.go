@@ -32,6 +32,12 @@ type TaskDispatch struct {
 	IntervalSec int             `json:"interval_sec"`
 	Schedule    GatewaySchedule `json:"schedule,omitempty"`
 	Items       []TaskItem      `json:"items"`
+	// Source 任务来源："agent"=网关自主任务（本地优先）；空/其他=云平台下发。
+	Source string `json:"source,omitempty"`
+	// MaxFriends 自主任务对应用联系人的单批发送上限；0=沿用 WebConfig.ChatListMaxFriends。
+	MaxFriends int `json:"max_friends,omitempty"`
+	// SkipContacts 运行时已发联系人身份（JSON 不下发）：发送聊天列表好友时跳过，避免重复触达。
+	SkipContacts map[string]bool `json:"-"`
 }
 
 // GatewaySchedule 群发智能节奏/熔断参数（与平台 BroadcastSchedule 对齐）。
@@ -60,6 +66,8 @@ type ItemResult struct {
 	Status     string `json:"status"`
 	Error      string `json:"error"`
 	DurationMs int64  `json:"duration_ms"`
+	// Source 任务来源（"agent"=网关自主，空/其他=云平台）。omitempty 平台旧版忽略。
+	Source string `json:"source,omitempty"`
 	// 设备与内容上下文（数据收集增强）。
 	Udid        string `json:"udid,omitempty"`         // 发送设备 UDID
 	Serial      string `json:"serial,omitempty"`       // 设备硬件序列号
@@ -69,6 +77,8 @@ type ItemResult struct {
 	ContactName string `json:"contact_name,omitempty"` // 收件人姓名（best-effort，读不到为空）
 	SentAt      string `json:"sent_at,omitempty"`      // 完成时刻 RFC3339（本地时区）
 	NewSession  bool   `json:"new_session,omitempty"`  // 该条经「新聊天→搜索」新建会话发送
+	// ChatListSent 聊天列表好友群发实际发出的联系人个数（用于自主任务结果回填）。
+	ChatListSent int `json:"chat_list_sent,omitempty"`
 }
 
 // taskEnv 单次任务执行的设备上下文（随明细/汇总落盘与上行）。
@@ -82,6 +92,7 @@ type taskEnv struct {
 // TaskSummary 任务级汇总（task:summary 上行 + <task_id>.meta.json 落盘）。
 type TaskSummary struct {
 	TaskID     string `json:"task_id"`
+	Source     string `json:"source,omitempty"`
 	Udid       string `json:"udid"`
 	Serial     string `json:"serial,omitempty"`
 	DeviceName string `json:"device_name,omitempty"`
@@ -126,7 +137,7 @@ type Executor struct {
 	store      *resultsStore // 明细/汇总/统计持久化（<resultsDir>/results.db，SQLite）
 
 	mu      sync.Mutex
-	queues  map[string]chan TaskDispatch
+	queues  map[string]*udidQueue
 	workers map[string]bool
 	cancel  map[string]chan struct{}
 	// earlyCancel 记录 Cancel 早于 Submit 到达的 task_id（短 TTL），避免平台先推 cancel 后推 dispatch 时取消丢失。
@@ -143,6 +154,37 @@ type Executor struct {
 	metricsDay     string
 	metricsHistory map[string]Metrics
 	now            func() time.Time // 测试可注入
+
+	eventSink func(string, any) // 任务收口等事件回调（管理页实时提醒），可为 nil
+}
+
+// udidQueue 单台设备的本地/云任务队列。agent 队列优先于 cloud，实现“本地任务优先云任务”。
+type udidQueue struct {
+	agent chan TaskDispatch
+	cloud chan TaskDispatch
+}
+
+// qChanFor 按任务来源选择队列：agent（本地任务）优先队列，其余走 cloud 后备队列。
+func qChanFor(q *udidQueue, source string) chan TaskDispatch {
+	if source == "agent" {
+		return q.agent
+	}
+	return q.cloud
+}
+
+// nextTask 出队：先无阻塞尝试 agent（本地优先）；读不到再阻塞等 agent/cloud。
+func (q *udidQueue) nextTask() TaskDispatch {
+	select {
+	case t := <-q.agent:
+		return t
+	default:
+		select {
+		case t := <-q.agent:
+			return t
+		case t := <-q.cloud:
+			return t
+		}
+	}
 }
 
 // Metrics 网关本地发送统计。
@@ -183,7 +225,7 @@ type MetricsHistory struct {
 func NewExecutor(cfg *Config, wdaMgr *WDAManager, llm *LLMClient, resultsDir string) *Executor {
 	e := &Executor{
 		cfg: cfg, wda: wdaMgr, llm: llm, resultsDir: resultsDir,
-		queues:         map[string]chan TaskDispatch{},
+		queues:         map[string]*udidQueue{},
 		workers:        map[string]bool{},
 		cancel:         map[string]chan struct{}{},
 		earlyCancel:    map[string]time.Time{},
@@ -207,6 +249,11 @@ func (e *Executor) SetLLM(llm *LLMClient) {
 	e.llmMu.Lock()
 	defer e.llmMu.Unlock()
 	e.llm = llm
+}
+
+// SetEventSink 设置任务事件回调（如任务收口）。nil 表示不推送。
+func (e *Executor) SetEventSink(fn func(string, any)) {
+	e.eventSink = fn
 }
 
 func (e *Executor) llmClient() *LLMClient {
@@ -318,11 +365,15 @@ func (e *Executor) Submit(t TaskDispatch) {
 		e.mu.Unlock()
 		return
 	}
-	ch := e.queues[t.UDID]
-	if ch == nil {
-		ch = make(chan TaskDispatch, 256)
-		e.queues[t.UDID] = ch
+	q := e.queues[t.UDID]
+	if q == nil {
+		q = &udidQueue{
+			agent: make(chan TaskDispatch, 256),
+			cloud: make(chan TaskDispatch, 256),
+		}
+		e.queues[t.UDID] = q
 	}
+	ch := qChanFor(q, t.Source)
 	e.cancel[t.TaskID] = make(chan struct{})
 	if !e.workers[t.UDID] {
 		e.workers[t.UDID] = true
@@ -386,8 +437,8 @@ func (e *Executor) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	queued := map[string]int{}
-	for u, ch := range e.queues {
-		queued[u] = len(ch)
+	for u, q := range e.queues {
+		queued[u] = len(q.agent) + len(q.cloud)
 	}
 	busy := make([]string, 0, len(e.busy))
 	for u := range e.busy {
@@ -519,18 +570,15 @@ func (e *Executor) recordMetric(udid, taskID, status string, newSession bool) {
 func (e *Executor) runUDID(udid string) {
 	for {
 		e.mu.Lock()
-		ch := e.queues[udid]
+		q := e.queues[udid]
 		e.mu.Unlock()
-		if ch == nil {
+		if q == nil {
 			return
 		}
-		t, ok := <-ch
-		if !ok {
-			return
-		}
+		t := q.nextTask()
 		e.processTask(udid, t)
 		e.mu.Lock()
-		empty := len(e.queues[udid]) == 0
+		empty := len(q.agent) == 0 && len(q.cloud) == 0
 		if empty {
 			delete(e.workers, udid)
 		}
@@ -695,7 +743,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		content := itemContent(t, it)
 		// 未指定号码：扫描聊天列表里当前可见的 1:1 好友并逐个发送。
 		if strings.TrimSpace(it.Phone) == "" {
-			n, names, serr := e.sendChatList(client, content, assist)
+			n, names, _, serr := e.sendChatList(client, content, assist, t.MaxFriends, env.Udid, e.chatListSkip(env.Udid, t.SkipContacts))
 			status, errMsg, contactName = chatListOutcome(n, names, serr)
 			if status == "failed" {
 				e.recordBug(t, it, "chat_list", fmt.Errorf("%s", errMsg), assist, client, "")
@@ -703,8 +751,9 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			dur := time.Since(t0).Milliseconds()
 			e.finishItem(ItemResult{
 				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+				Source: t.Source,
 				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
-				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339),
+				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339), ChatListSent: n,
 			})
 			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
 				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
@@ -760,7 +809,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			// 平台带了本机号：新聊天只会搜到「给自己发消息」然后卡住。改发当前列表里的好友。
 			slog.Info("specified phone is self, fall back to chat list", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone)
 			dropSession()
-			n, names, serr := e.sendChatList(client, content, assist)
+			n, names, _, serr := e.sendChatList(client, content, assist, t.MaxFriends, env.Udid, e.chatListSkip(env.Udid, t.SkipContacts))
 			status, errMsg, contactName = chatListOutcome(n, names, serr)
 			if status == "failed" {
 				e.recordBug(t, it, "chat_list", fmt.Errorf("%s", errMsg), assist, client, "")
@@ -768,8 +817,9 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 			dur := time.Since(t0).Milliseconds()
 			e.finishItem(ItemResult{
 				TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+				Source: t.Source,
 				Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
-				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339),
+				Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339), ChatListSent: n,
 			})
 			slog.Info("item done", "task", t.TaskID, "item", it.ItemID, "phone", it.Phone, "status", status,
 				"chat_list_sent", n, "contact", contactName, "conn", env.ConnType, "duration_ms", dur)
@@ -827,6 +877,7 @@ func (e *Executor) processTask(udid string, t TaskDispatch) {
 		dur := time.Since(t0).Milliseconds()
 		e.finishItem(ItemResult{
 			TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg, DurationMs: dur,
+			Source: t.Source,
 			Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
 			Content: content, ContactName: contactName, SentAt: e.now().Format(time.RFC3339), NewSession: isNew,
 		})
@@ -879,17 +930,48 @@ func (e *Executor) deviceReachable(udid, ip string, port int) bool {
 	return wdaProbeVia(udid, ip, port, via).OK
 }
 
-func (e *Executor) sendChatList(client *wda.Client, content string, assist wda.SendAssist) (int, []string, error) {
-	maxFriends := 0
-	if e.cfg != nil {
+// defaultChatListRepeatDays 联系人重复去重默认窗口（天），可用 WebConfig.ChatListRepeatDays 覆盖。
+const defaultChatListRepeatDays = 3
+
+// chatListRepeatWindow 已发联系人去重窗口：窗口内不重复发给同一好友，窗口过后才可再触达。
+func (e *Executor) chatListRepeatWindow() time.Duration {
+	days := defaultChatListRepeatDays
+	if e.cfg != nil && e.cfg.Web.ChatListRepeatDays > 0 {
+		days = e.cfg.Web.ChatListRepeatDays
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// chatListSkip 汇总「本次任务显式跳过 + 该设备最近窗口已发」的联系人身份。
+func (e *Executor) chatListSkip(udid string, extra map[string]bool) map[string]bool {
+	skip := map[string]bool{}
+	for k, v := range extra {
+		if v {
+			skip[k] = true
+		}
+	}
+	if e.store != nil && udid != "" {
+		for k := range e.store.sentContactIdentities(udid, e.now().Add(-e.chatListRepeatWindow())) {
+			skip[k] = true
+		}
+	}
+	return skip
+}
+
+// sendChatList 向聊天列表好友群发：跳过已发联系人（skip），成功后把新发联系人身份落盘。
+func (e *Executor) sendChatList(client *wda.Client, content string, assist wda.SendAssist, maxFriends int, udid string, skip map[string]bool) (int, []string, []string, error) {
+	if maxFriends <= 0 && e.cfg != nil {
 		maxFriends = e.cfg.Web.ChatListMaxFriends
 	}
-	n, names, err := wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+	n, names, ids, err := wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends, skip)
 	if err != nil && n == 0 && transientWDAError(err) {
 		time.Sleep(2 * time.Second)
-		n, names, err = wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends)
+		n, names, ids, err = wda.SendToChatListFriends(context.Background(), client, content, assist, maxFriends, skip)
 	}
-	return n, names, err
+	if e.store != nil && udid != "" && len(ids) > 0 {
+		e.store.markSentContacts(udid, ids, e.now())
+	}
+	return n, names, ids, err
 }
 
 func chatListOutcome(n int, names []string, serr error) (status, errMsg, contact string) {
@@ -924,6 +1006,7 @@ func itemContent(t TaskDispatch, it TaskItem) string {
 func (e *Executor) cancelledEnv(env taskEnv, t TaskDispatch, it TaskItem, status, errMsg string) ItemResult {
 	return ItemResult{
 		TaskID: t.TaskID, ItemID: it.ItemID, Phone: it.Phone, Status: status, Error: errMsg,
+		Source: t.Source,
 		Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
 		Content: itemContent(t, it), SentAt: e.now().Format(time.RFC3339),
 	}
@@ -1044,6 +1127,7 @@ type itemRecord struct {
 	ContactName string `json:"contact_name,omitempty"`
 	SentAt      string `json:"sent_at,omitempty"`
 	NewSession  bool   `json:"new_session,omitempty"`
+	ChatListSent int   `json:"chat_list_sent,omitempty"`
 }
 
 func (e *Executor) persisted(taskID, itemID string) bool {
@@ -1074,6 +1158,7 @@ func (e *Executor) persistItem(r ItemResult) error {
 		Phone: r.Phone, Status: r.Status, Error: r.Error, DurationMs: r.DurationMs,
 		Udid: r.Udid, Serial: r.Serial, DeviceName: r.DeviceName, ConnType: r.ConnType,
 		Content: r.Content, ContactName: r.ContactName, SentAt: r.SentAt, NewSession: r.NewSession,
+		ChatListSent: r.ChatListSent,
 	}
 	var err error
 	for attempt := 1; attempt <= persistItemAttempts; attempt++ {
@@ -1113,7 +1198,8 @@ func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, stat
 	}
 	end := e.now()
 	s := TaskSummary{
-		TaskID: t.TaskID, Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
+		TaskID: t.TaskID, Source: t.Source,
+		Udid: env.Udid, Serial: env.Serial, DeviceName: env.DeviceName, ConnType: env.ConnType,
 		Status: status, Total: len(t.Items), SentOK: ok, SentFail: fail, Cancelled: cancel,
 		Pending: len(t.Items) - ok - fail - cancel,
 		StartAt: start.Format(time.RFC3339), EndAt: end.Format(time.RFC3339),
@@ -1126,6 +1212,12 @@ func (e *Executor) finishTask(env taskEnv, t TaskDispatch, start time.Time, stat
 	case e.SummaryQ <- s:
 	default:
 		slog.Warn("summary queue full, dropped (persisted, will re-report)", "task", s.TaskID)
+	}
+	if e.eventSink != nil {
+		e.eventSink("task:done", map[string]any{
+			"task_id": s.TaskID, "udid": env.Udid, "status": status, "source": t.Source,
+			"sent_ok": ok, "sent_fail": fail, "cancelled": cancel,
+		})
 	}
 }
 
@@ -1142,6 +1234,7 @@ func (e *Executor) readSummary(taskID string) *TaskSummary {
 // TaskListItem 是 /api/tasks 的列表项。
 type TaskListItem struct {
 	TaskID    string       `json:"task_id"`
+	Running   bool         `json:"running"`  // 当前正在执行/排队（未收口）
 	Finished  bool         `json:"finished"` // 任务已收口（meta 已写）
 	Summary   *TaskSummary `json:"summary,omitempty"`
 	SentOK    int          `json:"sent_ok"`
@@ -1155,7 +1248,7 @@ type TaskListItem struct {
 func (e *Executor) TaskList() []TaskListItem {
 	var out []TaskListItem
 	for _, t := range e.store.taskIDsByUpdate(100) {
-		item := TaskListItem{TaskID: t.TaskID, UpdatedAt: t.UpdatedAt}
+		item := TaskListItem{TaskID: t.TaskID, UpdatedAt: t.UpdatedAt, Running: e.isRunning(t.TaskID)}
 		if s := e.readSummary(t.TaskID); s != nil {
 			item.Summary, item.Finished = s, true
 		}
@@ -1163,6 +1256,14 @@ func (e *Executor) TaskList() []TaskListItem {
 		out = append(out, item)
 	}
 	return out
+}
+
+// isRunning 任务是否仍在执行/排队（已 Submit 但尚未收口）。用于管理页“任务进行中”标注。
+func (e *Executor) isRunning(taskID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.cancel[taskID]
+	return ok
 }
 
 // ItemDetail 是 /api/tasks/{task_id} 的单条明细（落盘结构 + item_id）。

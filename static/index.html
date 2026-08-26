@@ -91,6 +91,7 @@
   .btn:disabled{opacity:.4;cursor:default}
   .spinner{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:6px;animation:spin .7s linear infinite}
   .btn.ghost .spinner{border-color:color-mix(in srgb, var(--accent) 30%, transparent);border-top-color:var(--accent)}
+  .spin-dot{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;margin-right:8px;vertical-align:-2px;animation:spin .7s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
   .btn.ghost{background:transparent;color:var(--accent);border:1px solid color-mix(in srgb, var(--accent) 35%, transparent)}
   .btn.ghost:hover{background:var(--accent-weak)}
@@ -217,6 +218,7 @@
         <input type="checkbox" id="etToggle" onchange="etToggleChange(this)">
         <span class="slider"></span>
       </label>
+      <button class="pill" id="bellBtn" onclick="toggleBell()" title="任务通知：收到任务/进行中/结束都会提醒">🔔<span id="bellBadge" style="display:none;margin-left:4px;background:var(--red);color:#fff;border-radius:999px;padding:0 6px;font-size:11px">0</span></button>
       <button class="btn sm ghost" id="themeBtn" onclick="toggleTheme()" title="切换深浅色">🌙</button>
       <button class="btn sm ghost" id="refreshBtn" onclick="refreshAll()">刷新</button>
       <button class="btn sm ghost" id="logoutBtn" style="display:none" onclick="logout()">登出</button>
@@ -250,6 +252,12 @@
       <div class="stat"><span class="k">今日发送失败</span><span class="v err" id="stSentFail">0</span></div>
     </div>
 
+    <!-- 任务实况：收到云平台任务即时提醒，执行中转圈，结束显示结果 -->
+    <div class="panel" id="taskActivityPanel" style="margin-bottom:16px">
+      <div class="panel-head"><span style="font-size:13px;font-weight:600">任务实况</span><span style="font-size:11px;color:var(--text-3)">收到任务 / 执行中 / 结束 一目了然</span><span id="taskActivityCount" style="font-size:12px;color:var(--text-2)"></span></div>
+      <div class="panel-body" id="taskActivityList"><span class="empty-sm">暂无进行中任务</span></div>
+    </div>
+
     <!-- 云通道设置：全新安装时在此填写平台地址；保存后立即生效（连接重建/登录遮罩出现） -->
     <div class="panel" id="cloudCfgPanel" style="margin-bottom:16px">
       <div class="panel-head"><span style="font-size:13px;font-weight:600">云通道设置</span><span style="font-size:11px;color:var(--text-3)">通常无需修改；网关凭证登录后自动获取</span></div>
@@ -278,6 +286,30 @@
         <div id="usbmuxStatus" style="font-size:12px;color:var(--text-2);min-width:0">加载中…</div>
         <button class="btn sm" onclick="usbmuxRepair()">立即修复</button>
         <button class="btn sm ghost" onclick="loadUsbmuxNet()">刷新</button>
+      </div>
+    </div>
+
+    <!-- 自主群发：网关本地向 WhatsApp 应用联系人群发（本地任务优先云任务，无群发不触发事件） -->
+    <div class="panel" id="autonomyPanel" style="margin-bottom:16px">
+      <div class="panel-head"><span style="font-size:13px;font-weight:600">自主群发</span><span style="font-size:11px;color:var(--text-3)">网关自主向 WhatsApp 应用联系人群发；本地任务优先于云任务</span><span class="dot off" id="autonomyDot"></span><span id="autonomyStatusText" style="font-size:12px;color:var(--text-2)">未启用</span></div>
+      <div class="panel-body">
+        <div style="font-size:11px;color:var(--text-2);margin-bottom:4px">话术模板（支持 ${name} / {name}，按联系人名渲染）</div>
+        <textarea id="autonomyContent" rows="2" style="width:100%;box-sizing:border-box;font-size:12.5px" placeholder="您好 ${name}，今日…"></textarea>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:10px">
+          <div><div style="font-size:11px;color:var(--text-2);margin-bottom:4px">窗口开始</div><input id="autonomyWinStart" placeholder="09:00"></div>
+          <div><div style="font-size:11px;color:var(--text-2);margin-bottom:4px">窗口结束</div><input id="autonomyWinEnd" placeholder="21:00"></div>
+          <div><div style="font-size:11px;color:var(--text-2);margin-bottom:4px">每日上限</div><input id="autonomyDaily" type="number" value="40"></div>
+          <div><div style="font-size:11px;color:var(--text-2);margin-bottom:4px">单批联系人</div><input id="autonomyMaxF" type="number" value="30"></div>
+          <div><div style="font-size:11px;color:var(--text-2);margin-bottom:4px">重复触达(天)</div><input id="autonomyRepeat" type="number" value="3" title="同一设备发给同一联系人后，窗口内群发会跳过；0=默认 3 天"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2)"><input type="checkbox" id="autonomyEnabled">启用自主群发</label>
+          <div style="display:flex;gap:8px">
+            <button class="btn sm" onclick="saveAutonomy()">保存</button>
+            <button class="btn sm ghost" onclick="loadAutonomy()">刷新</button>
+          </div>
+        </div>
+        <div id="autonomyDiag" style="margin-top:10px;font-size:12px;color:var(--text-2)">加载中…</div>
       </div>
     </div>
 
@@ -364,6 +396,10 @@
 
 
 <div id="toast"></div>
+<div id="bellPanel" style="display:none;position:fixed;top:64px;right:24px;width:min(360px,92vw);max-height:60vh;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-lg);z-index:60">
+  <div style="padding:12px 16px;font-size:13px;font-weight:600;border-bottom:1px solid var(--border)">任务通知</div>
+  <div id="bellList" style="padding:8px 0"></div>
+</div>
 
 <!-- 通用确认弹层（替代 confirm()：浏览器"阻止此页面创建额外对话框"会拦截原生 confirm，导致点击按钮毫无反应） -->
 <div class="modal-mask" id="confirmModal" onclick="if(event.target===this)hideConfirm()">
@@ -863,7 +899,7 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm(), loadUsbmuxNet()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm(), loadUsbmuxNet(), loadAutonomy(), loadTasks()]); }
 
 let usbmuxBusy = false;
 async function loadUsbmuxNet(){
@@ -913,6 +949,109 @@ async function usbmuxRepair(){
   finally{ usbmuxBusy = false; }
 }
 
+/* ---------- 任务通知 / 任务实况 ---------- */
+let taskPrev = new Map(); // task_id -> {running}
+let notifs = [];           // {title,time,detail}
+let notifInited = false;
+let unread = 0;
+function shortTaskID(id){ return String(id || '').slice(0, 16); }
+function pushNotif(title, detail){
+  notifs.unshift({ title, detail, time: new Date().toLocaleTimeString() });
+  notifs = notifs.slice(0, 20);
+  unread++;
+  updateBellBadge();
+  renderBellList();
+}
+function updateBellBadge(){
+  const b = $('bellBadge');
+  if (!b) return;
+  b.textContent = unread;
+  b.style.display = unread ? '' : 'none';
+  $('bellBtn').classList.toggle('on', unread > 0);
+}
+function renderBellList(){
+  const list = $('bellList');
+  if (!list) return;
+  list.innerHTML = notifs.length
+    ? notifs.map(n => `<div style="padding:8px 16px;border-bottom:1px solid var(--divider)"><div style="font-size:12.5px;font-weight:600">${esc(n.title)}</div><div style="font-size:12px;color:var(--text-2);word-break:break-all">${esc(n.detail)}</div><div style="font-size:11px;color:var(--text-3);margin-top:2px">${esc(n.time)}</div></div>`).join('')
+    : '<div class="empty-sm" style="padding:12px 16px">暂无任务通知</div>';
+}
+function toggleBell(){
+  const p = $('bellPanel');
+  const open = !(p && p.style.display === 'block');
+  if (p) p.style.display = open ? 'block' : 'none';
+  if (open){ unread = 0; updateBellBadge(); }
+}
+async function loadTasks(){
+  let r;
+  try{ r = await (await api('/api/tasks')).json(); }catch(e){ return; }
+  const tasks = r.tasks || [];
+  const now = new Map();
+  const newIds = [], ended = [];
+  for (const t of tasks){
+    const prev = taskPrev.get(t.task_id);
+    now.set(t.task_id, { running: !!t.running, summary: t.summary });
+    if (!prev){ if (notifInited) newIds.push(t); continue; }
+    if (prev.running && !t.running) ended.push(t);
+  }
+  taskPrev = now;
+  if (!notifInited){ notifInited = true; renderTaskActivity(tasks); return; }
+  for (const t of newIds){
+    const s = t.summary || {};
+    if (t.running) pushNotif('📥 收到任务，执行中', shortTaskID(t.task_id) + ' · 正发送');
+    else if (t.finished) pushNotif('✅ 任务结束', shortTaskID(t.task_id) + ' · 成功 ' + (s.sent_ok||0) + '，失败 ' + (s.sent_fail||0) + '（' + (s.status||'') + '）');
+    else pushNotif('📥 收到任务', shortTaskID(t.task_id));
+  }
+  for (const t of ended){
+    const s = t.summary || {};
+    pushNotif('✅ 任务结束', shortTaskID(t.task_id) + ' · 成功 ' + (s.sent_ok||0) + '，失败 ' + (s.sent_fail||0) + '（' + (s.status||'') + '）');
+  }
+  renderTaskActivity(tasks);
+}
+function renderTaskActivity(tasks){
+  const run = (tasks || []).filter(t => t.running);
+  const count = $('taskActivityCount');
+  if (count) count.textContent = run.length ? ('进行中 ' + run.length) : '';
+  const box = $('taskActivityList');
+  if (!box) return;
+  if (!run.length){ box.innerHTML = '<span class="empty-sm">暂无进行中任务</span>'; return; }
+  box.innerHTML = run.map(t => {
+    const s = t.summary || {};
+    const total = s.total ?? t.items;
+    const done = (s.sent_ok||0) + (s.sent_fail||0) + (s.cancelled||0);
+    return `<div class="mh-row"><span class="spin-dot"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px" title="${esc(t.task_id)}">${esc(shortTaskID(t.task_id))}</span><span class="ok">已发 ${s.sent_ok||0}</span><span class="fail">失败 ${s.sent_fail||0}</span><span style="color:var(--text-3)">${total?('进度 '+done+'/'+total):''}</span></div>`;
+  }).join('');
+}
+
+/* ---------- 任务实时通知（管理页 ↔ 网关 WebSocket，复用现有 WSS 技术栈） ---------- */
+let taskWS = null;
+function connectTaskWS(){
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  try{ taskWS = new WebSocket(proto + '://' + location.host + '/api/ws'); }
+  catch(e){ taskWS = null; }
+  if (!taskWS) return;
+  taskWS.onmessage = (ev) => {
+    let d; try{ d = JSON.parse(ev.data); }catch(e){ return; }
+    const typ = d.type || '', p = d.payload || {};
+    if (typ === 'task:new'){
+      const cnt = (p.item_count == null ? '' : ' · ' + p.item_count + ' 条');
+      pushNotif('📥 收到任务，执行中', shortTaskID(p.task_id) + cnt);
+      toast('收到云平台任务：' + shortTaskID(p.task_id) + (cnt || ''));
+      loadTasks();
+    } else if (typ === 'task:done'){
+      pushNotif('✅ 任务结束', shortTaskID(p.task_id) + ' · 成功 ' + (p.sent_ok||0) + '，失败 ' + (p.sent_fail||0) + '（' + (p.status||'') + '）');
+      toast('任务结束：成功 ' + (p.sent_ok||0) + '，失败 ' + (p.sent_fail||0));
+      loadTasks();
+    } else if (typ === 'task:cancel'){
+      pushNotif('⏹ 任务取消', shortTaskID(p.task_id));
+      toast('任务已取消：' + shortTaskID(p.task_id));
+      loadTasks();
+    }
+  };
+  taskWS.onclose = () => { taskWS = null; setTimeout(connectTaskWS, 3000); };
+  taskWS.onerror = () => { try{ taskWS.close(); }catch(e){} };
+}
+
 async function loadLlm(){
   try{
     const c = await (await api('/api/llm')).json();
@@ -924,6 +1063,59 @@ async function loadLlm(){
     const detail = document.getElementById('llmDetail');
     if(detail){ detail.textContent = on ? (c.base_url + ' · key ' + (c.has_api_key ? '已配置' : '未配置') + ' · 开会话失败/未知页会调用模型判断并写 bug 日志') : '由平台「模型管理」页下发；未配置则发送只走选择器，不会调用模型'; }
   }catch(e){}
+}
+async function loadAutonomy(){
+  try{
+    const r = await api('/api/autonomy');
+    const c = await r.json();
+    $('autonomyContent').value = c.content || '';
+    $('autonomyWinStart').value = c.window_start || '';
+    $('autonomyWinEnd').value = c.window_end || '';
+    $('autonomyDaily').value = c.daily_cap || 40;
+    $('autonomyMaxF').value = c.max_friends || 30;
+    $('autonomyRepeat').value = c.chat_list_repeat_days || 3;
+    $('autonomyEnabled').checked = !!c.enabled;
+  }catch(e){}
+  try{
+    const r = await api('/api/autonomy/status');
+    const s = await r.json();
+    const on = !!s.enabled;
+    $('autonomyDot').className = on ? 'dot on' : 'dot off';
+    $('autonomyStatusText').textContent = on ? '已启用' : '未启用';
+    const state = s.state || '';
+    const cls = state === 'submitted' ? 'ok' : state === 'disabled' ? 'muted' : 'warn';
+    const theme = { ok: ['#2f9e4f', '#eaf7ee'], warn: ['#d98f2b', '#fff6e8'], muted: ['#8e8e93', '#f2f2f4'] };
+    const [col, bg] = theme[cls] || theme.warn;
+    const b = $('autonomyDiag');
+    b.style.color = col; b.style.background = bg; b.style.padding = '10px 12px';
+    b.style.borderRadius = '8px'; b.style.border = '1px solid ' + col;
+    const msg = s.reason || '等待自主回路诊断…';
+    const window = '窗口 ' + (s.window || '—') + (s.in_window ? ' 内' : ' 外');
+    b.textContent = (s.running ? '回路运行中 · ' : '') + window + ' · ' + msg +
+      '　今日已发 ' + s.today_sent + '/' + s.daily_cap + '，可发设备 ' + s.ready_devices +
+      (s.llm_enabled ? '' : '（LLM 未启用，走确定性兜底）');
+    if (s.last_task && s.last_task_result) {
+      b.textContent += '；上次自主任务(' + s.last_task + ')：' + s.last_task_result;
+    }
+  }catch(e){}
+}
+async function saveAutonomy(){
+  const body = {
+    enabled: $('autonomyEnabled').checked,
+    content: $('autonomyContent').value,
+    window_start: $('autonomyWinStart').value.trim(),
+    window_end: $('autonomyWinEnd').value.trim(),
+    daily_cap: parseInt($('autonomyDaily').value || '40', 10),
+    max_friends: parseInt($('autonomyMaxF').value || '30', 10),
+    chat_list_repeat_days: parseInt($('autonomyRepeat').value || '3', 10),
+  };
+  try{
+    const r = await api('/api/autonomy', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok){ toast('保存失败：' + apiErr(d, r.status)); return; }
+    toast(d.ok ? '自主群发配置已保存' : '已保存');
+    await loadAutonomy();
+  }catch(e){ toast('保存失败'); }
 }
 async function act(udid, via){
   via = via === 'network' ? 'network' : 'usb';
@@ -1232,6 +1424,7 @@ async function etAction(action){
 
 setTheme(localStorage.getItem('gw-theme') || 'auto');
 checkSession();
+connectTaskWS(); // 先连实时任务通知，未登录会 401 关闭，登录后 3s 重连
 setInterval(() => { if($('loginMask').style.display !== 'flex') refreshAll(); }, 5000);
 
 </script>

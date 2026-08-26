@@ -111,13 +111,16 @@ func TestTransientWDAError(t *testing.T) {
 	}
 }
 
-// TestWdaBaseURLForFallback 无隧道时回退 Wi-Fi 地址。
+// TestWdaBaseURLForFallback 无隧道时回退 ip:port（USB/Network 均适用；不"只认 USB 隧道"）。
 func TestWdaBaseURLForFallback(t *testing.T) {
 	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100, activateViaNetwork); got != "http://192.168.1.11:8100" {
 		t.Fatalf("network via uses wifi IP, got %s", got)
 	}
-	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100, activateViaUSB); got != "" {
-		t.Fatalf("usb via must not use wifi IP, got %s", got)
+	if got := wdaBaseURLFor("no-tunnel-udid", "192.168.1.11", 8100, activateViaUSB); got != "http://192.168.1.11:8100" {
+		t.Fatalf("usb via should fall back to ip:port when no tunnel and ip provided, got %s", got)
+	}
+	if got := wdaBaseURLFor("no-tunnel-udid", "", 8100, activateViaUSB); got != "" {
+		t.Fatalf("usb via without ip should be empty, got %s", got)
 	}
 }
 

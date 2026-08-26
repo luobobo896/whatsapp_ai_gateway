@@ -31,6 +31,7 @@ type Config struct {
 	Devices        []Device        `json:"devices"`
 	HealthInterval float64         `json:"health_interval"`
 	LLM            LLMConfig       `json:"llm,omitempty"`
+	Autonomy       AutonomyConfig  `json:"autonomy,omitempty"`
 	Web            WebConfig       `json:"web,omitempty"`
 	Signing        SigningConfig   `json:"signing,omitempty"`
 	UsbmuxNet      UsbmuxNetConfig `json:"usbmux_net,omitempty"`
@@ -60,6 +61,9 @@ type WebConfig struct {
 	// ChatListMaxFriends 未指定号码时，聊天列表最多发送多少个 1:1 好友。
 	// 0 或负数按默认 30；超过硬顶 100 按 100，避免名单过长转圈发不完。
 	ChatListMaxFriends int `json:"chat_list_max_friends,omitempty"`
+	// ChatListRepeatDays 联系人重复触达去重窗口（天）：同一设备发给同一联系人后，
+	// 窗口内再次按聊天列表好友群发会跳过该联系人；<=0 按默认 3 天。
+	ChatListRepeatDays int `json:"chat_list_repeat_days,omitempty"`
 }
 
 // UsbmuxNetConfig usbmux 无线调试（ConnectionType=Network）自动修复设置。
@@ -105,6 +109,30 @@ type LLMConfig struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
+}
+
+// AutonomyConfig 网关自主群发 Agent（本地任务）配置。
+// 目标是 WhatsApp 应用联系人（聊天列表 1:1 好友），不需要外部号码列表。
+type AutonomyConfig struct {
+	// Enabled 总开关，默认 false（opt-in）。
+	Enabled bool `json:"enabled"`
+	// Content 话术模板；空则无法自主发送（“没有群发不触发事件”）。
+	Content string `json:"content"`
+	// MaxFriends 单个自主任务对应用联系人的发送上限（0=沿用 WebConfig.ChatListMaxFriends）。
+	MaxFriends int `json:"max_friends,omitempty"`
+	// WindowStart/WindowEnd 发送窗口（HH:MM，空=不限制）。
+	WindowStart string `json:"window_start,omitempty"`
+	WindowEnd   string `json:"window_end,omitempty"`
+	// IntervalSec 条间节奏（默认 20）；BurstCount/BurstPauseSec 爆点（默认 5/60）。
+	IntervalSec   int `json:"interval_sec,omitempty"`
+	BurstCount    int `json:"burst_count,omitempty"`
+	BurstPauseSec int `json:"burst_pause_sec,omitempty"`
+	// DailyCap 每日自主发送上限（默认 40）。
+	DailyCap int `json:"daily_cap,omitempty"`
+	// MaxNewSessionRatio 当日新会话占比上限（默认 30）。
+	MaxNewSessionRatio int `json:"max_new_session_ratio,omitempty"`
+	// TickInterval 自主回路周期（秒，默认 60）。
+	TickInterval int `json:"tick_interval,omitempty"`
 }
 
 // UnmarshalJSON 同时接受 snake_case 与平台可能下发的 camelCase。
@@ -233,6 +261,9 @@ CREATE TABLE IF NOT EXISTS devices (
 	if c.HealthInterval <= 0 {
 		c.HealthInterval = 30
 	}
+	if c.Web.ChatListRepeatDays <= 0 {
+		c.Web.ChatListRepeatDays = 3
+	}
 	for i := range c.Devices {
 		if c.Devices[i].Port == 0 {
 			c.Devices[i].Port = 8100
@@ -291,6 +322,13 @@ func (c *Config) load() error {
 	} else if ok {
 		if err := json.Unmarshal([]byte(v), &c.LLM); err != nil {
 			return fmt.Errorf("config.llm: %w", err)
+		}
+	}
+	if v, ok, err := c.readKey("autonomy"); err != nil {
+		return err
+	} else if ok {
+		if err := json.Unmarshal([]byte(v), &c.Autonomy); err != nil {
+			return fmt.Errorf("config.autonomy: %w", err)
 		}
 	}
 	if v, ok, err := c.readKey("web"); err != nil {
@@ -386,6 +424,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, string(b)); err != ni
 	for key, v := range map[string]any{
 		"cloud":           c.Cloud,
 		"llm":             c.LLM,
+		"autonomy":        c.Autonomy,
 		"web":             c.Web,
 		"signing":         c.Signing,
 		"health_interval": c.HealthInterval,
@@ -485,6 +524,25 @@ func (c *Config) SetLLM(cfg LLMConfig) error {
 	defer c.mu.Unlock()
 	c.LLM = cfg
 	return c.writeKey("llm", c.LLM)
+}
+
+// SetAutonomy 原子更新自主群发配置并落库（供管理页 /api/autonomy 调用）。
+func (c *Config) SetAutonomy(cfg AutonomyConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Autonomy = cfg
+	return c.writeKey("autonomy", c.Autonomy)
+}
+
+// SetChatListRepeatDays 原子更新联系人重复去重窗口（天）并落库。
+func (c *Config) SetChatListRepeatDays(days int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if days <= 0 {
+		days = 3
+	}
+	c.Web.ChatListRepeatDays = days
+	return c.writeKey("web", c.Web)
 }
 
 // SetUsbmuxNet 保存「usbmux Network 自动修复」开关，立即持久化。

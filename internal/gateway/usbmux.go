@@ -369,7 +369,12 @@ func wdaProbeVia(udid, ip string, port int, via string) WDAHealth {
 			return CheckWDA(host, p, 3*time.Second)
 		}
 	}
-	return WDAHealth{OK: false, Error: "USB 通道无 USB 隧道"}
+	// USB 通道无隧道：只要设备配了 Wi-Fi IP，就回退到 ip:port 探活。
+	// 否则一台"U 盘在网但没建 iproxy 隧道"的设备会被误判离线，任务被拒。
+	if ip != "" {
+		return CheckWDA(ip, port, 3*time.Second)
+	}
+	return WDAHealth{OK: false, Error: "USB 通道无 USB 隧道且未配置 IP"}
 }
 
 // wdaBaseURLFor 按通道选地址，不跨通道兜底。
@@ -381,7 +386,8 @@ func wdaBaseURLFor(udid, ip string, port int, via string) string {
 	if a := tunnelAddrForVia(udid, via); a != "" {
 		return "http://" + a
 	}
-	if via == activateViaNetwork && ip != "" {
+	// 无隧道时统一回退 ip:port（USB/Network 均适用），确保 resolveWDABaseURL 不为空。
+	if ip != "" {
 		return fmt.Sprintf("http://%s:%d", ip, port)
 	}
 	return ""

@@ -106,6 +106,31 @@ unknown=true 表示未保存/未知会话。action 是建议的下一步；需�
 	return parseScreenReport(reply)
 }
 
+// Decide 让模型做一次结构化决策，返回解析后的 JSON 对象（用于自主群发 Agent）。
+// system 为系统约束，user 为观察到的状态摘要；模型输出只能是 JSON，越界由调用方 guard 兜底。
+func (c *LLMClient) Decide(ctx context.Context, system, user string) (map[string]any, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("llm not configured")
+	}
+	reply, err := c.chat(ctx, []chatMsg{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, 256)
+	if err != nil {
+		return nil, err
+	}
+	s := strings.TrimSpace(reply)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("llm decision invalid: %w", err)
+	}
+	return m, nil
+}
+
 // parseCoordReply 解析视觉模型回复中的 x,y 坐标（兼容 x=100,y=200 / 100，200 等写法）。
 func parseCoordReply(reply, what string) (int, int, error) {
 	m := regexp.MustCompile(`(\d+)\s*[,，xX×]\s*[yY]?\s*[=＝]?\s*(\d+)`).FindStringSubmatch(strings.TrimSpace(reply))

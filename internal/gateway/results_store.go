@@ -64,6 +64,12 @@ CREATE TABLE IF NOT EXISTS task_meta (
 CREATE TABLE IF NOT EXISTS metrics (
 	key  TEXT PRIMARY KEY,
 	data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sent_contacts (
+	udid     TEXT NOT NULL,
+	identity TEXT NOT NULL,
+	sent_at  INTEGER NOT NULL,
+	PRIMARY KEY (udid, identity)
 );`); err != nil {
 		slog.Error("results db init failed", "error", err)
 		_ = db.Close()
@@ -325,4 +331,39 @@ func (s *resultsStore) saveMetricsState(f metricsFileState) error {
 	_, err = s.db.Exec(`INSERT INTO metrics(key,data) VALUES('state',?)
 ON CONFLICT(key) DO UPDATE SET data=excluded.data`, string(b))
 	return err
+}
+
+// markSentContacts 记录某设备成功发送给的联系人身份（identity 优先 11 位号码，否则 title 指纹），
+// 用于跨天不重复触达与预算硬约束。批量 upsert，重复身份刷新 sent_at。
+func (s *resultsStore) markSentContacts(udid string, identities []string, at time.Time) {
+	if s == nil || udid == "" || len(identities) == 0 {
+		return
+	}
+	for _, id := range identities {
+		if id == "" {
+			continue
+		}
+		_, _ = s.db.Exec(`INSERT INTO sent_contacts(udid,identity,sent_at) VALUES(?,?,?)
+ON CONFLICT(udid,identity) DO UPDATE SET sent_at=excluded.sent_at`, udid, id, at.Unix())
+	}
+}
+
+// sentContactIdentities 返回某设备自 since 起已发送过的联系人身份集合（用于跳过已发）。
+func (s *resultsStore) sentContactIdentities(udid string, since time.Time) map[string]bool {
+	m := map[string]bool{}
+	if s == nil || udid == "" {
+		return m
+	}
+	rows, err := s.db.Query(`SELECT identity FROM sent_contacts WHERE udid=? AND sent_at>=?`, udid, since.Unix())
+	if err != nil {
+		return m
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil && id != "" {
+			m[id] = true
+		}
+	}
+	return m
 }

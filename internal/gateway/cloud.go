@@ -281,6 +281,9 @@ readLoop:
 				continue
 			}
 			g.Exec.Submit(t)
+			g.Hub.Publish("task:new", map[string]any{
+				"task_id": t.TaskID, "udid": t.UDID, "item_count": len(t.Items), "source": t.Source,
+			})
 		case "task:cancel":
 			var p struct {
 				TaskID string `json:"task_id"`
@@ -290,6 +293,7 @@ readLoop:
 				continue
 			}
 			g.Exec.Cancel(p.TaskID)
+			g.Hub.Publish("task:cancel", map[string]any{"task_id": p.TaskID})
 		case "server:ack":
 			var ack struct {
 				TenantID   string `json:"tenantId"`

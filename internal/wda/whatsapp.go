@@ -152,7 +152,7 @@ func SendMessageWithAssist(ctx context.Context, client *Client, phone, content s
 // （新会话 = 聊天列表中无既有会话、经「新聊天→搜索」打开；用于新会话占比控制）。
 func SendMessageToPhoneInfo(ctx context.Context, client *Client, phone, content string, assist SendAssist) (isNew bool, err error) {
 	if strings.TrimSpace(phone) == "" {
-		_, _, err = SendToChatListFriends(ctx, client, content, assist, 0)
+		_, _, _, err = SendToChatListFriends(ctx, client, content, assist, 0, nil)
 		return false, err
 	}
 	sid, isNew, err := OpenChatForSendWithAssist(ctx, client, phone, assist)
@@ -1152,6 +1152,41 @@ type chatTarget struct {
 	digits string
 }
 
+// chatContactIdentity 返回联系人的稳定身份：优先 11 位国家号，否则原文号码，最后 title 指纹。
+// 用于跨天不重复触达（记录“发给谁”）与跳过已发。
+func chatContactIdentity(t chatTarget) string {
+	if n := nationalDigits(t.digits); len(n) == 11 {
+		return n
+	}
+	if d := strings.TrimSpace(t.digits); d != "" {
+		return d
+	}
+	return "title:" + strings.TrimSpace(t.title)
+}
+
+// filterChatTargets 跳过已发联系人（skip 非空才过滤）。
+func filterChatTargets(ts []chatTarget, skip map[string]bool) []chatTarget {
+	if len(skip) == 0 {
+		return ts
+	}
+	out := make([]chatTarget, 0, len(ts))
+	for _, t := range ts {
+		if skip[chatContactIdentity(t)] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// renderChatContent 渲染群发话术模板变量：${name} / {name} -> 联系人名。
+func renderChatContent(content, name string) string {
+	if name == "" {
+		return content
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(content, "${name}", name), "{name}", name)
+}
+
 func friendChatTargets(cells []sourceCell) []chatTarget {
 	var out []chatTarget
 	seen := map[string]bool{}
@@ -1219,33 +1254,33 @@ func capChatTargets(ts []chatTarget, max int) []chatTarget {
 
 // SendToChatListFriends 无指定号码时：打开聊天列表，向当前能看到的 1:1 好友会话逐条发送。
 // maxFriends≤0 按 30；超过 100 按 100。不滚动加载更早的会话；群/筛选条/未知/自己跳过。
-func SendToChatListFriends(ctx context.Context, client *Client, content string, assist SendAssist, maxFriends int) (sent int, names []string, err error) {
+func SendToChatListFriends(ctx context.Context, client *Client, content string, assist SendAssist, maxFriends int, skip map[string]bool) (sent int, names, identities []string, err error) {
 	sid, _, err := createWhatsAppSession(ctx, client)
 	if err != nil {
-		return 0, nil, fmt.Errorf("create wda session: %w", err)
+		return 0, nil, nil, fmt.Errorf("create wda session: %w", err)
 	}
 	defer func() { _ = client.DeleteSession(context.WithoutCancel(ctx), sid) }()
 	if err := gotoChatList(ctx, client, sid); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	cells, err := sourceCells(ctx, client, sid)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	targets := capChatTargets(friendChatTargets(cells), maxFriends)
+	targets := capChatTargets(filterChatTargets(friendChatTargets(cells), skip), maxFriends)
 	if len(targets) == 0 {
-		return 0, nil, fmt.Errorf("聊天列表未找到好友会话")
+		return 0, nil, nil, fmt.Errorf("聊天列表未找到新发的互友会话")
 	}
 	var lastErr error
 	for _, tgt := range targets {
 		if ctx.Err() != nil {
-			return sent, names, ctx.Err()
+			return sent, names, identities, ctx.Err()
 		}
 		if err := gotoChatList(ctx, client, sid); err != nil {
 			lastErr = err
 			continue
 		}
-		if err := sendOneChatListFriend(ctx, client, sid, tgt, content, assist); err != nil {
+		if err := sendOneChatListFriend(ctx, client, sid, tgt, renderChatContent(content, tgt.title), assist); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1255,6 +1290,7 @@ func SendToChatListFriends(ctx context.Context, client *Client, content string, 
 			name = tgt.title
 		}
 		names = append(names, name)
+		identities = append(identities, chatContactIdentity(tgt))
 	}
 	// 整单结束后回到聊天列表，用户能看到刚发出的最后一条预览。
 	if err := gotoChatList(ctx, client, sid); err != nil && lastErr == nil {
@@ -1262,14 +1298,14 @@ func SendToChatListFriends(ctx context.Context, client *Client, content string, 
 	}
 	if sent == 0 {
 		if lastErr != nil {
-			return 0, nil, lastErr
+			return 0, nil, nil, lastErr
 		}
-		return 0, nil, fmt.Errorf("聊天列表未找到好友会话")
+		return 0, nil, nil, fmt.Errorf("聊天列表未找到新发的互友会话")
 	}
 	if lastErr != nil {
-		return sent, names, fmt.Errorf("已发送 %d/%d，部分失败: %w", sent, len(targets), lastErr)
+		return sent, names, identities, fmt.Errorf("已发送 %d/%d，部分失败: %w", sent, len(targets), lastErr)
 	}
-	return sent, names, nil
+	return sent, names, identities, nil
 }
 
 func waitForComposer(ctx context.Context, client *Client, sid string, timeout time.Duration) bool {

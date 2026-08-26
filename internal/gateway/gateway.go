@@ -17,6 +17,8 @@ type Gateway struct {
 	WDA      *WDAManager
 	Exec     *Executor
 	LLM      *LLMClient
+	Hub      *EventHub
+	Autonomy *AutonomyLoop
 	EasyTier *EasyTierManager
 
 	appCtx       context.Context // 顶层上下文（EnsureCloudLoop 在配置热启用后拉起云循环）
@@ -84,12 +86,18 @@ func (g *Gateway) EnsureCloudLoop() {
 }
 
 func New(cfg *Config, wdaMgr *WDAManager, exec *Executor, llm *LLMClient, et *EasyTierManager) *Gateway {
-	return &Gateway{
-		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, EasyTier: et,
+	g := &Gateway{
+		Cfg: cfg, WDA: wdaMgr, Exec: exec, LLM: llm, Hub: NewEventHub(), EasyTier: et,
 		serials: map[string]string{}, serialTried: map[string]time.Time{},
 		lastStatus: map[string]string{}, cloudReconnect: make(chan struct{}, 1),
 		kickWatchdog: make(chan struct{}, 1),
 	}
+	// 执行器任务收口后通知事件中心（供管理页实时响铃），不阻塞发送链路。
+	if exec != nil {
+		exec.SetEventSink(g.Hub.Publish)
+	}
+	g.Autonomy = NewAutonomyLoop(g)
+	return g
 }
 
 // KickWatchdog 非阻塞触发看护循环立即跑一轮（激活成功后立刻发现 IP）。

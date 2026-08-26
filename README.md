@@ -30,6 +30,7 @@ Go 写的本机网关：USB 发现 iPhone、拉起 WebDriverAgent、管理页、
   - **iOS 17+ USB**：先拉起 `ios tunnel start --userspace` 再 `runwda`。iOS 17.0–17.3 请升到 17.4+。
 - 日常激活（Windows / Mac 相同）：把 Mac 签好的 `wda.ipa` 放到网关状态目录，点 USB 或 Network 激活。未装 Runner 会 `install`，再按所选通道拉起（不要 `wdaproxy`）。
 - **Mac 与 Windows 业务规则相同**（首次授权、USB/Network 互斥、发现、停止）。当前约定见 [docs/design/usb-network-activate.md](docs/design/usb-network-activate.md)。
+- **自主群发（Autonomy）业务两端一致**：自主回路、探活回退（USB 无隧道 → `ip:port`）、已发联系人去重（`sent_contacts`）、`/api/ws` 实时任务通知，Mac/Windows **业务行为一致**。实现层面按平台而定（如 Windows usbmux 套接字 / netmuxd、工具链、USB/Network 激活通道互斥），交付时按平台选用对应实现——与既有"Mac 与 Windows 业务规则相同"原则一致。详见 [docs/design/gateway-autonomous-agent.md](docs/design/gateway-autonomous-agent.md) 与 [docs/design/usb-network-activate.md](docs/design/usb-network-activate.md)。
 - 只有 Mac 上没有 `ios`/`tidevice` 时才回退 `xcodebuild`。不要在缺 iOS Platform 时反复 `build-for-testing`（会报 exit 70）。
 
 ## 快速开始（按系统分开）
@@ -172,3 +173,4 @@ go run ./cmd/wda-probe -wda http://127.0.0.1:18100 \
 | [docs/design/windows-wda-activation.md](docs/design/windows-wda-activation.md) | 激活后端与 tidevice 参数 |
 | [docs/deployment/windows-exe打包.md](docs/deployment/windows-exe打包.md) | 交叉编译 exe |
 | [docs/deployment/macos-dmg打包操作手册.md](docs/deployment/macos-dmg打包操作手册.md) | Mac 桌面端打包 |
+| [docs/deployment/macos-dmg替换操作手册.md](docs/deployment/macos-dmg替换操作手册.md) | Mac 用新包替换 `/Applications` 已装应用（停→建→换→启，含备份/回滚） |
