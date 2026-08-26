@@ -198,6 +198,15 @@ func (g *Gateway) Handler(staticDir string) (http.Handler, error) {
 		writeJSON(w, g.Autonomy.Status())
 	})
 
+	// /api/wda/status 网关当前 WDA 控制器包（版本/签名模式/校验和；供管理页显示"已更新"）。
+	mux.HandleFunc("/api/wda/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONStatus(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, g.WdaStatus())
+	})
+
 	// /api/ws 管理页实时任务事件通道（复用现有 coder/websocket；受同一会话鉴权保护）。
 	mux.HandleFunc("/api/ws", func(w http.ResponseWriter, r *http.Request) {
 		if g.Hub == nil {

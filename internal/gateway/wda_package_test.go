@@ -53,3 +53,19 @@ func TestApplyWdaPackage(t *testing.T) {
 		t.Fatalf("sign_mode = %q", sm)
 	}
 }
+
+// 网关管理页展示的 WDA 包状态。
+func TestWdaStatus(t *testing.T) {
+	state := t.TempDir()
+	cfg, err := OpenConfig(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := New(cfg, nil, nil, nil, nil)
+	_ = cfg.WriteExtra("wda_package_version", "abc12345")
+	_ = cfg.WriteExtra("wda_package_sign_mode", "personal")
+	s := gw.WdaStatus()
+	if s["version"] != "abc12345" || s["sign_mode"] != "personal" || s["installed"] != true {
+		t.Fatalf("bad wda status: %+v", s)
+	}
+}

@@ -243,6 +243,15 @@
       <div class="model-bar-right" id="llmDetail">由平台下发，用于发送键视觉定位兜底</div>
     </div>
 
+    <div class="model-bar">
+      <div class="model-bar-left">
+        <span class="model-bar-title">WDA 控制器</span>
+        <span id="wdaDot" class="dot off"></span>
+        <span id="wdaText" class="model-bar-value">未更新</span>
+      </div>
+      <div class="model-bar-right" id="wdaDetail">平台下发 wda:config 后自动替换，下次激活用新包</div>
+    </div>
+
     <div class="stats">
       <div class="stat"><span class="k"><span class="dot" id="stCloudDot"></span>云通道</span><span class="v" id="stCloud">—</span></div>
       <div class="stat"><span class="k"><span class="dot" id="stOnlineDot"></span>设备在线</span><span class="v" id="stOnline">0</span></div>
@@ -899,7 +908,7 @@ async function loadMetrics(){
   }catch(e){ /* 统计读取失败不打断其他刷新 */ }
 }
 
-async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm(), loadUsbmuxNet(), loadAutonomy(), loadTasks()]); }
+async function refreshAll(){ await Promise.all([loadCloud(), refreshDevices(), loadEt(), loadMetrics(), loadLlm(), loadUsbmuxNet(), loadAutonomy(), loadTasks(), loadWdaStatus()]); }
 
 let usbmuxBusy = false;
 async function loadUsbmuxNet(){
@@ -1046,6 +1055,9 @@ function connectTaskWS(){
       pushNotif('⏹ 任务取消', shortTaskID(p.task_id));
       toast('任务已取消：' + shortTaskID(p.task_id));
       loadTasks();
+    } else if (typ === 'wda:update'){
+      toast('WDA 控制器已更新：v' + shortTaskID(p.version || '') + (p.sign_mode === 'enterprise' ? '（企业）' : '（个人）'));
+      loadWdaStatus();
     }
   };
   taskWS.onclose = () => { taskWS = null; setTimeout(connectTaskWS, 3000); };
@@ -1098,6 +1110,17 @@ async function loadAutonomy(){
       b.textContent += '；上次自主任务(' + s.last_task + ')：' + s.last_task_result;
     }
   }catch(e){}
+}
+async function loadWdaStatus(){
+  try{
+    const s = await (await api('/api/wda/status')).json();
+    const on = !!s.installed;
+    $('wdaDot').className = on ? 'dot on' : 'dot off';
+    $('wdaText').textContent = on ? ('v' + (s.version || '').slice(0, 8) + (s.sign_mode === 'enterprise' ? ' 企业' : ' 个人')) : '未更新';
+    $('wdaDetail').textContent = on
+      ? ('sha256 ' + (s.sha256 || '').slice(0, 16) + ' · 下次激活自动用新包（不影响运行）')
+      : '平台下发 wda:config 后自动替换';
+  }catch(e){ /* 静默 */ }
 }
 async function saveAutonomy(){
   const body = {

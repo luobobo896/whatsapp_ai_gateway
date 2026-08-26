@@ -118,3 +118,45 @@
 | 网关接收替换 | `internal/gateway/wda_package_test.go`（httptest 下载→校验→替换→记录版本）通过 |
 | 认证/生成 profile | fastlane `cert+sigh development` 成功（`UPRYX5Q2RB` / `com.wda.WebRunner Development`） |
 | 注册新 UDID | fastlane `register_device`（API key）跑通 |
+
+## 6. 完整闭环（一键）与可配置化
+
+### 6.1 出包机一条命令（账号类型可切换）
+
+```bash
+# 个人开发者（默认；需 fastlane + API key）
+export FASTLANE_API_KEY_PATH=~/Downloads/AuthKey_Q9NWKB6BCF.p8
+export FASTLANE_ISSUER_ID=d48c0262-bf20-4f97-ae87-38339ca12ba3
+export FASTLANE_KEY_ID=Q9NWKB6BCF
+export FASTLANE_TEAM_ID=A3JP3VUZ78
+export WDA_UPLOAD_URL=https://hk.hsddns.com/api/wda/package
+export WDA_UPLOAD_TOKEN=<平台 Bearer token>
+
+sh scripts/resign-wda-for-udids.sh --mode personal --udids-url https://hk.hsddns.com/api/wda/udids
+
+# 企业开发者（免登记，直接切换）
+sh scripts/resign-wda-for-udids.sh --mode enterprise \
+  --udids ""   # 企业不需要 UDID；需 IDENTITY/PROFILE_SPECIFIER（见 package-wda-ipa.sh）
+```
+
+### 6.2 编排脚本做的事
+
+1. `personal`：`--udids-url` 拉平台全部已登记 UDID → fastlane `register_and_sign` 逐台注册/确保在团队 → `package-wda-ipa.sh SIGN_MODE=personal` 出 `dist/wda.ipa`。
+2. `enterprise`：跳过 UDID → `package-wda-ipa.sh SIGN_MODE=enterprise` 出企业包。
+3. **自动上传**：`curl -F file=@dist/wda.ipa -F sign_mode=$MODE POST $WDA_UPLOAD_URL` → 平台落表 + 广播 `wda:config`。
+
+### 6.3 网关联动（不影响运行）
+
+网关收到 `wda:config` → `ApplyWdaPackage`：下载 → sha256 校验 → 原子替换 `<state>/wda.ipa` → 记录版本 → 管理页 `/api/wda/status` + 前端 toast「WDA 控制器已更新 vX」。**仅在下次激活时用新包，不打断当前任务。**
+
+### 6.4 可配置化清单（不写死）
+
+| 项 | 来源 | 说明 |
+|---|---|---|
+| 账号类型 | 脚本 `--mode personal\|enterprise`（平台 `sign_mode` 一并下发） | 个人=注册+重签；企业=免登记 |
+| Apple 团队/证书 | `FASTLANE_TEAM_ID` + 钥匙串「Apple Development」 | 团队不一致会失败 |
+| API key | `FASTLANE_API_KEY_PATH/ISSUER_ID/KEY_ID`（env） | 不写死；换账号改 env 即可 |
+| 上传目标 | `WDA_UPLOAD_URL/WDA_UPLOAD_TOKEN`（env） | 默认 `https://hk.hsddns.com/api/wda/package` |
+| 存储目录 | 云平台 `WDA_PACKAGES_DIR`（env） | 默认 `wda_packages/` |
+
+> 换到**企业账号**只需：`--mode enterprise` + 企业证书/Profile；个人相关的 `FASTLANE_*` 不需要。平台 `sign_mode` 存的是最后一次上传的类型，网关据此显示"企业/个人"。

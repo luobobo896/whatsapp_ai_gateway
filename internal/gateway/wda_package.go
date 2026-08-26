@@ -91,3 +91,16 @@ func hashHex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
+// WdaStatus 返回网关当前 WDA 控制器包状态（供管理页显示"已更新最新包"，不影响运行）。
+func (g *Gateway) WdaStatus() map[string]any {
+	ver, _ := g.Cfg.ReadExtra("wda_package_version")
+	sha, _ := g.Cfg.ReadExtra("wda_package_sha256")
+	mode, _ := g.Cfg.ReadExtra("wda_package_sign_mode")
+	return map[string]any{
+		"version": ver,
+		"sha256":  sha,
+		"sign_mode": mode,
+		"installed": ver != "",
+	}
+}

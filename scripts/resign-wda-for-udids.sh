@@ -97,42 +97,40 @@ case "$MODE" in
   *) die "MODE 只能是 personal|enterprise" ;;
 esac
 
-# 备份原包后出包
-OUT="dist/wda-${MODE}-$(printf '%s' "$UDIDS" | shasum | cut -c1-8).ipa"
-echo "输出：$OUT"
-
+# 出包：个人先注册新机到团队再重签；企业直接出企业包（--mode 决定，均可配置）。
 if [ "$MODE" = "enterprise" ]; then
+  echo "▶ 企业模式：直接出企业包（免登记，需 IDENTITY/PROFILE，见 package-wda-ipa.sh）"
   SIGN_MODE=enterprise sh scripts/package-wda-ipa.sh
 else
-  # 个人：用 fastlane(API key) 对每个新 UDID 注册到团队，并生成含全部已登记设备的 Development profile
   have fastlane || die "需要 fastlane（brew install fastlane）"
-  : "${FASTLANE_TEAM_ID:=A3JP3VUZ78}"
   [ -n "${FASTLANE_API_KEY_PATH:-}" ] && [ -n "${FASTLANE_ISSUER_ID:-}" ] && [ -n "${FASTLANE_KEY_ID:-}" ] \
-    || die "需要设置 FASTLANE_API_KEY_PATH / FASTLANE_ISSUER_ID / FASTLANE_KEY_ID（见 docs/design/ipad-udid-自动签名分发.md）"
-  echo "▶ 逐台注册新 UDID 到团队并生成 profile……"
+    || die "需要 FASTLANE_API_KEY_PATH / FASTLANE_ISSUER_ID / FASTLANE_KEY_ID（见 docs/design/ipad-udid-自动签名分发.md）"
+  echo "▶ 个人模式：逐台注册新 UDID 到团队（企业免此步）"
   oldIFS=$IFS; IFS=','
   for u in $UDIDS; do
     [ -z "$u" ] && continue
-    CI=1 FASTLANE_SKIP_UPDATE_CHECK=1 FASTLANE_TEAM_ID="$FASTLANE_TEAM_ID" \
+    CI=1 FASTLANE_SKIP_UPDATE_CHECK=1 FASTLANE_TEAM_ID="${FASTLANE_TEAM_ID:-A3JP3VUZ78}" \
       fastlane register_and_sign udid:"$u" name:"user-$(printf '%s' "$u" | cut -c1-8)" \
       >/dev/null 2>&1 \
-      || die "注册/签 profile 失败：$u（确认 API key/Issuer/Apple ID/证书，见 docs/design/ipad-udid-自动签名分发.md）"
+      || die "注册失败：$u（确认 API key/Issuer/证书，见 docs/design/ipad-udid-自动签名分发.md）"
   done
   IFS=$oldIFS
-  PROFILE_FILE="/tmp/wda-auto.mobileprovision/Development_com.wda.WebRunner.mobileprovision"
-  [ -f "$PROFILE_FILE" ] || die "fastlane 未产出 profile：$PROFILE_FILE"
-  echo "profile：$PROFILE_FILE"
-  echo "▶ 下一步：用该 profile 重签 wda.ipa（SignMode=personal；见 docs/design/ipad-udid-自动签名分发.md）"
-  OUT="$PROFILE_FILE"   # 个人模式此处先产出 profile；重签/上传接续
+  echo "▶ 重新签名（xcodebuild，含新登记设备）"
+  SIGN_MODE=personal sh scripts/package-wda-ipa.sh
 fi
 
-if [ -n "$UPLOAD_DST" ]; then
-  echo "▶ 上传到 $UPLOAD_DST"
-  case "$UPLOAD_DST" in
-    scp:*) scp "$OUT" "${UPLOAD_DST#scp:}" ;;
-    *) cp "$OUT" "$UPLOAD_DST" ;;
-  esac
+OUT="dist/wda.ipa"
+[ -f "$OUT" ] || die "未产出 $OUT"
+echo "输出：$OUT  sha256=$(shasum -a 256 "$OUT" | cut -c1-16)"
+
+# 自动上传到云平台 /api/wda/package（可配置 URL/token；未配 token 只打包不上传）
+WDA_UPLOAD_URL="${WDA_UPLOAD_URL:-https://hk.hsddns.com/api/wda/package}"
+if [ -n "${WDA_UPLOAD_TOKEN:-}" ]; then
+  echo "▶ 上传到平台 $WDA_UPLOAD_URL"
+  curl -fsS -X POST \
+    -H "Authorization: Bearer $WDA_UPLOAD_TOKEN" \
+    -F "file=@$OUT" -F "sign_mode=$MODE" \
+    "$WDA_UPLOAD_URL" || die "上传失败（平台需可达且 token 有效）"
 fi
 
-echo "✅ 完成：$OUT"
-echo "   告知用户：在网关里点「更新安装包」替换为本次 ${MODE} 签名包；UDID 需已包含在上面的签名内。"
+echo "✅ 完成：账号类型=$MODE；网关收到 wda:config 后自动替换 state/wda.ipa，下次激活用新包，不影响运行。"
