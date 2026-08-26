@@ -27,7 +27,7 @@ open /Applications/WDAFarmGateway.app
 | 项 | 要求 | 缺失后果 |
 |---|---|---|
 | 工具链 | `go`（版本见 `go.mod`）、Xcode+`swift`、`xcodebuild` | 第 3 步 `swift build` / `go build` 失败 |
-| WDA 工程 | `../whatsapp_ai_ios/WhatsAppDeviceAgent` 存在 | 构建脚本第 3 步 `✗ WDA 工程不存在` 退出 |
+| WDA 工程 | `third_party/WhatsAppDeviceAgent`（git submodule，`git submodule update --init`）存在 | 构建脚本第 3 步 `✗ WDA 工程不存在` 退出 |
 | `/Applications` 可写 | 当前用户对 `/Applications` 有写权限（本仓库场景已验证属主为 `hanson`） | 无法覆盖 app |
 | 运行中实例 | 允许存在，但**必须本次停止** | macOS 覆盖二进制可成功但会留旧进程/状态混乱；Windows 会因文件占用直接失败 |
 

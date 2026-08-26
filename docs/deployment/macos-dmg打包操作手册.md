@@ -54,10 +54,10 @@ sh scripts/build-dmg.sh
 # 0) 环境：Xcode、Go、Homebrew，然后：
 brew install libimobiledevice
 
-# 1) 两个仓库克隆成兄弟目录（脚本默认找 ../whatsapp_ai_ios/WhatsAppDeviceAgent）
-cd ~/work                            # 任意父目录
+# 1) 克隆网关仓库并初始化 WDA 子模块（third_party/WhatsAppDeviceAgent = luobobo896/whatsapp_ai_ios）
 git clone https://github.com/luobobo896/whatsapp_ai_gateway.git
-git clone https://github.com/luobobo896/whatsapp_ai_ios.git
+cd whatsapp_ai_gateway
+git submodule update --init --recursive   # WDA 控制器源码（wda.ipa 的来源）
 
 # 2) 补 easytier 二进制（.gitignore 排除，需手动下载）
 cd whatsapp_ai_gateway
@@ -79,7 +79,7 @@ WDA_PROJECT_DIR=/path/to/WhatsAppDeviceAgent sh scripts/build-dmg.sh
 
 | 变量 | 作用 |
 |---|---|
-| `WDA_PROJECT_DIR` | 覆盖 WDA 工程路径（默认 `../whatsapp_ai_ios/WhatsAppDeviceAgent`） |
+| `WDA_PROJECT_DIR` | 覆盖 WDA 工程路径（默认 `$ROOT/third_party/WhatsAppDeviceAgent`，即 git submodule） |
 | `SKIP_TESTS=1` | 跳过打包前的 go test |
 | `SIGN_IDENTITY` | 指定签名身份；缺省自动找 "Developer ID Application"，找不到则 ad-hoc |
 | `NOTARY_PROFILE` | 设置后对 DMG 公证 + staple；未设则跳过 |
