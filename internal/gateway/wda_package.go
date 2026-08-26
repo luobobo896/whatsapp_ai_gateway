@@ -15,10 +15,11 @@ import (
 
 // gatewayWdaPackage 是云平台 wda:config 的载荷：当前 WDA 控制器包。
 type gatewayWdaPackage struct {
-	Version  string `json:"version"`
-	SignMode string `json:"sign_mode"` // personal | enterprise
-	Download string `json:"download"`  // 相对 /api 或绝对 URL
-	SHA256   string `json:"sha256"`
+	Version       string `json:"version"`
+	SignMode      string `json:"sign_mode"` // personal | enterprise
+	Download      string `json:"download"`  // 相对 /api 或绝对 URL
+	SHA256        string `json:"sha256"`
+	DownloadToken string `json:"download_token,omitempty"` // 平台给网关下载专用 token
 }
 
 // ApplyWdaPackage 下载并原子替换 <state>/wda.ipa，记录当前版本，推送给管理页。
@@ -37,6 +38,9 @@ func (g *Gateway) ApplyWdaPackage(ctx context.Context, pkg gatewayWdaPackage) er
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
+	}
+	if pkg.DownloadToken != "" {
+		req.Header.Set("Authorization", "Bearer "+pkg.DownloadToken)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

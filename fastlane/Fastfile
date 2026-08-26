@@ -45,3 +45,16 @@ lane :register_and_sign do |options|
   )
   puts "✅ 已注册 #{udid} 并生成 profile：/tmp/wda-auto.mobileprovision"
 end
+
+desc "为指定团队生成/导入 Apple Development 证书到钥匙串（identity）"
+lane :cert_force do
+  api_key = {
+    key_id: ENV.fetch("FASTLANE_KEY_ID"),
+    issuer_id: ENV.fetch("FASTLANE_ISSUER_ID"),
+    key: File.read(ENV.fetch("FASTLANE_API_KEY_PATH")),
+    duration: 1200,
+    in_house: false
+  }
+  cert(development: true, api_key: api_key, team_id: ENV.fetch("FASTLANE_TEAM_ID"), force: true)
+  puts "✅ 已生成/导入 #{ENV.fetch('FASTLANE_TEAM_ID')} 的 Apple Development 证书"
+end

@@ -119,6 +119,17 @@
 | 认证/生成 profile | fastlane `cert+sigh development` 成功（`UPRYX5Q2RB` / `com.wda.WebRunner Development`） |
 | 注册新 UDID | fastlane `register_device`（API key）跑通 |
 
+### 5.6 下载鉴权 + 真机闭环（已实测）
+
+- **下载鉴权**：平台 `/api/wda/*` 均要求 `Authorization: Bearer <WDA_PUBLISHER_TOKEN>`（见 `RequireWDAPublisherToken`）。
+  网关收到 `wda:config` 时包内带 `download_token`，`ApplyWdaPackage` 用它下载 → 避免 401。
+- **真机闭环已实测**（本机）：
+  1. 真机 UDID `5060c403…` 识别；
+  2. fastlane `cert+sigh/register` 生成含该机的个人开发 profile（`get-task-allow=1`）；
+  3. `package-wda-ipa.sh` 出 `dist/wda.ipa`：**personal / team=A3JP3VUZ78 / devices=5**，profile **含真机 UDID** → 该机可装；
+  4. 本地 mock 云闭环测试 `TestWdaClosedLoop`：上传→记录版本→下载→网关 `ApplyWdaPackage` 替换 `state/wda.ipa`→`WdaStatus` 显示，全部通过。
+- **平台部署**：需设 `WDA_PUBLISHER_TOKEN`（发布者/下载共用）、`WDA_PACKAGES_DIR`（可写）；部署后 `GET /api/wda/udids` 返回 UDID 供签名脚本。
+
 ## 6. 完整闭环（一键）与可配置化
 
 ### 6.1 出包机一条命令（账号类型可切换）
