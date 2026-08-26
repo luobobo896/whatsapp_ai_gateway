@@ -1,5 +1,5 @@
 // e2e-sim 是针对云平台的端到端测试工具：模拟网关 WSS 客户端 + 平台 REST 调用。
-// 仅用于测试环境（默认 hk.hsddns.com），协议与 internal/gateway/cloud.go 保持一致。
+// 仅用于测试环境（默认 us.hsddns.com），协议与 internal/gateway/cloud.go 保持一致。
 package main
 
 import (
@@ -22,8 +22,8 @@ import (
 )
 
 var (
-	base  = flag.String("base", "https://hk.hsddns.com", "平台基础 URL")
-	wsURL = flag.String("ws", "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws", "网关 WSS 地址")
+	base  = flag.String("base", "https://us.hsddns.com", "平台基础 URL")
+	wsURL = flag.String("ws", "wss://us.hsddns.com/api/ios-agent/v1/gateway/ws", "网关 WSS 地址")
 	email = flag.String("email", "e2e-test@local", "平台账号")
 	pass  = flag.String("pass", "", "平台密码")
 	name  = flag.String("name", "e2e-sim-gw", "网关名")

@@ -293,15 +293,15 @@ func TestSetCloudNormalizesAndOpenHeals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.SetCloud("wss://hk.hsddns.com", "gw", true, ""); err != nil {
+	if err := cfg.SetCloud("wss://other.hsddns.com", "gw", true, ""); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Cloud.WSURL != "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws" {
+	if cfg.Cloud.WSURL != "wss://other.hsddns.com/api/ios-agent/v1/gateway/ws" {
 		t.Errorf("SetCloud did not normalize: %q", cfg.Cloud.WSURL)
 	}
 	cfg.Close()
-	// 库里直接写入裸域名（模拟用户旧数据），重新打开应自动补全并落库
-	c2, err := OpenConfig(dir)
+	// 全新安装（库内无任何 cloud 配置）应 heal 为产品默认（us）。
+	c2, err := OpenConfig(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

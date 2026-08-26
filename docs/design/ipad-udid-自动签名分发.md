@@ -103,10 +103,10 @@
 ```
 新手机插网关
   → UDID 自动落 mobile_devices.udid（已有）
-你（出包 Mac）：curl -s https://hk.hsddns.com/api/wda/udids   # 拉全部已登记 UDID
+你（出包 Mac）：curl -s https://us.hsddns.com/api/wda/udids   # 拉全部已登记 UDID
   → fastlane register_and_sign（已跑通）→ 生成新 wda.ipa
   → curl -F file=@new.ipa -F sign_mode=personal -H "Authorization: Bearer <token>" \
-       POST https://hk.hsddns.com/api/wda/package               # 上传即广播 wda:config
+       POST https://us.hsddns.com/api/wda/package               # 上传即广播 wda:config
 各网关：自动下载替换 wda.ipa → 下次激活用新包；用户视为"安装包已更新"
 ```
 
@@ -140,10 +140,10 @@ export FASTLANE_API_KEY_PATH=~/Downloads/AuthKey_Q9NWKB6BCF.p8
 export FASTLANE_ISSUER_ID=d48c0262-bf20-4f97-ae87-38339ca12ba3
 export FASTLANE_KEY_ID=Q9NWKB6BCF
 export FASTLANE_TEAM_ID=A3JP3VUZ78
-export WDA_UPLOAD_URL=https://hk.hsddns.com/api/wda/package
+export WDA_UPLOAD_URL=https://us.hsddns.com/api/wda/package
 export WDA_UPLOAD_TOKEN=<平台 Bearer token>
 
-sh scripts/resign-wda-for-udids.sh --mode personal --udids-url https://hk.hsddns.com/api/wda/udids
+sh scripts/resign-wda-for-udids.sh --mode personal --udids-url https://us.hsddns.com/api/wda/udids
 
 # 企业开发者（免登记，直接切换）
 sh scripts/resign-wda-for-udids.sh --mode enterprise \
@@ -167,7 +167,7 @@ sh scripts/resign-wda-for-udids.sh --mode enterprise \
 | 账号类型 | 脚本 `--mode personal\|enterprise`（平台 `sign_mode` 一并下发） | 个人=注册+重签；企业=免登记 |
 | Apple 团队/证书 | `FASTLANE_TEAM_ID` + 钥匙串「Apple Development」 | 团队不一致会失败 |
 | API key | `FASTLANE_API_KEY_PATH/ISSUER_ID/KEY_ID`（env） | 不写死；换账号改 env 即可 |
-| 上传目标 | `WDA_UPLOAD_URL/WDA_UPLOAD_TOKEN`（env） | 默认 `https://hk.hsddns.com/api/wda/package` |
+| 上传目标 | `WDA_UPLOAD_URL/WDA_UPLOAD_TOKEN`（env） | 默认 `https://us.hsddns.com/api/wda/package` |
 | 存储目录 | 云平台 `WDA_PACKAGES_DIR`（env） | 默认 `wda_packages/` |
 
 > 换到**企业账号**只需：`--mode enterprise` + 企业证书/Profile；个人相关的 `FASTLANE_*` 不需要。平台 `sign_mode` 存的是最后一次上传的类型，网关据此显示"企业/个人"。

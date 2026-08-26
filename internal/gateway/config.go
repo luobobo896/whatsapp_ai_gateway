@@ -160,7 +160,7 @@ const configSchemaVersion = "1"
 
 // DefaultCloudWSURL 产品默认云平台地址：全新安装（库内无任何 cloud 配置）时预填，
 // 让客户开箱即可登录（登录成功自动签发网关凭证）；已有配置（含迁移导入）不覆盖。
-const DefaultCloudWSURL = "wss://hk.hsddns.com/api/ios-agent/v1/gateway/ws"
+const DefaultCloudWSURL = "wss://us.hsddns.com/api/ios-agent/v1/gateway/ws"
 
 // defaultCloudWSPath 平台网关 WS 的标准路径（用于裸域名输入的自动补全）。
 const defaultCloudWSPath = "/api/ios-agent/v1/gateway/ws"

@@ -126,7 +126,7 @@ OUT="dist/wda.ipa"
 echo "输出：$OUT  sha256=$(shasum -a 256 "$OUT" | cut -c1-16)"
 
 # 自动上传到云平台 /api/wda/package（可配置 URL/token；未配 token 只打包不上传）
-WDA_UPLOAD_URL="${WDA_UPLOAD_URL:-https://hk.hsddns.com/api/wda/package}"
+WDA_UPLOAD_URL="${WDA_UPLOAD_URL:-https://us.hsddns.com/api/wda/package}"
 [ -n "${WDA_API_TOKEN:-}" ] || die "上传需要 WDA_API_TOKEN（平台发布者 token）"
 echo "▶ 上传到平台 $WDA_UPLOAD_URL"
 curl -fsS -X POST \
