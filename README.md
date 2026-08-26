@@ -174,3 +174,4 @@ go run ./cmd/wda-probe -wda http://127.0.0.1:18100 \
 | [docs/deployment/windows-exe打包.md](docs/deployment/windows-exe打包.md) | 交叉编译 exe |
 | [docs/deployment/macos-dmg打包操作手册.md](docs/deployment/macos-dmg打包操作手册.md) | Mac 桌面端打包 |
 | [docs/deployment/macos-dmg替换操作手册.md](docs/deployment/macos-dmg替换操作手册.md) | Mac 用新包替换 `/Applications` 已装应用（停→建→换→启，含备份/回滚） |
+| [docs/deployment/production-release.md](docs/deployment/production-release.md) | 生产发布：交付物清单/校验、用户安装门槛（UDID 限制）、分发方式、验收清单 |
