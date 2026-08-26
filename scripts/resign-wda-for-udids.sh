@@ -5,7 +5,8 @@
 #   sh scripts/resign-wda-for-udids.sh --self-check
 #   sh scripts/resign-wda-for-udids.sh --mode personal --udids "595249...,00008120-..."
 #   sh scripts/resign-wda-for-udids.sh --mode personal --udids-file <file> [--upload <dst>]
-#   sh scripts/resign-wda-for-udids.sh --mode personal --udids-url <云平台返回JSON数组的URL> [--upload <dst>]
+#   sh scripts/resign-wda-for-udids.sh --mode personal --udids-url <云平台返回JSON数组的URL>
+#   需要：FASTLANE_API_KEY_PATH / FASTLANE_ISSUER_ID / FASTLANE_KEY_ID（个人）；WDA_API_TOKEN（平台发布者 token）
 #   sh scripts/resign-wda-for-udids.sh --mode enterprise ...        # 企业免登记
 #
 # 可选 env：APPLE_ID / API_KEY 或 FASTLANE_API_KEY / FASTLANE_TEAM_ID / BUNDLE_ID。
@@ -80,7 +81,8 @@ if [ -z "$UDIDS" ] && [ -n "$UDIDS_FILE" ]; then
 fi
 if [ -z "$UDIDS" ] && [ -n "$UDIDS_URL" ]; then
   have curl || die "需要 curl 拉取云平台 UDID 表"
-  UDIDS="$(curl -fsSL --max-time 20 "$UDIDS_URL" 2>/dev/null | sed -e 's/[[\]"," ]//g' | tr '\n' ',' || die "拉取云平台 UDID 失败")"
+  [ -n "${WDA_API_TOKEN:-}" ] || die "拉取云平台 UDID 需要 WDA_API_TOKEN（平台发布者 token）"
+  UDIDS="$(curl -fsSL --max-time 20 -H "Authorization: Bearer $WDA_API_TOKEN" "$UDIDS_URL" 2>/dev/null | sed -e 's/[[\]"," ]//g' | tr '\n' ',' || die "拉取云平台 UDID 失败")"
 fi
 UDIDS="$(echo "$UDIDS" | tr ',;' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | tr '\n' ',' | sed 's/,$//')"
 
@@ -125,12 +127,11 @@ echo "输出：$OUT  sha256=$(shasum -a 256 "$OUT" | cut -c1-16)"
 
 # 自动上传到云平台 /api/wda/package（可配置 URL/token；未配 token 只打包不上传）
 WDA_UPLOAD_URL="${WDA_UPLOAD_URL:-https://hk.hsddns.com/api/wda/package}"
-if [ -n "${WDA_UPLOAD_TOKEN:-}" ]; then
-  echo "▶ 上传到平台 $WDA_UPLOAD_URL"
-  curl -fsS -X POST \
-    -H "Authorization: Bearer $WDA_UPLOAD_TOKEN" \
-    -F "file=@$OUT" -F "sign_mode=$MODE" \
-    "$WDA_UPLOAD_URL" || die "上传失败（平台需可达且 token 有效）"
-fi
+[ -n "${WDA_API_TOKEN:-}" ] || die "上传需要 WDA_API_TOKEN（平台发布者 token）"
+echo "▶ 上传到平台 $WDA_UPLOAD_URL"
+curl -fsS -X POST \
+  -H "Authorization: Bearer $WDA_API_TOKEN" \
+  -F "file=@$OUT" -F "sign_mode=$MODE" \
+  "$WDA_UPLOAD_URL" || die "上传失败（平台需可达且 token 有效）"
 
 echo "✅ 完成：账号类型=$MODE；网关收到 wda:config 后自动替换 state/wda.ipa，下次激活用新包，不影响运行。"
