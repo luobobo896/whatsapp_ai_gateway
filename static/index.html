@@ -249,7 +249,7 @@
         <span id="wdaDot" class="dot off"></span>
         <span id="wdaText" class="model-bar-value">未更新</span>
       </div>
-      <div class="model-bar-right" id="wdaDetail">平台下发 wda:config 后自动替换，下次激活用新包</div>
+      <div class="model-bar-right" id="wdaDetail" style="display:flex;align-items:center;gap:10px">平台下发 wda:config 后自动替换，下次激活用新包<button class="btn sm ghost" onclick="refreshWda()" title="向云平台请求下发最新 WDA 包">检查更新</button></div>
     </div>
 
     <div class="stats">
@@ -1121,6 +1121,13 @@ async function loadWdaStatus(){
       ? ('sha256 ' + (s.sha256 || '').slice(0, 16) + ' · 下次激活自动用新包（不影响运行）')
       : '平台下发 wda:config 后自动替换';
   }catch(e){ /* 静默 */ }
+}
+async function refreshWda(){
+  try{
+    await api('/api/wda/refresh', {method:'POST'});
+    toast('已向云平台请求下发最新 WDA 包…');
+    setTimeout(loadWdaStatus, 1500);
+  }catch(e){ toast('请求失败（未连接云平台?）'); }
 }
 async function saveAutonomy(){
   const body = {

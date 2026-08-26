@@ -44,6 +44,8 @@ type Gateway struct {
 
 	cloudMu   sync.Mutex
 	cloudConn *websocket.Conn // 当前云通道连接（RestartCloud 用）
+	cloudSendMu sync.Mutex
+	cloudSend   func(string, any) error // 当前云会话的上行发送器（写帧用）
 
 	cloudReconnect chan struct{} // 触发 CloudLoop 立即重连（登录自动签发凭证后）
 	kickWatchdog   chan struct{} // 触发看护循环立即跑一轮（激活成功后立刻发现 IP，不等 30s 周期）
@@ -121,6 +123,28 @@ func (g *Gateway) clearCloudConn(c *websocket.Conn) {
 		g.cloudConn = nil
 	}
 	g.cloudMu.Unlock()
+}
+
+func (g *Gateway) setCloudSend(fn func(string, any) error) {
+	g.cloudSendMu.Lock()
+	g.cloudSend = fn
+	g.cloudSendMu.Unlock()
+}
+
+func (g *Gateway) clearCloudSend() {
+	g.cloudSendMu.Lock()
+	g.cloudSend = nil
+	g.cloudSendMu.Unlock()
+}
+
+// RequestWdaRefresh 向云平台请求当前 wda 包重发（检查/手动更新入口）。
+func (g *Gateway) RequestWdaRefresh() {
+	g.cloudSendMu.Lock()
+	f := g.cloudSend
+	g.cloudSendMu.Unlock()
+	if f != nil {
+		_ = f("gateway:wda/request", map[string]any{})
+	}
 }
 
 // ApplyCloudToken 保存平台签发的网关云凭证并触发重连（登录自动签发时回调）；

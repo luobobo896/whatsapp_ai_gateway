@@ -184,6 +184,7 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 	g.setCloudConn(conn)
 	defer func() {
 		g.clearCloudConn(conn)
+		g.clearCloudSend()
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}()
 	g.SetConnected(true)
@@ -203,6 +204,7 @@ func (g *Gateway) cloudSession(ctx context.Context, url, token, name string) err
 		defer writeMu.Unlock()
 		return wsjson.Write(wctx, conn, newEnvelope(typ, payload))
 	}
+	g.setCloudSend(write)
 	lanKey := lanFingerprint()
 	hello := map[string]string{"name": name, "version": "0.3.0"}
 	if lanKey != "" {
