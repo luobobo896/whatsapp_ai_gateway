@@ -87,6 +87,24 @@ else
   echo "  跳过桌面壳（SKIP_DESKTOP=1）"
 fi
 
+# Windows Authenticode 签名：与 Mac 的 codesign 同业务逻辑（有证书就签，没证书就警告未签名）。
+# 依赖 osslsigncode（macOS: brew install osslsigncode）；证书用 .pfx/.p12，凭证放 scripts/signing.env：
+#   WIN_SIGN_PFX=/path/to/证书.pfx
+#   WIN_SIGN_PASSWORD=证书密码
+echo "▶ [3.5/4] Windows Authenticode 签名"
+if command -v osslsigncode >/dev/null 2>&1 && [ -n "${WIN_SIGN_PFX:-}" ]; then
+  sign_pe() {
+    osslsigncode sign -h sha256 -t "http://timestamp.digicert.com" \
+      -pkcs12 "$WIN_SIGN_PFX" -pass "$WIN_SIGN_PASSWORD" inplace "$1" >/dev/null 2>&1 \
+      && echo "  ✓ sign $1" || echo "  ✗ sign 失败: $1"
+  }
+  sign_pe "$EXE"
+  [ -f "$DESKTOP_EXE" ] && sign_pe "$DESKTOP_EXE"
+  for b in "$OUT"/bin/*.exe; do [ -e "$b" ] && sign_pe "$b"; done
+else
+  echo "  ⚠ 未配置 Windows 签名证书（WIN_SIGN_PFX）或 osslsigncode，产物未签名（SmartScreen 会提示未知发布者）"
+fi
+
 # 使用说明（python 写文件，避免嵌套 heredoc）
 python3 - "$OUT" "$VERSION" "$ARCH" <<"PY"
 import pathlib, sys
