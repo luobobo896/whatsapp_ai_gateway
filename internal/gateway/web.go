@@ -807,6 +807,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 			"wifi_debug":     d.WifiDebug,
+			"net_available":  wifiAuthorized(d.UDID, d.WifiDebug),
 			"need_wifi_auth": needWifiAuth(attached, wifiAuthorized(d.UDID, d.WifiDebug)),
 		})
 		emitted[udidKey(d.UDID)] = true
@@ -863,6 +864,7 @@ func (g *Gateway) deviceList() []map[string]any {
 				"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 				"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 				"wifi_debug":     dev.WifiDebug,
+				"net_available":  wifiAuthorized(d.UDID, dev.WifiDebug),
 				"need_wifi_auth": needWifiAuth(usb, wifiAuthorized(d.UDID, dev.WifiDebug)),
 			})
 			continue
@@ -884,6 +886,7 @@ func (g *Gateway) deviceList() []map[string]any {
 			"tunnel_ready":   needTun && tunnelSet[strings.ToUpper(d.UDID)],
 			"unplug_safe":    unplugSafeFor(d.UDID, iosVer, tunnelSet, netSet),
 			"wifi_debug":     false,
+			"net_available":  wifiAuthorized(d.UDID, false),
 			"need_wifi_auth": needWifiAuth(usb, wifiAuthorized(d.UDID, false)),
 		})
 	}
