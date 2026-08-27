@@ -160,8 +160,8 @@ ls -lh "$EXE" "$OUT/wda-probe.exe" 2>/dev/null || true
 [ -f "$DESKTOP_EXE" ] && ls -lh "$DESKTOP_EXE"
 echo "✅ $OUT"
 
-# 打包成 zip 并自动上传云平台（同平台覆盖，只留最新）；未配置 WDA_PUBLISHER_TOKEN 则跳过。
-if [ -n "${WDA_PUBLISHER_TOKEN:-}" ]; then
+# 打包成 zip 并自动上传云平台（同平台覆盖，只留最新）；WDA_PUBLISHER_TOKEN 与 WDA_API_TOKEN 任一存在即上传。
+if [ -n "${WDA_PUBLISHER_TOKEN:-${WDA_API_TOKEN:-}}" ]; then
   ZIP="${TMPDIR:-/tmp}/wda-gateway-windows-${ARCH}.zip"
   (cd "$OUT" && zip -qr "$ZIP" .)
   sh scripts/upload-release.sh "$ZIP" windows "$ARCH" "$VERSION" || true
